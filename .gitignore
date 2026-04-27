@@ -1,0 +1,64 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime data (filings, ChromaDB, yfinance cache, demo runs, memory JSON)
+data_cache/
+
+# Generated images, blobs, archives — re-allow committed assets under docs/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.tif
+*.webp
+*.ico
+*.svg
+*.pdf
+*.psd
+*.ai
+*.eps
+*.mp3
+*.wav
+*.flac
+*.mp4
+*.mov
+*.avi
+*.webm
+*.mkv
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.dmg
+*.iso
+*.exe
+*.bin
+*.so
+*.dylib
+*.dll
+!docs/**
+
+# OS
+.DS_Store
+Thumbs.db

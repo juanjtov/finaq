@@ -1,0 +1,27 @@
+# Phase 0 — drill-in + Monte Carlo + Streamlit
+langgraph
+langchain-openai
+openai
+chromadb
+yfinance
+sec-edgar-downloader
+streamlit
+numpy
+pandas
+matplotlib
+reportlab
+pydantic
+python-dotenv
+tavily-python
+tenacity
+httpx
+
+# Phase 1 — Notion + Telegram
+notion-client
+python-telegram-bot
+
+# Dev / test
+pytest
+pytest-asyncio
+ruff
+black

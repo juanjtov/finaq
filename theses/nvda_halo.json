@@ -1,0 +1,33 @@
+{
+  "name": "Halo · NVDA",
+  "summary": "Anchor-orbit names whose fortunes are tied to NVDA capex guidance: SMCI and DELL build NVIDIA-spec server systems; VRT and CEG provide data-center cooling and power; ANET, CRDO, and MRVL provide the networking silicon and switch fabric inside AI clusters. The implicit anchor of the thesis is NVDA's quarterly revenue guide and its data-center segment growth — when NVDA's guide moves, these names re-rate together.",
+  "anchor_tickers": ["SMCI", "DELL"],
+  "universe": ["SMCI", "DELL", "VRT", "CEG", "ANET", "CRDO", "MRVL"],
+  "relationships": [
+    {"from": "SMCI", "to": "DELL", "type": "peer", "note": "Both build NVIDIA-spec AI server systems; share customer base"},
+    {"from": "ANET", "to": "MRVL", "type": "supplier", "note": "MRVL DSP / electro-optics into ANET switches"},
+    {"from": "ANET", "to": "CRDO", "type": "peer", "note": "Networking silicon + connectivity ICs for AI fabric"},
+    {"from": "DELL", "to": "MRVL", "type": "customer", "note": "MRVL silicon inside DELL server platforms"},
+    {"from": "SMCI", "to": "MRVL", "type": "customer", "note": "MRVL silicon inside SMCI server platforms"},
+    {"from": "VRT", "to": "CEG", "type": "peer", "note": "Power + cooling stack sold into the same hyperscaler campuses"}
+  ],
+  "material_thresholds": [
+    {"signal": "nvda_data_center_revenue_qoq", "operator": "abs >", "value": 5, "unit": "percent"},
+    {"signal": "nvda_revenue_guide_revision", "operator": "abs >", "value": 3, "unit": "percent"},
+    {"signal": "order_volume_change_qoq", "operator": "abs >", "value": 15, "unit": "percent"},
+    {"signal": "ai_server_backlog", "operator": ">", "value": 1000000000, "unit": "USD"},
+    {"signal": "filing_mentions", "operator": "contains", "value": "data center capex", "unit": "text"},
+    {"signal": "filing_mentions", "operator": "contains", "value": "Blackwell", "unit": "text"},
+    {"signal": "filing_mentions", "operator": "contains", "value": "supply constrained", "unit": "text"},
+    {"signal": "nvda_capex_guidance", "operator": "contains", "value": "raised", "unit": "text"},
+    {"signal": "nvda_capex_guidance", "operator": "contains", "value": "lowered", "unit": "text"},
+
+    {"signal": "fcf_yield", "operator": ">", "value": 7, "unit": "percent"},
+    {"signal": "fcf_yield", "operator": "<", "value": 4, "unit": "percent"},
+    {"signal": "fcf_to_net_income_5yr", "operator": "<", "value": 0.7, "unit": "ratio"},
+    {"signal": "capex_to_revenue_5yr_avg", "operator": ">", "value": 25, "unit": "percent"},
+
+    {"signal": "current_price_vs_p50_mc", "operator": "<", "value": 0.65, "unit": "ratio"},
+    {"signal": "current_price_vs_5yr_pe_avg", "operator": "<", "value": 0.75, "unit": "ratio"}
+  ]
+}

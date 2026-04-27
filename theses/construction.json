@@ -1,0 +1,32 @@
+{
+  "name": "Construction",
+  "summary": "The data-center buildout, IRA-fueled infrastructure, and reshoring story. CAT supplies heavy equipment; MLM supplies aggregates and building materials; EME and FIX provide electrical and HVAC contracting; GVA provides civil construction; PWR builds the power-grid interconnects, substations, and transmission for new-load projects. The thesis is that the next several years of US infrastructure investment compound across all six.",
+  "anchor_tickers": ["CAT", "EME"],
+  "universe": ["CAT", "MLM", "EME", "GVA", "FIX", "PWR"],
+  "relationships": [
+    {"from": "EME", "to": "FIX", "type": "peer", "note": "Electrical (EME) and HVAC (FIX) contractors selling into the same data-center and reshoring jobs"},
+    {"from": "MLM", "to": "GVA", "type": "peer", "note": "Aggregates and civil-construction names benefit from the same federal infra spend"},
+    {"from": "CAT", "to": "EME", "type": "customer", "note": "CAT machines on EME job sites — heavy equipment into electrical-contracting backlog"},
+    {"from": "CAT", "to": "GVA", "type": "customer", "note": "CAT machines on GVA civil sites"},
+    {"from": "PWR", "to": "MLM", "type": "customer", "note": "PWR transmission/substation projects pull aggregates from MLM"},
+    {"from": "PWR", "to": "EME", "type": "peer", "note": "Both build the electrical side of new-load campuses"}
+  ],
+  "material_thresholds": [
+    {"signal": "ira_funding_announcement", "operator": ">", "value": 1000000000, "unit": "USD"},
+    {"signal": "backlog_change_yoy", "operator": "abs >", "value": 20, "unit": "percent"},
+    {"signal": "data_center_construction_contract", "operator": ">", "value": 500000000, "unit": "USD"},
+    {"signal": "transmission_buildout_announcement", "operator": ">", "value": 2000000000, "unit": "USD"},
+    {"signal": "filing_mentions", "operator": "contains", "value": "data center", "unit": "text"},
+    {"signal": "filing_mentions", "operator": "contains", "value": "Inflation Reduction Act", "unit": "text"},
+    {"signal": "filing_mentions", "operator": "contains", "value": "reshoring", "unit": "text"},
+    {"signal": "filing_mentions", "operator": "contains", "value": "interconnect queue", "unit": "text"},
+
+    {"signal": "fcf_yield", "operator": ">", "value": 7, "unit": "percent"},
+    {"signal": "fcf_yield", "operator": "<", "value": 4, "unit": "percent"},
+    {"signal": "fcf_to_net_income_5yr", "operator": "<", "value": 0.7, "unit": "ratio"},
+    {"signal": "capex_to_revenue_5yr_avg", "operator": ">", "value": 25, "unit": "percent"},
+
+    {"signal": "current_price_vs_p50_mc", "operator": "<", "value": 0.65, "unit": "ratio"},
+    {"signal": "current_price_vs_5yr_pe_avg", "operator": "<", "value": 0.75, "unit": "ratio"}
+  ]
+}
