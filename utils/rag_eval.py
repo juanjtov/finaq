@@ -302,3 +302,200 @@ def serialise_judge_report(report: JudgeReport) -> dict:
         "mrr": report.mrr,
         "scores": [asdict(s) for s in report.scores],
     }
+
+
+# --- News-specific Tier 1 + Tier 2 helpers ----------------------------------
+
+
+@dataclass(frozen=True)
+class NewsFaithfulnessResult:
+    items_total: int
+    items_grounded_url: int  # URL (normalised) exists in returned Tavily articles
+    url_grounding_rate: float
+    fabricated_urls: tuple[str, ...]
+
+
+def _canonicalise_url(url: str) -> str:
+    """Strip query string + fragment + trailing slash for URL identity comparison.
+
+    LLMs frequently clean tracking parameters off URLs (`?gaa_at=...`,
+    `?utm_source=...`). The article identity is the scheme + host + path —
+    everything else is presentation. Without this, a real article URL can
+    look like a fabrication just because of `?` differences.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    try:
+        p = urlparse(url.strip())
+        path = (p.path or "").rstrip("/")
+        return urlunparse((p.scheme.lower(), p.netloc.lower(), path, "", "", ""))
+    except Exception:
+        return url.strip()
+
+
+def check_news_faithfulness(
+    items: list[dict], tavily_articles: list[dict]
+) -> NewsFaithfulnessResult:
+    """For News agent output, check that every catalyst/concern's URL came
+    from Tavily.
+
+    Note: we deliberately do NOT check summary grounding here. News summaries
+    are paraphrased on purpose (the Filings prompt requires verbatim quotes;
+    News doesn't). Paraphrase-aware faithfulness is done by RAGAS in Tier 3.
+    Tier 1's job is to catch hard fabrication — a URL the LLM made up — not
+    to second-guess legitimate paraphrasing.
+    """
+    article_url_set = {_canonicalise_url(a.get("url", "")) for a in tavily_articles}
+
+    fabricated_urls: list[str] = []
+    items_grounded_url = 0
+    for it in items:
+        url = it.get("url") or ""
+        if not url:
+            continue
+        if _canonicalise_url(url) in article_url_set:
+            items_grounded_url += 1
+        else:
+            fabricated_urls.append(url)
+
+    n = len([it for it in items if it.get("url")])
+    return NewsFaithfulnessResult(
+        items_total=n,
+        items_grounded_url=items_grounded_url,
+        url_grounding_rate=(items_grounded_url / n) if n else 1.0,
+        fabricated_urls=tuple(fabricated_urls),
+    )
+
+
+_NEWS_RELEVANCE_PROMPT = """You are a relevance grader for an investment-research news pipeline.
+
+You will be given an INVESTMENT THESIS, a TICKER, and a single NEWS ITEM
+that another agent has labelled as a thesis-relevant catalyst or concern.
+Decide whether the labelling is correct.
+
+Your two-part judgment:
+  1. Is the item *materially relevant* to the thesis (would a thesis-aware
+     analyst care about this article)?
+  2. Is the item's sentiment label correct given the article's content?
+     - bull = positive for the thesis (regardless of broader market mood)
+     - bear = negative for the thesis
+     - neutral = factual but doesn't change thesis weight
+
+Output STRICT JSON, rationale BEFORE labels (the model thinks first, commits
+after):
+
+{"rationale": "<one short sentence>", "is_relevant": "RELEVANT|NOT_RELEVANT", "sentiment_correct": "CORRECT|INCORRECT|UNCLEAR"}
+"""
+
+
+@dataclass
+class NewsItemJudgement:
+    item_index: int
+    is_relevant: bool
+    sentiment_correct: bool | None  # None when UNCLEAR
+    rationale: str
+
+
+@dataclass
+class NewsJudgeReport:
+    thesis_name: str
+    ticker: str
+    judgements: list[NewsItemJudgement]
+    relevance_rate: float
+    sentiment_accuracy: float
+
+
+def _judge_news_item(thesis_name: str, ticker: str, item: dict) -> NewsItemJudgement:
+    """Single LLM call to grade one catalyst or concern."""
+    client = get_client()
+    user = (
+        f"INVESTMENT THESIS: {thesis_name}\n"
+        f"TICKER: {ticker}\n\n"
+        f"NEWS ITEM:\n"
+        f"  title:     {item.get('title', '')}\n"
+        f"  summary:   {item.get('summary', '')}\n"
+        f"  sentiment: {item.get('sentiment', '')}\n"
+        f"  url:       {item.get('url', '')}\n"
+    )
+    resp = client.chat.completions.create(
+        model=MODEL_JUDGE,
+        messages=[
+            {"role": "system", "content": _NEWS_RELEVANCE_PROMPT},
+            {"role": "user", "content": user},
+        ],
+        max_tokens=JUDGE_MAX_TOKENS,
+    )
+    raw = (resp.choices[0].message.content or "").strip()
+    if raw.startswith("```"):
+        nl = raw.find("\n")
+        if nl > 0:
+            raw = raw[nl + 1 :]
+        if raw.endswith("```"):
+            raw = raw[:-3].rstrip()
+    try:
+        data = json.loads(raw)
+        is_relevant = str(data.get("is_relevant", "")).upper() == "RELEVANT"
+        sent_raw = str(data.get("sentiment_correct", "")).upper()
+        sentiment_correct = (
+            True if sent_raw == "CORRECT" else False if sent_raw == "INCORRECT" else None
+        )
+        rationale = str(data.get("rationale", ""))
+        return NewsItemJudgement(
+            item_index=-1,
+            is_relevant=is_relevant,
+            sentiment_correct=sentiment_correct,
+            rationale=rationale,
+        )
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        logger.warning(f"[news-judge] failed to parse: {raw[:120]} ({e})")
+        return NewsItemJudgement(
+            item_index=-1,
+            is_relevant=False,
+            sentiment_correct=None,
+            rationale="judge response unparseable",
+        )
+
+
+def judge_news_quality(thesis_name: str, ticker: str, items: list[dict]) -> NewsJudgeReport:
+    """Score every catalyst/concern for relevance + sentiment correctness.
+    One LLM call per item."""
+    judgements: list[NewsItemJudgement] = []
+    for i, item in enumerate(items):
+        j = _judge_news_item(thesis_name, ticker, item)
+        judgements.append(
+            NewsItemJudgement(
+                item_index=i,
+                is_relevant=j.is_relevant,
+                sentiment_correct=j.sentiment_correct,
+                rationale=j.rationale,
+            )
+        )
+
+    relevant_count = sum(1 for j in judgements if j.is_relevant)
+    relevance_rate = relevant_count / max(len(items), 1)
+
+    # Sentiment accuracy is computed only over items the judge actually had an
+    # opinion on (CORRECT / INCORRECT). UNCLEAR items are excluded so they
+    # don't drag the metric down artificially.
+    decided = [j for j in judgements if j.sentiment_correct is not None]
+    sent_correct = sum(1 for j in decided if j.sentiment_correct)
+    sentiment_accuracy = (sent_correct / len(decided)) if decided else 1.0
+
+    return NewsJudgeReport(
+        thesis_name=thesis_name,
+        ticker=ticker,
+        judgements=judgements,
+        relevance_rate=relevance_rate,
+        sentiment_accuracy=sentiment_accuracy,
+    )
+
+
+def serialise_news_judge_report(report: NewsJudgeReport) -> dict:
+    return {
+        "thesis_name": report.thesis_name,
+        "ticker": report.ticker,
+        "items": len(report.judgements),
+        "relevance_rate": report.relevance_rate,
+        "sentiment_accuracy": report.sentiment_accuracy,
+        "judgements": [asdict(j) for j in report.judgements],
+    }

@@ -63,14 +63,16 @@ revisit. If the trigger never fires, we never build it.
 | **Hybrid corpus expansion** (BM25 over the *full* ticker corpus, not just the 60 semantic candidates) | A known-relevant chunk is missed because it's outside the candidate pool. | Re-architect `query()` to fetch the whole filtered corpus first |
 | **Chunk-size tuning** (currently 800 tokens) | Sonnet's synthesis cites mid-sentence-cut chunks OR top-8 are clearly redundant from the same paragraph. | One-line constant change + re-ingest |
 
-### RAG evaluation enhancements (within Tier 1/2/3 already shipped)
+### RAG evaluation enhancements (within Tier 1/2/3 already shipped — covers Filings AND News)
 
 | Item | Trigger | Estimated effort |
 |---|---|---|
-| **`pytest -m eval` nightly on droplet** (Tier 2 + Tier 3 run automatically each night, results persisted to `state.db`, Mission Control shows trend) | After Step 12 droplet deploy, when historical eval data becomes valuable (a few days after deploy). | systemd timer + state.db schema |
+| **`pytest -m eval` nightly on droplet** (Tier 2 + Tier 3 run automatically each night for *every* agent with an eval suite — Filings, News, future Risk/Synthesis. Results persisted to `state.db`, Mission Control shows trend) | After Step 12 droplet deploy, when historical eval data becomes valuable (a few days after deploy). | systemd timer + state.db schema |
 | **Reference-answer generation for context_recall** (Tier 3 currently runs without ground_truth; adding it unlocks `context_recall` metric) | When we want to compare retrieval strategies head-to-head and `context_precision` alone isn't discriminative enough. | Curate reference answers per golden query (~1h) |
 | **Cost-tracking for eval runs** | When monthly eval cost crosses ~$10/mo and we want to budget. | Persist per-run token + dollar cost to `state.db.eval_runs` |
-| **Multi-ticker golden set** (currently NVDA-only) | When ANET / AVGO / other tickers are ingested at scale and we need per-ticker quality bars. | Add 5–8 queries per ticker in `tests/eval/golden_queries.py` |
+| **Multi-ticker golden set** (Filings: NVDA-only; News: NVDA-only) | When ANET / AVGO / other tickers are ingested at scale and we need per-ticker quality bars. | Add 5–8 queries per ticker in `tests/eval/{filings,news}_golden_queries.py` |
+| **Risk-agent eval suite** (Tier 1+2+3 mirror, once Step 5d is real) | When Step 5d real implementation lands. | Mirror the Filings/News suite shape. |
+| **Synthesis-agent eval suite** (Tier 1+2+3 mirror, once Step 7 lands) | When Step 7 ships the Opus synthesis. | Mirror existing suites. |
 
 ### Fundamentals agent (within Step 5a's scope, may revisit when Step 5d lands)
 

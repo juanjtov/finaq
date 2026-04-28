@@ -133,6 +133,7 @@ class NewsItem(BaseModel):
     summary: str
     sentiment: NewsSentiment
     url: str
+    as_of: str | None = None  # ISO date — usually `published_date` from the news source
 
 
 class NewsOutput(BaseModel):
