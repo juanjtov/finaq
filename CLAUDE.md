@@ -20,7 +20,7 @@ These are non-negotiable for the hackathon build. Do not invent alternatives wit
 - **Notion as memory of record (post-hackathon).** For Phase 0, write to local `JSON` files in `./data_cache/memory/` with the same shape Notion will eventually hold.
 - **Telegram for alerts (post-hackathon).** For Phase 0, alerts surface inside the Streamlit dashboard only.
 - **Streamlit for the demo UI.** Don't reach for FastAPI + React. The demo runs locally.
-- **Local-first.** The hackathon build runs on the developer's laptop. Do not introduce hosted dependencies (Cloud Run, Vercel, etc.).
+- **Local-first.** The hackathon build runs on the developer's laptop. Do not introduce hosted dependencies (Cloud Run, Vercel, etc.). `langgraph dev` for LangGraph Studio is local-only and explicitly allowed; LangSmith tracing (opt-in via `LANGSMITH_TRACING=true`) is the only outbound observability dependency permitted in Phase 0. Phase 1 hosting on a single DigitalOcean droplet is the eventual deployment target — single-box, single-tenant, no managed services beyond what's in `requirements.txt`.
 
 ## 3. Model routing
 
@@ -461,6 +461,21 @@ A step is not done until its test plan passes end to end:
 ### 16.6 Secrets
 
 - Never log API keys, never write them to disk outside `.env`. `.env` is gitignored. `.env.example` contains placeholder values only.
+
+### 16.7 Observability (mission control)
+
+Single-user single-box system. No managed observability (Sentry/DataDog/Grafana) — overkill. Two layers + four read surfaces:
+
+- **LangSmith tracing** (auto-instruments every LLM call when `LANGSMITH_TRACING=true`). Free tier covers personal use. Project name `finaq` by default. Used for per-LLM-call latency, tokens, full prompt/response, replay.
+- **Local SQLite at `data_cache/state.db`** — single source of truth for graph_runs, node_runs, alerts, triage_runs, errors, daily_cost. Every agent writes through `data/state.py.record_*` from inside `_safe_node`. Schema migration is idempotent. Backed up with the rest of `data_cache/` on the droplet.
+
+Read surfaces (each unlocked by an existing build step):
+- **Streamlit Mission Control page** (Step 8, `ui/pages/mission_control.py`) — visual dashboard.
+- **`/status` Telegram command** (Step 10) — text summary from your phone.
+- **Healthchecks.io ping** (Step 11) — liveness alert when Triage stops firing.
+- **systemd journalctl** (Step 12, droplet) — SSH-time deep dive.
+
+Logging via stdlib `logging` is for *operational* output (what just happened); telemetry via `data/state.py` is for *historical / aggregate* queries. Don't conflate the two.
 
 ---
 

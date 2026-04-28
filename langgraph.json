@@ -1,0 +1,8 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "drill_in": "./agents/__init__.py:build_graph"
+  },
+  "env": ".env",
+  "python_version": "3.12"
+}
