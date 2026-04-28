@@ -42,6 +42,40 @@ def test_edgar_existing_filings_lists_full_submissions(tmp_path, monkeypatch):
     assert all(p.name == "full-submission.txt" for p in paths)
 
 
+def test_edgar_parse_filed_date_extracts_iso_date(tmp_path):
+    """SGML header line 'FILED AS OF DATE: 20240221' → '2024-02-21'."""
+    from data.edgar import parse_filed_date
+
+    sgml = (
+        "<SEC-DOCUMENT>0001045810-24-000023.txt : 20240221\n"
+        "<SEC-HEADER>\n"
+        "ACCESSION NUMBER:		0001045810-24-000023\n"
+        "CONFORMED SUBMISSION TYPE:	10-K\n"
+        "PUBLIC DOCUMENT COUNT:		104\n"
+        "CONFORMED PERIOD OF REPORT:	20240128\n"
+        "FILED AS OF DATE:		20240221\n"
+        "DATE AS OF CHANGE:		20240221\n"
+    )
+    path = tmp_path / "full-submission.txt"
+    path.write_text(sgml)
+    assert parse_filed_date(path) == "2024-02-21"
+
+
+def test_edgar_parse_filed_date_returns_none_when_header_missing():
+    from data.edgar import parse_filed_date
+
+    nonexistent = Path("/tmp/this-file-does-not-exist-finaq.txt")
+    assert parse_filed_date(nonexistent) is None
+
+
+def test_edgar_parse_filed_date_returns_none_when_pattern_absent(tmp_path):
+    from data.edgar import parse_filed_date
+
+    path = tmp_path / "full-submission.txt"
+    path.write_text("Random text with no SGML header at all\n" * 20)
+    assert parse_filed_date(path) is None
+
+
 # --- data/yfin.py ------------------------------------------------------------
 
 
@@ -56,13 +90,37 @@ def test_yfin_cache_hit_within_ttl(tmp_path, monkeypatch):
         "cash_flow": {},
         "info": {"longName": "Stub"},
     }
-    (tmp_path / "STUB.json").write_text(json.dumps(payload))
+    on_disk = {**payload, "_format_version": yfin.CACHE_FORMAT_VERSION}
+    (tmp_path / "STUB.json").write_text(json.dumps(on_disk))
 
     # Cache file is fresh by default (just written).
     with patch.object(yfin, "_fetch_from_yfinance") as mock_fetch:
         result = yfin.get_financials("STUB")
     mock_fetch.assert_not_called()
+    # Version field is internal — should be hidden from consumers.
+    assert "_format_version" not in result
     assert result == payload
+
+
+def test_yfin_cache_with_old_format_version_is_invalidated(tmp_path, monkeypatch):
+    """A cache file from before the format bump must not be used silently."""
+    from data import yfin
+
+    monkeypatch.setattr(yfin, "CACHE_DIR", tmp_path)
+    stale_payload = {
+        "price_history_5y": {},
+        "income_stmt": {"a": 1},
+        "balance_sheet": {},
+        "cash_flow": {},
+        "info": {},
+        "_format_version": yfin.CACHE_FORMAT_VERSION - 1,  # one version old
+    }
+    (tmp_path / "STUB.json").write_text(json.dumps(stale_payload))
+
+    with patch.object(yfin, "_fetch_from_yfinance") as mock_fetch:
+        mock_fetch.return_value = {k: {} for k in yfin.EXPECTED_KEYS}
+        yfin.get_financials("STUB")
+    mock_fetch.assert_called_once()
 
 
 def test_yfin_cache_miss_after_ttl(tmp_path, monkeypatch):

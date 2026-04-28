@@ -2,12 +2,15 @@
 
 Wraps `sec-edgar-downloader` with an idempotent `download_filings` that always
 fetches the 2 most recent 10-Ks and 4 most recent 10-Qs per ticker by default.
+Also exposes `parse_filed_date` which extracts the SEC-reported filing date
+from a submission's SGML header — used by ChromaDB metadata for freshness.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 from pathlib import Path
 
 from sec_edgar_downloader import Downloader
@@ -16,6 +19,30 @@ from utils import logger, tenacity_retry
 
 EDGAR_DIR = Path("data_cache/edgar")
 DEFAULT_LIMITS: dict[str, int] = {"10-K": 2, "10-Q": 4}
+
+# SEC SGML headers contain a "FILED AS OF DATE:	YYYYMMDD" line within the first
+# ~50 lines of full-submission.txt.
+_FILED_DATE_RE = re.compile(r"FILED AS OF DATE:\s*(\d{8})")
+_HEADER_SCAN_LINES = 60
+
+
+def parse_filed_date(filing_path: Path) -> str | None:
+    """Extract the SEC-reported filing date from an SGML submission.
+
+    Returns an ISO date string (YYYY-MM-DD) or None if not parseable.
+    """
+    try:
+        with open(filing_path, encoding="utf-8", errors="ignore") as f:
+            head = "".join(line for _, line in zip(range(_HEADER_SCAN_LINES), f, strict=False))
+    except OSError:
+        return None
+    m = _FILED_DATE_RE.search(head)
+    if not m:
+        return None
+    raw = m.group(1)  # e.g. "20240221"
+    if len(raw) != 8:
+        return None
+    return f"{raw[0:4]}-{raw[4:6]}-{raw[6:8]}"
 
 
 def _parse_user_agent() -> tuple[str, str]:

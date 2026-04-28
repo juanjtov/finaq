@@ -16,6 +16,7 @@ from bs4 import BeautifulSoup
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from chromadb.config import Settings
 
+from data.edgar import parse_filed_date
 from utils import logger
 from utils.models import MODEL_EMBEDDINGS
 from utils.openrouter import get_client
@@ -136,6 +137,7 @@ def ingest_filing(ticker: str, filing_path: Path) -> int:
         return 0
 
     filing_type, accession = _filing_meta_from_path(filing_path)
+    filed_date = parse_filed_date(filing_path) or ""  # ChromaDB metadata can't hold None
     encoder = tiktoken.get_encoding(TOKENIZER)
     coll = _get_collection()
 
@@ -154,6 +156,7 @@ def ingest_filing(ticker: str, filing_path: Path) -> int:
                     "ticker": ticker,
                     "filing_type": filing_type,
                     "accession": accession,
+                    "filed_date": filed_date,
                     "item_code": code,
                     "item_label": label,
                 }

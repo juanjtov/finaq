@@ -190,3 +190,20 @@ def test_evidence_and_news_item_minimal_construction():
     assert e.source == "edgar"
     n = NewsItem(title="t", summary="s", sentiment="bull", url="https://x")
     assert n.sentiment == "bull"
+
+
+def test_evidence_accepts_optional_as_of_freshness_marker():
+    """The new `as_of` field carries a date/datetime so downstream agents can
+    weight stale evidence less."""
+    e = Evidence(
+        source="edgar",
+        accession="0001045810-24-000023",
+        item="1A",
+        excerpt="capacity constrained",
+        as_of="2024-02-21",
+    )
+    assert e.as_of == "2024-02-21"
+
+    # Optional — schema must still accept evidence without it (e.g., for derived metrics).
+    e2 = Evidence(source="yfinance", note="historical CAGR")
+    assert e2.as_of is None

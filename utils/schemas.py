@@ -79,7 +79,12 @@ class Thesis(BaseModel):
 
 
 class Evidence(BaseModel):
-    """A flexible citation usable by any agent (yfinance KPI, EDGAR chunk, news URL)."""
+    """A flexible citation usable by any agent (yfinance KPI, EDGAR chunk, news URL).
+
+    `as_of` is a freshness marker: ISO date string of when the underlying data
+    was captured (yfinance fetch time / SEC filed_date / news published_date).
+    Downstream agents (Risk, Synthesis) use it to weight stale evidence less.
+    """
 
     source: str  # "yfinance" | "edgar" | "tavily" | "chromadb" | ...
     accession: str | None = None
@@ -87,6 +92,7 @@ class Evidence(BaseModel):
     url: str | None = None
     excerpt: str | None = None
     note: str | None = None
+    as_of: str | None = None  # ISO date or datetime (e.g. "2026-04-27" or "2026-04-27T18:30:00Z")
 
 
 class Projections(BaseModel):

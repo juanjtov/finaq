@@ -16,6 +16,7 @@ import contextlib
 import json
 import sys
 import time
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ NODE = "fundamentals"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 SYSTEM_PROMPT = (PROMPTS_DIR / "fundamentals.md").read_text()
 LLM_MAX_TOKENS = 2000
+STALE_DATA_DAYS = 7  # if yfinance fetched_at is older than this, log a warning
 
 # Generic-mediocre-business "no information" baseline — anchored to long-run
 # US nominal GDP growth (~5%), industrial-average operating margin (~10%), and
@@ -69,6 +71,26 @@ def _derive_fallback_projections(kpis: dict) -> Projections:
 
 # --- KPI computation ---------------------------------------------------------
 
+# yfinance line-item names occasionally vary across tickers and reporting periods.
+# These aliases let compute_kpis resolve a canonical concept against the first
+# matching key — order matters (most-common name first).
+INCOME_FIELD_ALIASES: dict[str, list[str]] = {
+    "revenue": ["Total Revenue", "Operating Revenue", "Revenue"],
+    "gross_profit": ["Gross Profit"],
+    "operating_income": ["Operating Income", "Total Operating Income As Reported", "EBIT"],
+    "net_income": [
+        "Net Income",
+        "Net Income Common Stockholders",
+        "Net Income Continuous Operations",
+        "Net Income From Continuing Operation Net Minority Interest",
+    ],
+}
+
+CASH_FLOW_FIELD_ALIASES: dict[str, list[str]] = {
+    "free_cash_flow": ["Free Cash Flow"],
+    "capital_expenditure": ["Capital Expenditure", "Capital Expenditures", "Purchase Of PPE"],
+}
+
 
 def _safe_div(num: float | None, den: float | None) -> float | None:
     if num is None or den is None or den == 0:
@@ -85,11 +107,36 @@ def _last(d: dict) -> dict | None:
     return d[max(d.keys())]
 
 
+def _first_non_null(row: dict, candidate_keys: list[str]) -> Any | None:
+    """Return the first value in `row` whose key matches any of `candidate_keys`
+    and is not None / NaN. yfinance occasionally varies line-item names; this
+    keeps compute_kpis robust to that drift."""
+    for key in candidate_keys:
+        v = row.get(key)
+        if v is not None and v == v:  # filters NaN (NaN != NaN)
+            return v
+    return None
+
+
+def _income_field(row: dict, canonical: str) -> Any | None:
+    return _first_non_null(row, INCOME_FIELD_ALIASES.get(canonical, [canonical]))
+
+
+def _cash_flow_field(row: dict, canonical: str) -> Any | None:
+    return _first_non_null(row, CASH_FLOW_FIELD_ALIASES.get(canonical, [canonical]))
+
+
 def compute_kpis(financials: dict) -> dict[str, Any]:
     """Distill a yfinance bundle into thesis-aware KPIs.
 
     Missing inputs degrade gracefully — keys only appear when there's enough
-    data to compute them honestly.
+    data to compute them honestly. Field-name variations across tickers are
+    handled via INCOME_FIELD_ALIASES and CASH_FLOW_FIELD_ALIASES.
+
+    Two freshness markers are always included when their inputs are present:
+      - data_fetched_at — when yfinance was last hit (UTC ISO string)
+      - latest_fiscal_period — date of the most recent income-statement record
+    Downstream prompt + Synthesis use these to reason about staleness.
     """
     kpis: dict[str, Any] = {}
     income = financials.get("income_stmt") or {}
@@ -97,38 +144,57 @@ def compute_kpis(financials: dict) -> dict[str, Any]:
     info = financials.get("info") or {}
     price_hist = financials.get("price_history_5y") or {}
 
+    # Freshness metadata — surfaced first so it's at the top of the kpis dict
+    # rendered in the LLM prompt.
+    fetched_at = financials.get("fetched_at")
+    if fetched_at:
+        kpis["data_fetched_at"] = fetched_at
+
     inc_dates = sorted(income.keys())
     cf_dates = sorted(cash_flow.keys())
 
-    # 5-year revenue CAGR
-    if len(inc_dates) >= 2:
-        rev_first = income[inc_dates[0]].get("Total Revenue")
-        rev_last = income[inc_dates[-1]].get("Total Revenue")
-        n_years = len(inc_dates) - 1
-        if rev_first and rev_last and rev_first > 0 and n_years > 0:
-            with contextlib.suppress(ValueError, OverflowError):
-                kpis["revenue_5y_cagr"] = (rev_last / rev_first) ** (1 / n_years) - 1
+    if inc_dates:
+        # ISO date prefix only (e.g., "2026-01-31"), strip any time component.
+        kpis["latest_fiscal_period"] = inc_dates[-1][:10]
+
+    # Revenue CAGR — use first/last *populated* dates, not the absolute earliest /
+    # latest, because yfinance occasionally has nulls in the oldest record.
+    rev_pairs: list[tuple[str, float]] = []
+    for d in inc_dates:
+        rev = _income_field(income[d], "revenue")
+        if rev and rev > 0:
+            rev_pairs.append((d, rev))
+    if len(rev_pairs) >= 2:
+        rev_first = rev_pairs[0][1]
+        rev_last = rev_pairs[-1][1]
+        n_years = len(rev_pairs) - 1
+        with contextlib.suppress(ValueError, OverflowError):
+            kpis["revenue_5y_cagr"] = (rev_last / rev_first) ** (1 / n_years) - 1
 
     # Latest revenue + margins
     last_inc = _last(income)
     if last_inc:
-        rev = last_inc.get("Total Revenue")
+        rev = _income_field(last_inc, "revenue")
         if rev:
             kpis["revenue_latest"] = rev
-        kpis["gross_margin_latest"] = _safe_div(last_inc.get("Gross Profit"), rev)
-        kpis["operating_margin_latest"] = _safe_div(last_inc.get("Operating Income"), rev)
+        kpis["gross_margin_latest"] = _safe_div(_income_field(last_inc, "gross_profit"), rev)
+        kpis["operating_margin_latest"] = _safe_div(
+            _income_field(last_inc, "operating_income"), rev
+        )
 
     # 5y average margins
     gross_margins = []
     op_margins = []
     for d in inc_dates:
         row = income[d]
-        rev = row.get("Total Revenue")
+        rev = _income_field(row, "revenue")
         if rev and rev > 0:
-            if row.get("Gross Profit"):
-                gross_margins.append(row["Gross Profit"] / rev)
-            if row.get("Operating Income"):
-                op_margins.append(row["Operating Income"] / rev)
+            gp = _income_field(row, "gross_profit")
+            if gp:
+                gross_margins.append(gp / rev)
+            oi = _income_field(row, "operating_income")
+            if oi:
+                op_margins.append(oi / rev)
     if gross_margins:
         kpis["gross_margin_5yr_avg"] = sum(gross_margins) / len(gross_margins)
     if op_margins:
@@ -136,12 +202,14 @@ def compute_kpis(financials: dict) -> dict[str, Any]:
 
     # FCF — latest + 5y avg
     last_cf = _last(cash_flow)
-    fcf_latest = last_cf.get("Free Cash Flow") if last_cf else None
+    fcf_latest = _cash_flow_field(last_cf, "free_cash_flow") if last_cf else None
     if fcf_latest:
         kpis["fcf_latest"] = fcf_latest
 
     fcfs = [
-        cash_flow[d].get("Free Cash Flow") for d in cf_dates if cash_flow[d].get("Free Cash Flow")
+        _cash_flow_field(cash_flow[d], "free_cash_flow")
+        for d in cf_dates
+        if _cash_flow_field(cash_flow[d], "free_cash_flow")
     ]
     if fcfs:
         kpis["fcf_5yr_avg"] = sum(fcfs) / len(fcfs)
@@ -151,18 +219,22 @@ def compute_kpis(financials: dict) -> dict[str, Any]:
     if fcf_latest and market_cap and market_cap > 0:
         kpis["fcf_yield"] = (fcf_latest / market_cap) * 100  # percent
 
-    nis = [income[d].get("Net Income") for d in inc_dates if income[d].get("Net Income")]
+    nis = [
+        _income_field(income[d], "net_income")
+        for d in inc_dates
+        if _income_field(income[d], "net_income")
+    ]
     if fcfs and nis and sum(nis) != 0:
         kpis["fcf_to_net_income_5yr"] = sum(fcfs) / sum(nis)
 
     capex_pct = []
     for d in cf_dates:
-        capex = cash_flow[d].get("Capital Expenditure")
-        # Find revenue for the same fiscal year (date strings start with YYYY)
+        capex = _cash_flow_field(cash_flow[d], "capital_expenditure")
         if capex is not None:
+            # Find revenue for the same fiscal year (date strings start with YYYY).
             year = d[:4]
             matching_rev = next(
-                (income[d2].get("Total Revenue") for d2 in inc_dates if d2[:4] == year),
+                (_income_field(income[d2], "revenue") for d2 in inc_dates if d2[:4] == year),
                 None,
             )
             if matching_rev and matching_rev > 0:
@@ -170,7 +242,7 @@ def compute_kpis(financials: dict) -> dict[str, Any]:
     if capex_pct:
         kpis["capex_to_revenue_5yr_avg"] = sum(capex_pct) / len(capex_pct)
 
-    # Multiples + price + shares
+    # Multiples + price + shares (info dict — flat, no orientation issues)
     if info.get("trailingPE"):
         kpis["pe_trailing"] = info["trailingPE"]
     if info.get("forwardPE"):
@@ -205,7 +277,16 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _build_user_prompt(ticker: str, thesis: dict, kpis: dict) -> str:
+    today_iso = date.today().isoformat()
+    fetched_at = kpis.get("data_fetched_at", "unknown")
+    latest_period = kpis.get("latest_fiscal_period", "unknown")
     return (
+        "AS OF — freshness markers for the data below:\n"
+        f"  TODAY:                     {today_iso}\n"
+        f"  YFINANCE SNAPSHOT TAKEN:   {fetched_at}\n"
+        f"  LATEST FISCAL PERIOD END:  {latest_period}\n"
+        "Reason about freshness explicitly: if a KPI is materially stale relative\n"
+        "to today, say so in your summary; weight stale signals less.\n\n"
         f"TICKER UNDER ANALYSIS: {ticker}\n\n"
         f"ACTIVE THESIS: {thesis.get('name', 'unknown')}\n"
         f"THESIS SUMMARY: {thesis.get('summary', '')}\n"
@@ -217,6 +298,24 @@ def _build_user_prompt(ticker: str, thesis: dict, kpis: dict) -> str:
         f"{json.dumps(kpis, indent=2, default=str)}\n\n"
         f"PRODUCE YOUR ANALYSIS NOW. STRICT JSON ONLY."
     )
+
+
+def _check_freshness(financials: dict) -> str | None:
+    """Return a warning string if the yfinance snapshot is older than STALE_DATA_DAYS,
+    else None. Used by run() to populate the `errors` field as a soft signal."""
+    fetched_at = financials.get("fetched_at")
+    if not fetched_at:
+        return None
+    try:
+        fetched_dt = datetime.fromisoformat(fetched_at)
+        if fetched_dt.tzinfo is None:
+            fetched_dt = fetched_dt.replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    age = datetime.now(UTC) - fetched_dt
+    if age > timedelta(days=STALE_DATA_DAYS):
+        return f"yfinance data is {age.days} days old (threshold {STALE_DATA_DAYS}d)"
+    return None
 
 
 def _call_llm(ticker: str, thesis: dict, kpis: dict) -> dict:
@@ -252,6 +351,11 @@ async def run(state: FinaqState) -> dict:
         financials = {}
     if financials.get("errors"):
         errors.extend(financials["errors"])
+
+    # Soft freshness guardrail — record stale data as a warning, don't block.
+    if stale := _check_freshness(financials):
+        logger.warning(f"[fundamentals] {ticker}: {stale}")
+        errors.append(stale)
 
     kpis = compute_kpis(financials)
 

@@ -12,7 +12,9 @@ import pytest
 
 from agents.fundamentals import (
     NULL_HYPOTHESIS_PROJECTIONS,
+    STALE_DATA_DAYS,
     _build_user_prompt,
+    _check_freshness,
     _derive_fallback_projections,
     _strip_code_fences,
     compute_kpis,
@@ -129,11 +131,166 @@ def test_compute_kpis_does_not_include_keys_when_data_missing():
     assert "fcf_to_net_income_5yr" not in kpis  # no NI / FCF
 
 
-def test_compute_kpis_ignores_zero_division_in_revenue_cagr():
-    fin = _fake_financials(revenues=[0, 100, 200])
+def test_compute_kpis_skips_leading_nulls_for_revenue_cagr():
+    """yfinance sometimes has nulls in the oldest record. CAGR should compute
+    over the populated subset rather than fail."""
+    fin = _fake_financials(revenues=[0, 100, 200])  # 0 treated as missing
     kpis = compute_kpis(fin)
-    # First revenue is zero → CAGR undefined, key absent
+    # CAGR over [100, 200] with n_years=1 → 100% growth
+    assert kpis["revenue_5y_cagr"] == pytest.approx(1.0)
+
+
+def test_compute_kpis_omits_revenue_cagr_when_only_one_period_has_data():
+    fin = _fake_financials(revenues=[0, 0, 100])  # only one populated date
+    kpis = compute_kpis(fin)
     assert "revenue_5y_cagr" not in kpis
+
+
+def test_compute_kpis_resolves_alternate_revenue_field_name():
+    """yfinance occasionally uses 'Operating Revenue' instead of 'Total Revenue'."""
+    income = {
+        "2023-12-31": {"Operating Revenue": 100, "Operating Income": 20},
+        "2024-12-31": {"Operating Revenue": 200, "Operating Income": 50},
+    }
+    fin = {"income_stmt": income, "cash_flow": {}, "info": {}, "price_history_5y": {}}
+    kpis = compute_kpis(fin)
+    assert "revenue_latest" in kpis
+    assert kpis["revenue_latest"] == 200
+    assert "operating_margin_latest" in kpis  # 50/200 = 0.25
+    assert kpis["operating_margin_latest"] == pytest.approx(0.25)
+
+
+def test_compute_kpis_resolves_alternate_capex_field_name():
+    """Some tickers report 'Capital Expenditures' (plural) instead of 'Capital Expenditure'."""
+    income = {
+        "2023-12-31": {"Total Revenue": 100},
+        "2024-12-31": {"Total Revenue": 200},
+    }
+    cash_flow = {
+        "2023-12-31": {"Capital Expenditures": -10},
+        "2024-12-31": {"Capital Expenditures": -20},
+    }
+    fin = {
+        "income_stmt": income,
+        "cash_flow": cash_flow,
+        "info": {},
+        "price_history_5y": {},
+    }
+    kpis = compute_kpis(fin)
+    assert "capex_to_revenue_5yr_avg" in kpis
+    # 10% then 10% → avg 10%
+    assert kpis["capex_to_revenue_5yr_avg"] == pytest.approx(10.0)
+
+
+def test_compute_kpis_resolves_alternate_net_income_field_name():
+    income = {
+        "2023-12-31": {"Total Revenue": 100, "Net Income Common Stockholders": 50},
+        "2024-12-31": {"Total Revenue": 200, "Net Income Common Stockholders": 80},
+    }
+    cash_flow = {
+        "2023-12-31": {"Free Cash Flow": 60},
+        "2024-12-31": {"Free Cash Flow": 100},
+    }
+    fin = {
+        "income_stmt": income,
+        "cash_flow": cash_flow,
+        "info": {},
+        "price_history_5y": {},
+    }
+    kpis = compute_kpis(fin)
+    # sum(fcf)=160 / sum(ni)=130 ≈ 1.23
+    assert kpis["fcf_to_net_income_5yr"] == pytest.approx(160 / 130)
+
+
+def test_first_non_null_returns_first_match():
+    from agents.fundamentals import _first_non_null
+
+    row = {"Total Revenue": None, "Operating Revenue": 42, "Revenue": 99}
+    assert _first_non_null(row, ["Total Revenue", "Operating Revenue", "Revenue"]) == 42
+
+
+def test_first_non_null_filters_nan():
+    """NaN values from pandas should be treated as missing."""
+    from agents.fundamentals import _first_non_null
+
+    nan = float("nan")
+    row = {"Total Revenue": nan, "Operating Revenue": 100}
+    assert _first_non_null(row, ["Total Revenue", "Operating Revenue"]) == 100
+
+
+def test_first_non_null_returns_none_when_no_match():
+    from agents.fundamentals import _first_non_null
+
+    assert _first_non_null({"foo": 1}, ["bar", "baz"]) is None
+
+
+# --- Freshness markers -------------------------------------------------------
+
+
+def test_compute_kpis_surfaces_data_fetched_at_when_present():
+    fin = {
+        "fetched_at": "2026-04-27T18:30:00+00:00",
+        "income_stmt": {"2024-12-31": {"Total Revenue": 100}},
+        "cash_flow": {},
+        "info": {},
+        "price_history_5y": {},
+    }
+    kpis = compute_kpis(fin)
+    assert kpis["data_fetched_at"] == "2026-04-27T18:30:00+00:00"
+
+
+def test_compute_kpis_surfaces_latest_fiscal_period():
+    fin = _fake_financials(revenues=[100, 200, 400])
+    kpis = compute_kpis(fin)
+    # Newest date in fixture is 2022-12-31 (index 2: 2020+2)
+    assert kpis["latest_fiscal_period"] == "2022-12-31"
+
+
+def test_compute_kpis_omits_freshness_keys_when_input_missing():
+    """No fetched_at and no income data → no freshness keys at all (don't fabricate)."""
+    kpis = compute_kpis({})
+    assert "data_fetched_at" not in kpis
+    assert "latest_fiscal_period" not in kpis
+
+
+def test_check_freshness_returns_none_for_fresh_data():
+    from datetime import UTC, datetime
+
+    recent = datetime.now(UTC).isoformat()
+    assert _check_freshness({"fetched_at": recent}) is None
+
+
+def test_check_freshness_warns_when_data_older_than_threshold():
+    from datetime import UTC, datetime, timedelta
+
+    stale = (datetime.now(UTC) - timedelta(days=STALE_DATA_DAYS + 1)).isoformat()
+    msg = _check_freshness({"fetched_at": stale})
+    assert msg is not None
+    assert "old" in msg.lower()
+
+
+def test_check_freshness_handles_missing_fetched_at():
+    assert _check_freshness({}) is None
+    assert _check_freshness({"fetched_at": None}) is None
+
+
+def test_check_freshness_handles_malformed_timestamp():
+    assert _check_freshness({"fetched_at": "not a date"}) is None
+
+
+def test_build_user_prompt_renders_as_of_block():
+    """The freshness header must be at the top of the prompt so the LLM sees it
+    before any KPI."""
+    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
+    prompt = _build_user_prompt(
+        "NVDA",
+        thesis,
+        {"data_fetched_at": "2026-04-27T18:30:00Z", "latest_fiscal_period": "2026-01-31"},
+    )
+    assert "AS OF" in prompt
+    assert "2026-04-27" in prompt  # fetched_at
+    assert "2026-01-31" in prompt  # latest fiscal period
+    assert prompt.index("AS OF") < prompt.index("HISTORICAL KPIs")
 
 
 # --- Prompt assembly ---------------------------------------------------------
