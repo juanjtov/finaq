@@ -1,4 +1,4 @@
-"""Step 5a integration tests — real yfinance + real OpenRouter Sonnet call.
+"""Step 5a integration tests — real yfinance + real OpenRouter LLM call.
 
 Run via:  pytest -m integration tests/test_fundamentals_integration.py
 """

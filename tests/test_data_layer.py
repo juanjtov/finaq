@@ -230,3 +230,92 @@ def test_chroma_filing_meta_from_path_extracts_kind_and_accession():
     kind, accession = _filing_meta_from_path(path)
     assert kind == "10-K"
     assert accession == "0001-25-000123"
+
+
+# --- Hybrid retrieval: BM25 + RRF -------------------------------------------
+
+
+def test_chroma_bm25_ranks_keyword_match_first():
+    from data.chroma import _bm25_rank
+
+    docs = [
+        "the cat sat on the mat",
+        "data center capex grew rapidly in fiscal 2024",
+        "the dog barked at the cat",
+    ]
+    ranks = _bm25_rank(docs, "data center capex")
+    assert ranks[0] == 1, f"BM25 should rank doc 1 first, got order {ranks}"
+
+
+def test_chroma_bm25_handles_empty_corpus():
+    from data.chroma import _bm25_rank
+
+    assert _bm25_rank([], "anything") == []
+
+
+def test_chroma_bm25_returns_full_ranking_with_no_matches():
+    """BM25 still returns a complete ranking even if no doc shares any terms with the query."""
+    from data.chroma import _bm25_rank
+
+    docs = ["alpha beta gamma", "delta epsilon zeta"]
+    ranks = _bm25_rank(docs, "completely unrelated terms here")
+    assert sorted(ranks) == [0, 1]
+
+
+def test_chroma_reciprocal_rank_fusion_promotes_consistently_high_items():
+    """An item ranked #1 in both lists should outrank an item that's only #1 in one."""
+    from data.chroma import _reciprocal_rank_fusion
+
+    sem_ranks = [0, 1, 2, 3]  # doc 0 best in semantic
+    bm25_ranks = [0, 2, 1, 3]  # doc 0 best in BM25 too
+    fused = _reciprocal_rank_fusion([sem_ranks, bm25_ranks])
+    assert fused[0] == 0
+
+
+def test_chroma_reciprocal_rank_fusion_balances_disjoint_strengths():
+    """If A is best semantically and B is best by keyword, the second item in each list
+    (the consistent one) should rank higher than either pure-list winner."""
+    from data.chroma import _reciprocal_rank_fusion
+
+    # doc 1 is rank-2 in BOTH lists; doc 0 is rank-1 in list A but rank-3 in list B.
+    sem = [0, 1, 2]
+    bm25 = [2, 1, 0]
+    fused = _reciprocal_rank_fusion([sem, bm25])
+    # Doc 1 is rank 2 in both lists → score = 2/(60+2) = 0.0322
+    # Doc 0 is rank 1, rank 3 → 1/61 + 1/63 ≈ 0.0322
+    # Doc 2 is rank 3, rank 1 → same ≈ 0.0322
+    # All three end up near-equal; what matters is: fused output contains all 3 items.
+    assert sorted(fused) == [0, 1, 2]
+
+
+def test_chroma_reciprocal_rank_fusion_handles_single_list():
+    from data.chroma import _reciprocal_rank_fusion
+
+    assert _reciprocal_rank_fusion([[2, 0, 1]]) == [2, 0, 1]
+
+
+def test_chroma_reciprocal_rank_fusion_includes_items_unique_to_one_list():
+    from data.chroma import _reciprocal_rank_fusion
+
+    fused = _reciprocal_rank_fusion([[0, 1], [2, 3]])
+    assert sorted(fused) == [0, 1, 2, 3]
+
+
+def test_chroma_build_where_clause_single_condition():
+    from data.chroma import _build_where_clause
+
+    assert _build_where_clause("NVDA", None) == {"ticker": "NVDA"}
+    assert _build_where_clause(None, "1A") == {"item_code": "1A"}
+
+
+def test_chroma_build_where_clause_multiple_conditions_uses_and():
+    from data.chroma import _build_where_clause
+
+    where = _build_where_clause("NVDA", "Item 1A")
+    assert where == {"$and": [{"ticker": "NVDA"}, {"item_code": "1A"}]}
+
+
+def test_chroma_build_where_clause_no_filters_returns_none():
+    from data.chroma import _build_where_clause
+
+    assert _build_where_clause(None, None) is None

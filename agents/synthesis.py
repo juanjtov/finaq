@@ -1,8 +1,8 @@
 """Synthesis agent — Step 4 stub.
 
-Real Opus implementation lands in Step 7. This stub emits a markdown skeleton
-that mirrors the §11 section structure so downstream code (PDF export, Streamlit)
-has something to render against.
+Real LLM-driven implementation lands in Step 7 (the final integrator across all
+worker agents). This stub emits a markdown skeleton that mirrors the §11 section
+structure so downstream code (PDF export, Streamlit) has something to render against.
 """
 
 from __future__ import annotations

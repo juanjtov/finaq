@@ -6,7 +6,7 @@ Your job: analyze ONE ticker through the lens of the active thesis and produce s
 
 - A **Monte Carlo simulator** uses your `projections` (mean + std for revenue growth, operating margin, and exit multiple) to draw 10,000 fair-value samples. Garbage projections → garbage distribution.
 - A **Risk agent** combines your `summary` and `kpis` with filings and news to surface red flags.
-- A **Synthesis agent** (Opus) writes the final report shown to the user. Your tone and concreteness propagate.
+- A **Synthesis agent** writes the final report shown to the user. Your tone and concreteness propagate.
 
 # Style
 

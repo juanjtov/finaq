@@ -1,13 +1,27 @@
-"""ChromaDB ingest + query for the SEC filings RAG corpus.
+"""ChromaDB ingest + hybrid query for the SEC filings RAG corpus.
 
 Single persistent collection `filings` keyed by chunk id. Metadata holds
-{ticker, filing_type, accession, item_code, item_label}. Embeddings come from
-OpenRouter (`MODEL_EMBEDDINGS`, default `text-embedding-3-small`).
+{ticker, filing_type, accession, filed_date, item_code, item_label}. Distance
+metric is **cosine** (explicitly configured — ChromaDB's default is L2). For
+unit-normalised text-embedding vectors L2 and cosine produce identical rankings,
+but cosine is the semantically correct choice and is robust if we swap to a
+non-normalised embedding model later.
+
+Embeddings come from OpenRouter via the env-configured embedding model.
+
+Retrieval is hybrid:
+  1. Metadata pre-filter via ChromaDB `where` clause (applied BEFORE similarity).
+  2. Semantic search returns top `candidate_pool` chunks (cosine-ranked).
+  3. BM25 keyword search runs over the same pool.
+  4. Reciprocal Rank Fusion merges both rankings into the final top-k.
+
+Cross-encoder re-ranking is intentionally NOT included; see docs/POSTPONED.md §2.
 """
 
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import chromadb
@@ -15,6 +29,7 @@ import tiktoken
 from bs4 import BeautifulSoup
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from chromadb.config import Settings
+from rank_bm25 import BM25Okapi
 
 from data.edgar import parse_filed_date
 from utils import logger
@@ -23,10 +38,200 @@ from utils.openrouter import get_client
 
 CHROMA_DIR = Path("data_cache/chroma")
 COLLECTION_NAME = "filings"
+DISTANCE_SPACE = "cosine"  # explicit — ChromaDB's default is l2
 TARGET_CHUNK_TOKENS = 800
 CHUNK_OVERLAP_TOKENS = 100
 EMBED_BATCH_SIZE = 100  # OpenAI embeddings API batch limit
 TOKENIZER = "cl100k_base"
+DEFAULT_CANDIDATE_POOL = 60  # semantic top-N, pre-fusion
+RRF_K = 60  # standard reciprocal-rank-fusion constant
+
+# Lightweight English stopword list for BM25 tokenisation. Removing high-frequency
+# function words sharpens the IDF signal so rare, discriminative terms (e.g.,
+# "Blackwell", "capex", "constraint") drive ranking instead of "the"/"of"/"and".
+# Curated subset of the canonical NLTK English stopword list (~150 entries).
+_BM25_STOPWORDS = frozenset(
+    [
+        "a",
+        "about",
+        "above",
+        "after",
+        "again",
+        "against",
+        "all",
+        "am",
+        "an",
+        "and",
+        "any",
+        "are",
+        "aren't",
+        "as",
+        "at",
+        "be",
+        "because",
+        "been",
+        "before",
+        "being",
+        "below",
+        "between",
+        "both",
+        "but",
+        "by",
+        "can",
+        "can't",
+        "cannot",
+        "could",
+        "couldn't",
+        "did",
+        "didn't",
+        "do",
+        "does",
+        "doesn't",
+        "doing",
+        "don",
+        "don't",
+        "down",
+        "during",
+        "each",
+        "few",
+        "for",
+        "from",
+        "further",
+        "had",
+        "hadn't",
+        "has",
+        "hasn't",
+        "have",
+        "haven't",
+        "having",
+        "he",
+        "he'd",
+        "he'll",
+        "he's",
+        "her",
+        "here",
+        "here's",
+        "hers",
+        "herself",
+        "him",
+        "himself",
+        "his",
+        "how",
+        "how's",
+        "i",
+        "i'd",
+        "i'll",
+        "i'm",
+        "i've",
+        "if",
+        "in",
+        "into",
+        "is",
+        "isn't",
+        "it",
+        "it's",
+        "its",
+        "itself",
+        "just",
+        "let's",
+        "me",
+        "more",
+        "most",
+        "mustn't",
+        "my",
+        "myself",
+        "no",
+        "nor",
+        "not",
+        "of",
+        "off",
+        "on",
+        "once",
+        "only",
+        "or",
+        "other",
+        "ought",
+        "our",
+        "ours",
+        "ourselves",
+        "out",
+        "over",
+        "own",
+        "same",
+        "shan't",
+        "she",
+        "she'd",
+        "she'll",
+        "she's",
+        "should",
+        "shouldn't",
+        "so",
+        "some",
+        "such",
+        "than",
+        "that",
+        "that's",
+        "the",
+        "their",
+        "theirs",
+        "them",
+        "themselves",
+        "then",
+        "there",
+        "there's",
+        "these",
+        "they",
+        "they'd",
+        "they'll",
+        "they're",
+        "they've",
+        "this",
+        "those",
+        "through",
+        "to",
+        "too",
+        "under",
+        "until",
+        "up",
+        "very",
+        "was",
+        "wasn't",
+        "we",
+        "we'd",
+        "we'll",
+        "we're",
+        "we've",
+        "were",
+        "weren't",
+        "what",
+        "what's",
+        "when",
+        "when's",
+        "where",
+        "where's",
+        "which",
+        "while",
+        "who",
+        "who's",
+        "whom",
+        "why",
+        "why's",
+        "with",
+        "won't",
+        "would",
+        "wouldn't",
+        "you",
+        "you'd",
+        "you'll",
+        "you're",
+        "you've",
+        "your",
+        "yours",
+        "yourself",
+        "yourselves",
+    ]
+)
+_WORD_RE = re.compile(r"[a-z0-9]+")
 
 # Item header in 10-K / 10-Q: "Item 1A. Risk Factors", "ITEM 7.", etc.
 ITEM_HEADER_RE = re.compile(
@@ -61,6 +266,13 @@ class OpenRouterEmbedding(EmbeddingFunction[Documents]):
 
 
 def _get_collection():
+    """Open (or create) the persistent `filings` collection with cosine distance.
+
+    Note: ChromaDB applies the `configuration` parameter only on collection
+    creation. If the on-disk collection was created with a different space
+    (e.g., the legacy l2 default), this function returns it unchanged — wipe
+    `data_cache/chroma` and re-ingest to pick up the cosine config.
+    """
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(
         path=str(CHROMA_DIR),
@@ -69,6 +281,7 @@ def _get_collection():
     return client.get_or_create_collection(
         name=COLLECTION_NAME,
         embedding_function=OpenRouterEmbedding(),
+        configuration={"hnsw": {"space": DISTANCE_SPACE}},
     )
 
 
@@ -171,31 +384,59 @@ def ingest_filing(ticker: str, filing_path: Path) -> int:
     return len(docs)
 
 
-def query(
-    ticker: str | None,
-    question: str,
-    k: int = 8,
-    item_filter: str | None = None,
-) -> list[dict]:
-    """Top-k chunks for a question. Filters by ticker (or None = cross-ticker)
-    and optionally an item_filter ("1A", "Item 7", "7A", ...).
-    """
-    coll = _get_collection()
+@lru_cache(maxsize=4096)
+def _tokenise(text: str) -> tuple[str, ...]:
+    """Word-tokenise + lowercase + drop stopwords. Cached because the same chunk
+    is tokenised once per BM25 call; the question is tokenised many times across
+    subqueries during a drill-in."""
+    return tuple(t for t in _WORD_RE.findall(text.lower()) if t not in _BM25_STOPWORDS)
 
+
+def _bm25_rank(documents: list[str], question: str) -> list[int]:
+    """Return indices into `documents` ranked by BM25 score (descending).
+
+    Uses a regex word-tokeniser plus a small English stopword list. This is
+    deliberately lighter than NLTK (no 50MB corpus download, no runtime
+    network requirement) but sharper than naive whitespace splitting because
+    it strips punctuation and removes high-frequency function words that
+    would otherwise dilute the IDF signal.
+    """
+    if not documents:
+        return []
+    tokenised_docs = [list(_tokenise(doc)) for doc in documents]
+    bm25 = BM25Okapi(tokenised_docs)
+    scores = bm25.get_scores(list(_tokenise(question)))
+    return sorted(range(len(documents)), key=lambda i: scores[i], reverse=True)
+
+
+def _reciprocal_rank_fusion(ranked_lists: list[list[int]], k: int = RRF_K) -> list[int]:
+    """Merge multiple ranked lists via reciprocal rank fusion.
+
+    For each item, RRF score = Σ 1 / (k + rank_i) over each ranking i.
+    `rank_i` is 1-based (best rank = 1). Returns indices sorted by RRF descending.
+    """
+    scores: dict[int, float] = {}
+    for ranked in ranked_lists:
+        for rank, idx in enumerate(ranked, start=1):
+            scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.keys(), key=lambda i: scores[i], reverse=True)
+
+
+def _build_where_clause(ticker: str | None, item_filter: str | None) -> dict | None:
+    """Compose the metadata pre-filter that ChromaDB applies BEFORE similarity scan."""
     conditions: list[dict] = []
     if ticker:
         conditions.append({"ticker": ticker})
     if item_filter:
         conditions.append({"item_code": _normalize_item_filter(item_filter)})
-
-    where = None
+    if len(conditions) == 0:
+        return None
     if len(conditions) == 1:
-        where = conditions[0]
-    elif len(conditions) > 1:
-        where = {"$and": conditions}
+        return conditions[0]
+    return {"$and": conditions}
 
-    results = coll.query(query_texts=[question], n_results=k, where=where)
 
+def _unpack_chroma_query(results: dict) -> list[dict]:
     chunks: list[dict] = []
     ids = results.get("ids", [[]])[0]
     docs = results.get("documents", [[]])[0]
@@ -204,3 +445,53 @@ def query(
     for i in range(len(ids)):
         chunks.append({"text": docs[i], "metadata": metas[i], "score": dists[i]})
     return chunks
+
+
+def query(
+    ticker: str | None,
+    question: str,
+    k: int = 8,
+    item_filter: str | None = None,
+    *,
+    candidate_pool: int = DEFAULT_CANDIDATE_POOL,
+    use_keyword: bool = True,
+) -> list[dict]:
+    """Hybrid retrieval: semantic + BM25 + RRF, with metadata pre-filter.
+
+    1. ChromaDB `where` clause (ticker + item_code) is applied BEFORE similarity.
+    2. Semantic search returns top `candidate_pool` chunks.
+    3. BM25 ranks the same pool by keyword score (skipped if `use_keyword=False`).
+    4. RRF merges both rankings; top `k` returned.
+
+    Each returned chunk is `{"text": str, "metadata": dict, "score": float|None}`.
+    `metadata` includes `filed_date` so downstream agents can reason about freshness.
+    """
+    coll = _get_collection()
+    where = _build_where_clause(ticker, item_filter)
+
+    # Step 1+2 — pre-filter + semantic candidate pool.
+    # ChromaDB internally: (a) embeds the query via our OpenRouterEmbedding,
+    # (b) applies the `where` metadata filter, (c) computes cosine distance
+    # against every candidate's stored embedding, (d) returns the top-N sorted
+    # by distance ascending (closest first). The `score` field on each chunk
+    # is the cosine distance — lower = more similar.
+    sem_results = coll.query(query_texts=[question], n_results=candidate_pool, where=where)
+    candidates = _unpack_chroma_query(sem_results)
+    if not candidates:
+        return []
+
+    # ChromaDB returns candidates already ordered best-first; a list of indices
+    # [0, 1, 2, ...] therefore *is* the semantic ranking (each int is the
+    # candidate's position in the array).
+    semantic_ranking_indices = list(range(len(candidates)))
+
+    # Step 3 — BM25 over the same pre-filtered pool. RRF then merges the two
+    # rankings; if keyword search is disabled we fall through to pure semantic.
+    if use_keyword and len(candidates) > 1:
+        keyword_ranking_indices = _bm25_rank([c["text"] for c in candidates], question)
+        # Step 4 — Reciprocal Rank Fusion merges both rankings.
+        fused = _reciprocal_rank_fusion([semantic_ranking_indices, keyword_ranking_indices])
+    else:
+        fused = semantic_ranking_indices
+
+    return [candidates[i] for i in fused[:k]]

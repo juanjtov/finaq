@@ -1,10 +1,12 @@
-"""Fundamentals agent — Sonnet-backed thesis-aware fundamental analysis.
+"""Fundamentals agent — LLM-driven thesis-aware fundamental analysis.
 
 Pipeline:
 1. Pull yfinance bundle (cached 24h).
 2. Compute thesis-relevant KPIs (revenue CAGR, margins, FCF yield, capex intensity, etc.).
-3. Send the thesis + KPIs to Sonnet; receive a structured JSON analysis + Monte Carlo projections.
+3. Send the thesis + KPIs to the LLM; receive structured JSON analysis + Monte Carlo projections.
 4. Validate against FundamentalsOutput, surface partial failures via the `errors` field.
+
+The exact model is configured by the MODEL_FUNDAMENTALS env var (see utils/models.py).
 
 Run standalone:  python -m agents.fundamentals NVDA [thesis_slug]
 """

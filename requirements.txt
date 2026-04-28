@@ -15,6 +15,7 @@ python-dotenv
 tavily-python
 tenacity
 httpx
+rank-bm25
 
 # Phase 1 — Notion + Telegram
 notion-client

@@ -1,6 +1,6 @@
 """Step 5a unit tests — Fundamentals KPI math + prompt assembly + failure paths.
 
-Pure-logic, no network. Real Sonnet calls live in test_fundamentals_integration.py.
+Pure-logic, no network. Real LLM calls live in test_fundamentals_integration.py.
 """
 
 from __future__ import annotations
