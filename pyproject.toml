@@ -13,6 +13,7 @@ target-version = ["py311"]
 [tool.pytest.ini_options]
 markers = [
     "integration: hits real external services (OpenRouter, EDGAR, yfinance, Tavily, Notion, Telegram)",
+    "eval: opt-in RAG quality evaluation. Tier 2 (LLM-as-judge) costs ~$0.12/run, Tier 3 (RAGAS) costs ~$1+/run. Run via `pytest -m eval`.",
 ]
 asyncio_mode = "auto"
 testpaths = ["tests"]

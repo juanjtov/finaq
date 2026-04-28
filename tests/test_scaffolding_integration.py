@@ -26,6 +26,7 @@ CHAT_ROLES = [
     "MODEL_SYNTHESIS",
     "MODEL_ROUTER",
     "MODEL_ADHOC_THESIS",
+    "MODEL_JUDGE",
 ]
 
 
@@ -37,10 +38,14 @@ def _require_api_key():
 
 @pytest.mark.parametrize("role_var", CHAT_ROLES)
 def test_openrouter_chat_for_role(role_var):
-    """Each configured chat-model role responds to a trivial prompt with non-empty text."""
+    """Each configured chat-model role responds to a trivial prompt with non-empty text.
+    Skips cleanly if the env var is missing or still the conftest stub — letting
+    users add new MODEL_* vars to .env at their own pace."""
     from utils.openrouter import get_client
 
-    model = os.environ[role_var]
+    model = os.environ.get(role_var, "")
+    if not model or model == "test-stub-model":
+        pytest.skip(f"{role_var} not set in .env (see .env.example)")
     resp = get_client().chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": "Reply with the single word: pong"}],

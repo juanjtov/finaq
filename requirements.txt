@@ -16,6 +16,7 @@ tavily-python
 tenacity
 httpx
 rank-bm25
+ragas
 
 # Phase 1 — Notion + Telegram
 notion-client

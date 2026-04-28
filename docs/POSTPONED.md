@@ -58,9 +58,19 @@ revisit. If the trigger never fires, we never build it.
 |---|---|---|
 | **Cross-encoder re-ranking** (`sentence-transformers/ms-marco-MiniLM`) | Filings citations are noticeably low-quality after Step 8 demo, OR Synthesis bull/bear bullets cite stale chunks despite freshness markers. | 1h + ~500MB local model + 2–4s/query |
 | **MMR (Maximum Marginal Relevance)** | Top-K returned chunks are clearly redundant (e.g., 5 of 8 chunks come from the same paragraph). | ~30 lines, no new dep |
-| **Sentence-window retrieval** | Sonnet's Filings synthesis quotes truncated mid-sentence or misses surrounding context. | ~20 lines |
-| **LLM-generated subqueries** (Haiku rewrites the 3 subquery templates per thesis × ticker) | Ad-hoc `/analyze` (Step 10) or new theses produce shallow Filings synthesis with hardcoded templates. | 1 extra Haiku call per drill-in, ~$0.001 |
+| **Sentence-window retrieval** | LLM Filings synthesis quotes truncated mid-sentence or misses surrounding context. | ~20 lines |
+| **LLM-generated subqueries** (cheap-tier model rewrites the 3 subquery templates per thesis × ticker) | Ad-hoc `/analyze` (Step 10) or new theses produce shallow Filings synthesis with hardcoded templates. | 1 extra cheap-tier call per drill-in, ~$0.001 |
 | **Hybrid corpus expansion** (BM25 over the *full* ticker corpus, not just the 60 semantic candidates) | A known-relevant chunk is missed because it's outside the candidate pool. | Re-architect `query()` to fetch the whole filtered corpus first |
+| **Chunk-size tuning** (currently 800 tokens) | Sonnet's synthesis cites mid-sentence-cut chunks OR top-8 are clearly redundant from the same paragraph. | One-line constant change + re-ingest |
+
+### RAG evaluation enhancements (within Tier 1/2/3 already shipped)
+
+| Item | Trigger | Estimated effort |
+|---|---|---|
+| **`pytest -m eval` nightly on droplet** (Tier 2 + Tier 3 run automatically each night, results persisted to `state.db`, Mission Control shows trend) | After Step 12 droplet deploy, when historical eval data becomes valuable (a few days after deploy). | systemd timer + state.db schema |
+| **Reference-answer generation for context_recall** (Tier 3 currently runs without ground_truth; adding it unlocks `context_recall` metric) | When we want to compare retrieval strategies head-to-head and `context_precision` alone isn't discriminative enough. | Curate reference answers per golden query (~1h) |
+| **Cost-tracking for eval runs** | When monthly eval cost crosses ~$10/mo and we want to budget. | Persist per-run token + dollar cost to `state.db.eval_runs` |
+| **Multi-ticker golden set** (currently NVDA-only) | When ANET / AVGO / other tickers are ingested at scale and we need per-ticker quality bars. | Add 5–8 queries per ticker in `tests/eval/golden_queries.py` |
 
 ### Fundamentals agent (within Step 5a's scope, may revisit when Step 5d lands)
 

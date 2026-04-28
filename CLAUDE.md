@@ -36,6 +36,7 @@ All model strings below are passed as the `model` argument to OpenRouter. Confir
 | Synthesis | `anthropic/claude-opus-4.7` | `MODEL_SYNTHESIS` | Final thesis writing, highest quality |
 | Router (Phase 1) | `anthropic/claude-haiku-4.5` | `MODEL_ROUTER` | Telegram intent classification, must be cheap + fast |
 | Ad-hoc Thesis (Phase 1) | `anthropic/claude-sonnet-4.6` | `MODEL_ADHOC_THESIS` | Decomposes a free-text topic into a thesis JSON for `/analyze` |
+| Judge (RAG eval) | `anthropic/claude-haiku-4.5` | `MODEL_JUDGE` | Used by `pytest -m eval` to score retrieval relevance and faithfulness; cheap-tier role |
 | Discovery (Phase 2+) | `anthropic/claude-opus-4.7` | `MODEL_DISCOVERY` | Thesis decomposition, runs rarely |
 | Embeddings | `text-embedding-3-small` (via OpenRouter) | `MODEL_EMBEDDINGS` | ChromaDB filings collection |
 
