@@ -333,3 +333,58 @@ can request it when desired.
 - Tickers outside the model's competency (banks, insurance, REITs, oil
   E&P — these need different valuation frameworks; the existing model
   will produce confidently-wrong numbers)
+
+## §10 Action recommendation thresholds (Synthesis)
+
+The Synthesis agent's `## Action recommendation` section translates the
+distribution + risk view into a position-sizing decision. The thresholds
+below are the framework Synthesis applies; the agent is allowed (and
+expected) to override when the thesis material_thresholds suggest a more
+specific signal.
+
+### §10.1 Position-size signals from MC vs current price
+
+| Signal | Implication |
+|---|---|
+| `current_price < dcf_p10` | Deep margin of safety. Add (size scaled to risk.level). |
+| `dcf_p10 ≤ current_price < dcf_p25` | Moderate undervaluation. Add small. |
+| `dcf_p25 ≤ current_price ≤ dcf_p75` | Fairly valued. No size change unless thesis material_thresholds fire. |
+| `dcf_p75 < current_price ≤ dcf_p90` | Modestly overvalued. Trim (size scaled to risk.level). |
+| `current_price > dcf_p90` | Deep overvaluation. Trim aggressively or exit. |
+
+These are NOT the only triggers. The thesis's `material_thresholds`
+(filing-mention triggers, capex-guidance changes, FCF-yield breaches) can
+fire independently and should drive the recommendation when the MC view
+alone would say "no change."
+
+### §10.2 Risk-level modifier
+
+`risk.level` modulates *size*, not *direction*:
+
+- **CRITICAL** — exit / hedge regardless of MC view. The structural break
+  invalidates the model's input distribution.
+- **HIGH** — trim 50% of any add-on; halve the size of any add-buy.
+- **ELEVATED** — trim 25%; size moves are normal.
+- **MODERATE** / **LOW** — no modifier.
+
+### §10.3 Convergence-ratio sanity floor
+
+If `monte_carlo.convergence_ratio < 0.4`, the DCF and Multiple models are
+producing wildly divergent fair values. This is a model-sanity flag, not a
+trade signal. Synthesis should explicitly note the divergence and avoid
+sizing recommendations beyond "no change" until the underlying inputs are
+re-checked. (Often: a Fundamentals projections refactor blew up one model
+silently.)
+
+### §10.4 Thesis material_thresholds as event triggers
+
+The thesis JSON's `material_thresholds` list is a watchlist of conditional
+signals. Synthesis should reference them by name in conditional
+recommendations:
+
+- "Trim 20% if Q3 misses $42B revenue guide" (thesis signal: `revenue_yoy_growth abs > 25 percent`)
+- "Add 2% on dip below $180" (thesis signal: `current_price_vs_p50_mc < 0.65 ratio`)
+- "Exit if convergence_ratio drops below 0.4" (model-sanity floor)
+
+This style — sized + conditional + referencing a named threshold — is what
+the Tier 2 LLM-judge `action_specificity` category rates as HIGH.

@@ -110,12 +110,58 @@ def _stub_real_agents(monkeypatch):
         return stub_run
 
     import agents as agents_pkg
-    from agents import filings, fundamentals, news, risk
+    from agents import filings, fundamentals, news, risk, synthesis
 
     monkeypatch.setattr(fundamentals, "run", _make_stub("fundamentals"))
     monkeypatch.setattr(filings, "run", _make_stub("filings"))
     monkeypatch.setattr(news, "run", _make_stub("news"))
     monkeypatch.setattr(risk, "run", _make_stub("risk"))
+
+    # Step 7 made synthesis a real LLM call. For graph wiring tests we use a
+    # template stub so the section structure (and `[stub]` marker) is preserved.
+    async def stub_synthesis(state):
+        started = time.perf_counter()
+        ticker = state.get("ticker", "?")
+        thesis_name = (state.get("thesis") or {}).get("name", "unknown")
+        report = (
+            f"# {ticker} — {thesis_name} thesis update\n\n"
+            "**Date:** 2026-04-29 · **Confidence:** medium\n\n"
+            "## What this means\n[stub] plain-English summary for amateur readers — what the company does, what the bet is, what the model thinks, and what to do next.\n\n"
+            "## Thesis statement\n[stub] thesis statement.\n\n"
+            "## Bull case\n- [stub] bull point one (Fund kpis)\n"
+            "- [stub] bull point two (Filings 10-K)\n"
+            "- [stub] bull point three (News, 2026-04-15)\n\n"
+            "## Bear case\n- [stub] bear point one (Fund kpis)\n"
+            "- [stub] bear point two (Filings 10-K Item 1A)\n"
+            "- [stub] bear point three (News, 2026-04-19)\n\n"
+            "## Top risks\n1. [stub] risk one — severity 3 — explanation here.\n"
+            "2. [stub] risk two — severity 2 — another explanation.\n\n"
+            "## Monte Carlo fair value\n[stub] P10 / P50 / P90 placeholder.\n\n"
+            "- **Bull (P75-P90):** [stub] upside scenario.\n"
+            "- **Base (P25-P75):** [stub] central case.\n"
+            "- **Bear (P10-P25):** [stub] downside scenario.\n\n"
+            "## Action recommendation\n[stub] no action recommended at this time.\n\n"
+            "## Watchlist\n- [stub] watchlist item one (filings)\n"
+            "- [stub] watchlist item two (news)\n"
+            "- [stub] watchlist item three (fundamentals)\n\n"
+            "## Evidence\n- [stub] evidence one\n- [stub] evidence two\n"
+        )
+        return {
+            "report": report,
+            "synthesis_confidence": "medium",
+            "gaps": [],
+            "watchlist": ["[stub] watchlist item one (filings)"],
+            "messages": [
+                {
+                    "node": "synthesis",
+                    "event": "completed",
+                    "started_at": started,
+                    "completed_at": time.perf_counter(),
+                }
+            ],
+        }
+
+    monkeypatch.setattr(synthesis, "run", stub_synthesis)
 
     # Step 6 made monte_carlo a real engine. For graph wiring tests we still
     # want a deterministic stub so we don't hit yfinance for the treasury rate.

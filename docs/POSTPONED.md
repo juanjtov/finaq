@@ -18,12 +18,7 @@ Three categories:
 
 | Step | What | Status | Notes |
 |---|---|---|---|
-| 5b | **Filings agent (RAG)** | in progress | Hybrid retrieval (semantic + BM25 + RRF), 3 subqueries, Sonnet synthesis. Currently in flight. |
-| 5c | **News agent (Tavily)** | pending | 90-day search, 5–7 catalysts/concerns tagged bull/bear/neutral, `Evidence.as_of` populated from `published_date`. |
-| 5d | **Risk agent** | pending | Synthesis-only (no external calls). Reads fundamentals/filings/news outputs, emits score 0–10 + top_risks. |
 | 5z | **Observability foundation** | pending | LangSmith env opt-in, `data/state.py` SQLite layer, `_safe_node` wires `record_*` calls. Unlocks mission-control surfaces in Steps 8/10/11/12. |
-| 6  | **Monte Carlo engine** | pending | Vectorized NumPy `simulate()` consuming `Projections` from Fundamentals. |
-| 7  | **Synthesis agent (Opus) + PDF export** | pending | Markdown report per CLAUDE.md §11; `reportlab` PDF with sage/parchment palette. |
 | 8  | **Streamlit UI + Mission Control page** | pending | Main dashboard + `ui/pages/mission_control.py` reading `state.db`. Pre-cached demo runs (NVDA on AI cake, EME on Construction). |
 
 ### Phase 1 — personal MVP
@@ -110,6 +105,7 @@ revisit. If the trigger never fires, we never build it.
 |---|---|---|
 | **Full Discovery agent + halo graph builder** | Phase 2 | Step 10's `/analyze` is the Discovery-lite stand-in; persistent halo graph is the Phase 2 piece. |
 | **Bidirectional Notion sync** (your edits → re-fetched as inputs) | Phase 2 | Phase 1 is one-way (read notes, write reports/alerts) only. |
+| **Synthesis cycle-based re-trigger** (planner-style "ask for more" loop) | Phase 2+ | When `state.gaps` contains the same item across many runs, OR a single drill-in materially needs an upstream re-query (e.g. user said "expand on point 3 in the report"). Tradeoffs are documented in ARCHITECTURE §6.18 — breaks DAG topology, blows the <5min target, risks unbounded cost. We built the `gaps: list[str]` observability path instead so we have data on whether the loop would have fired. Phase 2 trigger: ≥30% of runs surface a `gaps` entry that maps cleanly to a known upstream re-query (e.g. "no segment-level capex split" → re-run filings with different subquery). |
 | **Pattern detection** (cross-thesis multiplicity scoring) | Phase 3 | The `VRT/CEG/ANET/PWR` overlap is currently data only — automated weighting comes in Phase 3. |
 | **Threshold learning** | Phase 3 | Material thresholds are hand-set in JSON until then. The mechanism would observe which alerts you drilled in vs ignored. |
 | **Backtesting** | Phase 3 | Replay historical filings/news through the system to validate alert quality. |

@@ -319,8 +319,17 @@ The Synthesis agent must produce Markdown with **exactly these top-level section
 
 **Date:** {YYYY-MM-DD} · **Confidence:** {low|medium|high}
 
+## What this means
+3–5 sentences in plain English for a non-finance reader. NO jargon (no "P50",
+no "DCF", no "MoS", no "ERP", no "convergence ratio"). Cover, in order: what
+the company does (one sentence); what the thesis is betting on (one sentence);
+what our model says about price in plain language ("roughly fairly priced",
+"meaningfully cheap", "pricey relative to the math") (one sentence); what we'd
+do (one sentence); and one thing the reader should watch over the next quarter
+(one sentence). This section anchors the report for an amateur investor.
+
 ## Thesis statement
-One paragraph. The current view in plain English.
+One paragraph. The current analytical view, written for an experienced reader.
 
 ## Bull case
 3–5 bullets. Each bullet ≤ 20 words, with one citation.
@@ -332,10 +341,26 @@ One paragraph. The current view in plain English.
 Numbered list. Each with severity (1–5) and a one-sentence explanation.
 
 ## Monte Carlo fair value
-A short paragraph stating P10 / P50 / P90 and how those compare to current price.
+A short paragraph stating P10 / P50 / P90 and how those compare to current
+price, with the discount rate used and convergence ratio. Then THREE scenario
+bullets to make the distribution actionable:
+
+- **Bull (P75–P90):** one sentence describing the world that produces upside.
+- **Base (P25–P75):** one sentence describing the central case.
+- **Bear (P10–P25):** one sentence describing the world that produces downside.
 
 ## Action recommendation
-One paragraph. What changes (if any) to thesis or position size.
+One paragraph. What changes (if any) to thesis or position size, with specific
+thresholds where possible (size + condition + threshold).
+
+## Watchlist
+3–5 bullets of forward-looking events / signals to track before the next
+drill-in. Each bullet names the upstream agent whose work it relates to in
+parentheses, e.g. "(filings)", "(news)", "(fundamentals)". Examples:
+"Q3 earnings call (Aug 2026) — listen for AI capex guidance (news)";
+"TSM yield disclosure in next 10-Q — supply concentration check (filings)";
+"Inventory turnover trend in next quarter (fundamentals)". Phase 1 Triage
+will read this section to seed thesis-specific monitoring rules.
 
 ## Evidence
 Bulleted list of every source cited above with URLs or filing accession numbers.

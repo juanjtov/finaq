@@ -263,6 +263,25 @@ class RiskOutput(BaseModel):
         return self
 
 
+SynthesisConfidence = Literal["low", "medium", "high"]
+
+
 class SynthesisOutput(BaseModel):
-    report: str  # markdown per CLAUDE.md §11
+    """Final report from the Synthesis agent.
+
+    `report` is the markdown body per CLAUDE.md §11. `confidence` is
+    duplicated outside the markdown so the Mission Control panel + Telegram
+    `/status` command can read it without parsing prose. `gaps` lists
+    upstream content the agent wished it had (retrospective — what we
+    missed). `watchlist` lists forward-looking events / signals to track
+    before the next drill-in (prospective — what to look for next time;
+    each item is suffixed with the upstream agent in parentheses, e.g.
+    "(filings)", "(news)", "(fundamentals)" — Phase 1 Triage uses these
+    as seed rules). See ARCHITECTURE.md §6.18.
+    """
+
+    report: str
+    confidence: SynthesisConfidence = "medium"
+    gaps: list[str] = []
+    watchlist: list[str] = []
     errors: list[str] = []

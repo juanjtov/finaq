@@ -579,6 +579,99 @@ FINAQ, why it was chosen, and any later revisions.
   shape-only tests), and the *sensitivity diagnostic* logic. Each gap closed
   by its own test file.
 
+### 6.18 Synthesis spine mapping + `gaps` + `watchlist` + amateur section
+
+- **Decision:** The Synthesis agent (`agents/synthesis.py`) integrates the
+  full FinaqState into the §11 markdown report via a fixed *spine mapping* —
+  each report section pulls its primary input from a specific upstream agent,
+  not from "all of state" generically. The mapping is documented in
+  `agents/prompts/synthesis.md` and reproduced here so future maintainers can
+  audit drift. The §11 report has **9 sections** (expanded from 7 in late
+  Step 7 to add an amateur summary at the top and a forward-looking
+  watchlist near the bottom):
+
+  | Report section | Primary spine | Secondary inputs |
+  |---|---|---|
+  | What this means | full state, but plain language only (no jargon) | — |
+  | Thesis statement | thesis.summary + ticker context | — |
+  | Bull case | fundamentals.kpis + projections + filings.mdna_quotes + news.catalysts | — |
+  | Bear case | risk.top_risks (severity ≥ 3) + news.concerns + filings.risk_themes | — |
+  | Top risks | risk.top_risks (verbatim list, possibly reordered) | risk.threshold_breaches |
+  | Monte Carlo | monte_carlo.dcf + multiple + convergence_ratio + discount_rate_used | — |
+  | Action | MC vs current_price + risk.level + thesis.material_thresholds | — |
+  | Watchlist | thesis.material_thresholds + gaps in upstream coverage | — |
+  | Evidence | union of all upstream evidence lists | — |
+
+- **Why an amateur "What this means" section** (added late Step 7): the
+  rest of the report is institutional-grade and unreadable for a non-finance
+  reader. The amateur section sits at the top, has hard rules (3-5 sentences,
+  no jargon — banned terms include P10/P50/P90, DCF, MoS, ERP, basis points,
+  FCF yield, owner earnings) and follows a fixed five-sentence structure
+  (what the company does → what the bet is → what the math says → what to
+  do → one thing to watch). Tests in Tier 1 + Tier 3 enforce the jargon ban
+  and sentence-count constraints.
+
+- **Why Bull/Base/Bear scenarios in the MC section**: P10/P50/P90 numbers
+  are unactionable without a narrative for each tail. Three bullets — Bull
+  (P75-P90), Base (P25-P75), Bear (P10-P25) — translate the distribution
+  into "what world produces this." Tier 1 + Tier 3 grep for the three
+  scenario labels in the MC section body.
+
+- **Why `watchlist` as both a section and a JSON field**: the markdown
+  section is for the human reader; the JSON `watchlist: list[str]` field
+  is for Phase 1 Triage to seed thesis-specific monitoring rules
+  mechanically. Each item ends with the upstream agent in parens (e.g.
+  `(filings)`, `(news)`, `(fundamentals)`) so Triage can route the watch
+  to the right monitor. We observed in real LLM runs that the model
+  sometimes fills the markdown section but leaves the JSON array empty —
+  `_extract_watchlist_from_markdown` recovers from this drift so Phase 1
+  Triage doesn't silently lose data.
+
+- **Why a spine mapping** (vs free-form synthesis): without per-section
+  contracts, Opus drifts — uses MC numbers in Bull case, omits convergent
+  signals from Top risks, etc. The mapping makes drift tractable to test
+  (Tier 1 structural tests assert on bullet count, citation graph, MC number
+  drift) and explainable (every claim's provenance is one of N typed inputs).
+- **Why `gaps` field on SynthesisOutput** (vs cycle-based "ask for more"):
+  the simplest cure for "Synthesis wished it had more context" is a feedback
+  loop where Synthesis re-triggers an upstream agent. We rejected that for
+  Phase 0/1 — it breaks the DAG topology our Tier 1 tests assume, blows the
+  <5min latency target, and risks unbounded cost spikes. Instead Synthesis
+  emits a `gaps: list[str]` (e.g. "no Q3 forward guidance commentary in
+  filings", "news evidence thin on power-and-cooling layer"). The list lands
+  in `state.gaps` and the Mission Control panel — observability, not retry.
+  Cycle-based re-triggers are POSTPONED §1 / §2 (Phase 2+).
+- **Why `confidence` is duplicated outside the markdown:** so the Mission
+  Control panel and the Telegram `/status` command can read it without
+  parsing prose. Synthesis emits both; tests assert they match.
+- **Trigger to revisit:** repeated `gaps` entries on the same theme (e.g.
+  "no segment-level capex split" appearing on every NVDA run) means the
+  upstream agent's prompt/RAG should be improved — not Synthesis. Tracked
+  via the Mission Control panel.
+
+### 6.19 Synthesis evaluation (3 tiers, mirroring Filings/News/Risk)
+
+- **Decision:** Three eval tiers gate Step 7:
+  - **Tier 1 (deterministic, always-on)** — `tests/test_synthesis.py`:
+    section presence, bullet counts (3-5), bullet word counts (≤25 with
+    citation slack), top-risks numbered + severity, MC number anchoring,
+    confidence label canonical, evidence non-empty, PDF renders.
+  - **Tier 2 (LLM-judge, `pytest -m eval`)** — `tests/test_synthesis_eval.py`:
+    five categorical judges (NONE/WEAK/PARTIAL/HIGH, rationale-first JSON):
+    faithfulness, thesis-awareness, tension handling, action specificity,
+    confidence calibration. One Synthesis call per module; ~$0.025/run.
+  - **Tier 3 (real-data integration, `pytest -m integration`)** —
+    `tests/test_synthesis_sanity.py`: full graph run on NVDA + ai_cake; PDF
+    renders without error; MC section quotes a number within ±$2 of
+    `state.monte_carlo.dcf.p50`.
+- **Why Tier 2 is non-negotiable for Synthesis** (whereas it was deferred
+  for the MC engine): Synthesis output is prose. Tier 1 only catches
+  format issues; quality is invisible without LLM-judge. The five judge
+  categories target each known failure mode (hallucinated quotes, generic
+  content, papered-over tensions, vague actions, miscalibrated confidence).
+- **Why no RAGAS:** Synthesis doesn't retrieve — it consumes pre-retrieved
+  state. RAGAS metrics (context_precision, context_recall) don't apply.
+
 ### 6.15 Sector P/E from a hardcoded JSON (with refresh policy)
 
 - **Decision:** Sector P/E centroids live in `data/sector_multiples.json`,

@@ -20,5 +20,8 @@ class FinaqState(TypedDict, total=False):
     risk: dict[str, Any]
     monte_carlo: dict[str, Any]
     report: str
+    synthesis_confidence: str  # low|medium|high — duplicated from inside the markdown
+    gaps: list[str]  # upstream content Synthesis wished it had (retrospective observability)
+    watchlist: list[str]  # forward-looking events to track before next drill-in (per-agent suffix)
     messages: Annotated[list[dict[str, Any]], operator.add]
     errors: Annotated[list[str], operator.add]
