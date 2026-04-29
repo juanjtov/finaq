@@ -56,16 +56,56 @@ async def load_thesis(state: FinaqState) -> dict[str, Any]:
 
 
 async def monte_carlo(state: FinaqState) -> dict[str, Any]:
-    """Step 4 stub. Real vectorized engine lands in Step 6."""
+    """Step 6 — Hybrid DCF + Multiple Monte Carlo. Synthesis-only (no LLM, no
+    external calls). Reads Fundamentals' projections + KPIs and the thesis
+    valuation block; emits two fair-value distributions plus a convergence ratio.
+    """
+    from data.treasury import get_10y_treasury_yield
+    from utils.monte_carlo import compute_discount_rate, simulate
+    from utils.schemas import Projections, Thesis
+
+    fundamentals = state.get("fundamentals") or {}
+    thesis_dict = state.get("thesis") or {}
+    kpis = fundamentals.get("kpis") or {}
+    projections_dict = fundamentals.get("projections") or {}
+
+    # Validate required upstream inputs are present
+    missing: list[str] = []
+    if not projections_dict:
+        missing.append("fundamentals.projections")
+    for required_kpi in ("revenue_latest", "shares_outstanding", "current_price"):
+        if not kpis.get(required_kpi):
+            missing.append(f"fundamentals.kpis.{required_kpi}")
+    thesis = Thesis.model_validate(thesis_dict) if thesis_dict else None
+    if thesis is None or thesis.valuation is None:
+        missing.append("thesis.valuation")
+
+    if missing:
+        logger.warning(f"[monte_carlo] missing inputs: {missing}; emitting empty MC")
+        return {
+            "monte_carlo": {
+                "method": "skipped",
+                "errors": [f"missing inputs: {missing}"],
+            },
+            "messages": [{"node": "monte_carlo", "event": "skipped", "ts": time.perf_counter()}],
+        }
+
+    projections = Projections.model_validate(projections_dict)
+    treasury = get_10y_treasury_yield()
+    discount_rate = compute_discount_rate(treasury, thesis.valuation)
+
+    mc = simulate(
+        projections=projections,
+        valuation=thesis.valuation,
+        revenue_now=float(kpis["revenue_latest"]),
+        shares_now=float(kpis["shares_outstanding"]),
+        current_price=float(kpis["current_price"]),
+        net_cash=float(kpis.get("net_cash", 0.0)),
+        discount_rate=discount_rate,
+    )
+
     return {
-        "monte_carlo": {
-            "p10": 0.0,
-            "p25": 0.0,
-            "p50": 0.0,
-            "p75": 0.0,
-            "p90": 0.0,
-            "samples": [],
-        },
+        "monte_carlo": mc,
         "messages": [{"node": "monte_carlo", "event": "completed", "ts": time.perf_counter()}],
     }
 

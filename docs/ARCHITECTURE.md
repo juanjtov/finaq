@@ -490,6 +490,107 @@ FINAQ, why it was chosen, and any later revisions.
   agents — strongest) and `threshold_breaches` (one entry per fired
   `material_threshold` from the thesis JSON).
 
+### 6.11 Hybrid Owner-Earnings DCF + Multiple Monte Carlo (replaces simple multiple)
+
+- **Decision:** The Monte Carlo engine runs **two parallel models** per draw —
+  Buffett-style Owner-Earnings DCF (primary, 10-year horizon, present-value
+  discounted) and the simpler multiple-based model (secondary, year-5 horizon,
+  same shared draws). Both produce fair-value-per-share distributions, and a
+  `convergence_ratio = min(dcf_p50, mult_p50) / max(...)` flags divergence.
+  See `docs/FINANCE_ASSUMPTIONS.md` for full math.
+- **Original CLAUDE.md §10 spec:** simple `revenue × margin × multiple /
+  shares` model only.
+- **Revised because:** Juan asked for a more rigorous valuation methodology
+  closer to Buffett's approach. The simple multiple-based model is biased
+  toward growth-name overvaluation (high P/E × high margin compounds), missing
+  cash-flow-vs-earnings distinction, and reports nominal year-N value rather
+  than discounted PV. Owner-Earnings DCF fixes all three. The simpler model
+  is preserved as a sanity check and the convergence ratio surfaces
+  divergence to the Synthesis report.
+
+### 6.12 Distribution choice: truncated normal everywhere except exit multiple (lognormal)
+
+- **Decision:** Per-parameter sampling distributions chosen on
+  research + practitioner-pragmatic grounds. Truncated normal for growth /
+  margin / tax / capex_pct / da_pct / dilution; lognormal for exit_multiple.
+- **Why:** Most parameters live in narrow ranges where truncated normal is
+  90% as accurate as more theoretically-correct distributions (lognormal,
+  beta) at a fraction of the parameter-specification complexity. The exit
+  multiple gets lognormal because its fat right tail genuinely matters for
+  growth-name valuations — the difference between a 25× P/E and a 50× P/E
+  realisation drives much of the upper-percentile spread.
+- **Bounds source:** Penman, Damodaran, Beneish, Dyreng — see
+  `docs/FINANCE_ASSUMPTIONS.md` §7 for citations.
+
+### 6.13 Discount rate: Buffett-simplified (10y Treasury + per-thesis ERP, clipped)
+
+- **Decision:** `discount_rate = clip(treasury_10y + thesis.equity_risk_premium,
+  thesis.discount_rate_floor, thesis.discount_rate_cap)`. Treasury fetched
+  from yfinance `^TNX` ticker, cached 24h. Per-thesis ERP and floor/cap
+  declared in each thesis JSON's `valuation` block with documented basis.
+- **Original spec:** No discount rate (the simple multiple model didn't need
+  one).
+- **Why this approach over WACC / arbitrary rate:** Buffett anchors on the
+  long-Treasury rate and refuses to "compensate for risk" via higher
+  discount rates ("if it's risky, we just don't buy"). WACC depends on
+  capital structure which can shift over the horizon; Treasury + ERP is
+  simpler and more transparent. Floor/cap protect against extreme rate
+  environments (1990s 8%, 2020 0%).
+
+### 6.14 Per-thesis valuation block in the thesis JSON
+
+- **Decision:** Every thesis JSON now declares a `valuation` block with
+  `equity_risk_premium`, `erp_basis` (string, documenting *why*),
+  `terminal_growth_rate`, `terminal_growth_basis`, `discount_rate_floor`,
+  `discount_rate_cap`. Required for new theses.
+- **Why required, not defaulted:** Forces deliberateness when adding new
+  theses. Each `_basis` string is documentation written into the data file
+  itself — anyone auditing the valuation can see *why* AI cake gets a 5%
+  ERP and Construction gets 3.5%. Documentation of rationale is required
+  by the schema.
+
+### 6.16 Sensitivity diagnostic (Tier 1d)
+
+- **Decision:** `utils.monte_carlo.compute_sensitivity()` reports per-parameter
+  **elasticity** (% change in DCF P50 per 1% change in input) via finite-
+  difference perturbation. Eight inputs covered: the seven `Projections.*_mean`
+  fields plus `discount_rate`. Baseline + 8 perturbed runs at `n_sims=5000`
+  with fixed seed → deterministic and reproducible.
+- **Why elasticity, not raw partial derivatives:** Different parameters have
+  different scales (growth in [0, 2], tax in [0, 0.5], multiple in [3, 100]).
+  Elasticity normalises to "% change per 1% change," which is directly
+  comparable across inputs and tells the user which assumption matters most.
+- **Why not always run on every drill-in:** ~500ms extra per drill-in. Synthesis
+  can opt in when the report would benefit from "here's which assumption to
+  watch" framing.
+
+### 6.17 MC-node-level testing (Tier 1b + 1c)
+
+- **Decision:** Three test files cover the Monte Carlo node beyond the engine
+  itself: `test_monte_carlo_node.py` (graph-node input validation, treasury
+  fallback, discount-rate clipping), `test_monte_carlo_sanity.py` (integration:
+  real Fundamentals → real MC → P50 within 0.2-5× current price; convergence
+  ratio reasonable; discount rate within thesis band), and
+  `test_monte_carlo_sensitivity.py` (elasticity sign + magnitude + reproducibility).
+- **Why three layers:** The engine math (Tier 1a) was already covered. What
+  was missing was the *plumbing* between Fundamentals output and MC inputs
+  (a Fundamentals refactor could rename `revenue_latest` and break MC silently),
+  *output realism* (catastrophic input bugs producing $1M fair value would pass
+  shape-only tests), and the *sensitivity diagnostic* logic. Each gap closed
+  by its own test file.
+
+### 6.15 Sector P/E from a hardcoded JSON (with refresh policy)
+
+- **Decision:** Sector P/E centroids live in `data/sector_multiples.json`,
+  transcribed quarterly from Damodaran's NYU Stern tables. Used as one of
+  three weighted inputs to `exit_multiple_mean = 0.4×pe_5y_avg +
+  0.3×pe_trailing + 0.3×sector_pe`.
+- **Why hardcoded:** Phase 0 simplicity. Reliable live source (FRED-style API
+  for sector P/E aggregates) is non-trivial to set up; manual quarterly
+  refresh is acceptable for personal-tool scale.
+- **Trigger to revisit (POSTPONED §2):** Live sector-P/E data feed when
+  available reliably and free.
+
 ### 6.10 Risk does NOT modify Monte Carlo inputs in Phase 0 (Approach A)
 
 - **Decision:** Risk runs *before* MC in the graph (`risk → monte_carlo`)

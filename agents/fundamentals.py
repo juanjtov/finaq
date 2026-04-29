@@ -253,12 +253,33 @@ def compute_kpis(financials: dict) -> dict[str, Any]:
         kpis["shares_outstanding"] = info["sharesOutstanding"]
     if info.get("marketCap"):
         kpis["market_cap"] = info["marketCap"]
+    if info.get("sector"):
+        kpis["sector"] = info["sector"]
 
     if price_hist:
         latest_date = max(price_hist.keys())
         close = price_hist[latest_date].get("Close")
         if close:
             kpis["current_price"] = close
+
+    # Net cash (cash + ST investments − total debt) — needed by Monte Carlo to
+    # adjust enterprise value to equity value. Falls back to 0 if balance sheet
+    # missing key fields.
+    bs = financials.get("balance_sheet") or {}
+    bs_dates = sorted(bs.keys())
+    if bs_dates:
+        last_bs = bs[bs_dates[-1]]
+        cash_aliases = [
+            "Cash Cash Equivalents And Short Term Investments",
+            "Cash And Cash Equivalents",
+            "Cash Financial",
+        ]
+        debt_aliases = ["Total Debt", "Long Term Debt", "Net Debt"]
+        cash = _first_non_null(last_bs, cash_aliases) or 0.0
+        debt = _first_non_null(last_bs, debt_aliases) or 0.0
+        kpis["net_cash"] = cash - debt
+        kpis["cash_and_equivalents"] = cash
+        kpis["total_debt"] = debt
 
     return kpis
 

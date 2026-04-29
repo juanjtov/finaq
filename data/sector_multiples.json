@@ -1,0 +1,23 @@
+{
+  "_meta": {
+    "last_refreshed": "2026-04-28",
+    "source": "Damodaran NYU Stern data tables (manual transcription, broad sector P/E aggregates)",
+    "refresh_cadence": "quarterly",
+    "next_refresh_due": "2026-07-28",
+    "notes": "Long-run sector P/E centroids used as one input to exit_multiple_mean. Refreshed manually until docs/POSTPONED.md §2 'live sector P/E feed' lands."
+  },
+  "sectors": {
+    "Technology": 22.5,
+    "Communication Services": 17.5,
+    "Consumer Cyclical": 17.0,
+    "Consumer Defensive": 19.5,
+    "Healthcare": 18.0,
+    "Industrials": 18.0,
+    "Basic Materials": 14.5,
+    "Energy": 12.0,
+    "Financial Services": 13.5,
+    "Real Estate": 19.0,
+    "Utilities": 16.5,
+    "_default": 18.0
+  }
+}

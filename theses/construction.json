@@ -28,5 +28,13 @@
 
     {"signal": "current_price_vs_p50_mc", "operator": "<", "value": 0.65, "unit": "ratio"},
     {"signal": "current_price_vs_5yr_pe_avg", "operator": "<", "value": 0.75, "unit": "ratio"}
-  ]
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.035,
+    "erp_basis": "S&P long-run ERP (4.5%) minus 1pp for asset-backed defensive characteristics and contracted-revenue stability typical of infra contractors",
+    "terminal_growth_rate": 0.020,
+    "terminal_growth_basis": "Mature US industrial/infra GDP growth ~2% real long-run",
+    "discount_rate_floor": 0.060,
+    "discount_rate_cap": 0.110
+  }
 }

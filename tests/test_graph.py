@@ -109,12 +109,42 @@ def _stub_real_agents(monkeypatch):
 
         return stub_run
 
+    import agents as agents_pkg
     from agents import filings, fundamentals, news, risk
 
     monkeypatch.setattr(fundamentals, "run", _make_stub("fundamentals"))
     monkeypatch.setattr(filings, "run", _make_stub("filings"))
     monkeypatch.setattr(news, "run", _make_stub("news"))
     monkeypatch.setattr(risk, "run", _make_stub("risk"))
+
+    # Step 6 made monte_carlo a real engine. For graph wiring tests we still
+    # want a deterministic stub so we don't hit yfinance for the treasury rate.
+    async def stub_mc(state):
+        started = time.perf_counter()
+        return {
+            "monte_carlo": {
+                "method": "stub",
+                "dcf": {"p10": 50, "p25": 70, "p50": 100, "p75": 130, "p90": 160},
+                "multiple": {"p10": 60, "p25": 80, "p50": 110, "p75": 140, "p90": 170},
+                "convergence_ratio": 0.91,
+                "current_price": 100.0,
+                "discount_rate_used": 0.09,
+                "terminal_growth_used": 0.025,
+                "n_sims": 10000,
+                "n_years": 10,
+            },
+            "messages": [
+                {
+                    "node": "monte_carlo",
+                    "event": "completed",
+                    "ts": time.perf_counter(),
+                    "started_at": started,
+                    "completed_at": time.perf_counter(),
+                },
+            ],
+        }
+
+    monkeypatch.setattr(agents_pkg, "monte_carlo", stub_mc)
 
 
 @pytest.fixture(scope="module")

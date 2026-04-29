@@ -35,5 +35,13 @@
 
     {"signal": "current_price_vs_p50_mc", "operator": "<", "value": 0.65, "unit": "ratio"},
     {"signal": "current_price_vs_5yr_pe_avg", "operator": "<", "value": 0.75, "unit": "ratio"}
-  ]
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.05,
+    "erp_basis": "Long-run S&P 500 ERP ~4.5% + 0.5% premium for cyclical AI capex sensitivity",
+    "terminal_growth_rate": 0.030,
+    "terminal_growth_basis": "Semiconductor + hyperscaler infra industry compound growth 1980-2025 minus 1pp for ex-AI normalisation; bounded above long-run real US GDP",
+    "discount_rate_floor": 0.075,
+    "discount_rate_cap": 0.130
+  }
 }

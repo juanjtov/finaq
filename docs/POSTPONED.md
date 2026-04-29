@@ -72,6 +72,17 @@ revisit. If the trigger never fires, we never build it.
 | **Cost-tracking for eval runs** | When monthly eval cost crosses ~$10/mo and we want to budget. | Persist per-run token + dollar cost to `state.db.eval_runs` |
 | **Multi-ticker golden set** (Filings: NVDA-only; News: NVDA-only) | When ANET / AVGO / other tickers are ingested at scale and we need per-ticker quality bars. | Add 5–8 queries per ticker in `tests/eval/{filings,news}_golden_queries.py` |
 | **Synthesis-agent eval suite** (Tier 1+2+3 mirror, once Step 7 lands) | When Step 7 ships the LLM synthesis. | Mirror existing suites. |
+
+### Valuation enhancements (within Step 6 already shipped)
+
+| Item | Trigger | Estimated effort |
+|---|---|---|
+| **Live sector-P/E data feed** (replaces hardcoded `data/sector_multiples.json`) | When a free reliable source is identified (e.g., a paid Damodaran API, an FRED-style aggregator, or scraping Yahoo Finance sector pages programmatically) | Provider-research + new module + cache; ~3h |
+| **Working capital changes in owner earnings** | When backtesting reveals consistent over- or under-valuation traceable to WC dynamics | Add `Δ-WC as % of revenue` parameter to `Projections`; small math change in MC |
+| **Correlation between MC parameters** (growth ↔ margin ↔ multiple) | When backtesting reveals our independence assumption is materially wrong, OR when Synthesis reports feel under-uncertain | Replace `np.random.normal` per-param with multivariate-normal using a covariance matrix from historical data; ~30 lines |
+| **Per-period growth path** (year 1 of 50% taper to year 5 of 10%) | When user wants to model deceleration explicitly rather than via single CAGR | Refactor MC to take `growth_path: list[float]` rather than scalar; ~50 lines |
+| **Sensitivity analysis output** (∂P50/∂growth, ∂P50/∂margin, etc.) | When user wants to know "which input matters most" for a given drill-in | Compute partial derivatives via finite differences; render in Synthesis report |
+| **Backtesting** (replay historical projections through MC, check actual vs predicted) | When we have ≥1 year of drill-in history saved | Big — needs historical Fundamentals projections snapshotted; ~1 day |
 | **Risk widens Monte Carlo stds (Approach B)** | Synthesis reports feel under-uncertain after Step 8 demo, OR a missed catastrophic scenario causes a real loss. | High `level` would multiply MC stds by ~1.5x; ~30 lines of code, requires updating Synthesis to surface the widened distribution. |
 | **Risk injects tail-risk in Monte Carlo (Approach C)** | When Approach B isn't enough — the real risk profile has fat tails (e.g., regulatory shutdown). | Mixture distribution in MC: 95% normal model + 5% catastrophic mode. Bigger refactor; ~1h. |
 

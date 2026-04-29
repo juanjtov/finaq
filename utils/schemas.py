@@ -68,6 +68,9 @@ class Thesis(BaseModel):
     universe: list[str]
     relationships: list[Relationship] = []
     material_thresholds: list[MaterialThreshold] = []
+    valuation: ValuationConfig | None = (
+        None  # required for new theses; see docs/FINANCE_ASSUMPTIONS.md
+    )
 
     @model_validator(mode="after")
     def _anchors_subset_of_universe(self) -> Thesis:
@@ -108,14 +111,63 @@ class Evidence(BaseModel):
 
 
 class Projections(BaseModel):
-    """Inputs to the Monte Carlo engine, emitted by the Fundamentals agent."""
+    """Inputs to the Monte Carlo engine, emitted by the Fundamentals agent.
 
+    Two-model hybrid (see docs/FINANCE_ASSUMPTIONS.md §1):
+      - Owner-earnings DCF (primary)  uses revenue/margin/tax/capex/D&A/dilution
+      - Multiple-based (secondary)    uses revenue/margin/exit_multiple/dilution
+
+    Defaults are conservative US-large-cap baselines so the schema accepts
+    older fundamentals output during migration; the LLM's job is to override
+    with thesis-aware projections anchored to the ticker's historical KPIs.
+    """
+
+    # --- Revenue path
     revenue_growth_mean: float
     revenue_growth_std: float
+    # --- Operating margin
     margin_mean: float
     margin_std: float
+    # --- Effective tax rate (NI = OI × (1 − tax))
+    tax_rate_mean: float = 0.21  # US corporate baseline
+    tax_rate_std: float = 0.03
+    # --- Maintenance capex as % of revenue (subtracted in owner earnings)
+    maintenance_capex_pct_rev_mean: float = 0.05
+    maintenance_capex_pct_rev_std: float = 0.02
+    # --- D&A as % of revenue (added back in owner earnings)
+    da_pct_rev_mean: float = 0.04
+    da_pct_rev_std: float = 0.01
+    # --- Annual share dilution rate (positive = SBC; negative = buyback-heavy)
+    dilution_rate_mean: float = 0.01
+    dilution_rate_std: float = 0.005
+    # --- Exit multiple for the secondary model (lognormal in MC)
     exit_multiple_mean: float
     exit_multiple_std: float
+
+
+class ValuationConfig(BaseModel):
+    """Per-thesis valuation parameters used by the Monte Carlo engine.
+
+    See docs/FINANCE_ASSUMPTIONS.md §3-4 for the full reasoning behind each
+    field. The `_basis` strings are deliberately required as documentation
+    so the thesis JSON itself records *why* these values were chosen.
+    """
+
+    equity_risk_premium: float = Field(ge=0, le=0.20)
+    erp_basis: str
+    terminal_growth_rate: float = Field(ge=0, le=0.05)
+    terminal_growth_basis: str
+    discount_rate_floor: float = Field(ge=0.04, le=0.20)
+    discount_rate_cap: float = Field(ge=0.05, le=0.25)
+
+    @model_validator(mode="after")
+    def _floor_under_cap(self) -> ValuationConfig:
+        if self.discount_rate_floor >= self.discount_rate_cap:
+            raise ValueError(
+                f"discount_rate_floor ({self.discount_rate_floor}) "
+                f"must be strictly less than discount_rate_cap ({self.discount_rate_cap})"
+            )
+        return self
 
 
 class FundamentalsOutput(BaseModel):
