@@ -66,8 +66,18 @@ def _stub_payload(node: str, ticker: str) -> dict:
         },
         "risk": {
             "risk": {
-                "score_0_to_10": 5,
-                "top_risks": [{"title": "[stub]", "severity": 3, "explanation": "stub"}],
+                "level": "MODERATE",
+                "score_0_to_10": 4,
+                "top_risks": [
+                    {
+                        "title": "[stub]",
+                        "severity": 3,
+                        "explanation": "stub",
+                        "sources": [],
+                    }
+                ],
+                "convergent_signals": [],
+                "threshold_breaches": [],
                 "summary": f"[stub] risk for {ticker}",
             }
         },

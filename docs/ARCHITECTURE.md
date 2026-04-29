@@ -470,6 +470,46 @@ FINAQ, why it was chosen, and any later revisions.
   yfinance handles the duplicate fetch fine, and subsequent drill-ins
   hit the cache.
 
+### 6.9 Risk agent: synthesis-only with categorical `level`
+
+- **Decision:** The Risk agent reads `state.fundamentals`, `state.filings`,
+  and `state.news` — NO external calls — and produces a `RiskOutput` with a
+  **categorical** primary judgment (`level`: LOW / MODERATE / ELEVATED /
+  HIGH / CRITICAL). The composite `score_0_to_10` is *derived* from `level`
+  via `RISK_LEVEL_TO_SCORE = {LOW:2, MODERATE:4, ELEVATED:6, HIGH:8, CRITICAL:10}`.
+  The LLM never picks an integer directly.
+- **Original CLAUDE.md §9.4 spec:** `{"score_0_to_10": int, "top_risks": list, "summary": str}`.
+- **Revised because:** Juan asked whether the 0-10 score was the right primary
+  signal. Same anti-pattern as the LLM-judge prompt — numeric scales have
+  unstable semantics across models (a "6" on Sonnet might be a "4" on Haiku).
+  Categorical labels give a model-stable headline; the integer is *derived*
+  for spec-compatibility and quick visualisation.
+- **`top_risks.sources` field added** — every risk lists the worker agent(s)
+  that surfaced the underlying signal. Synthesis needs this for traceability.
+- **Two new structured fields:** `convergent_signals` (risks seen by 2+
+  agents — strongest) and `threshold_breaches` (one entry per fired
+  `material_threshold` from the thesis JSON).
+
+### 6.10 Risk does NOT modify Monte Carlo inputs in Phase 0 (Approach A)
+
+- **Decision:** Risk runs *before* MC in the graph (`risk → monte_carlo`)
+  but Risk does NOT alter the projections that Fundamentals emits. MC
+  uses Fundamentals' projections as-is. Risk's `level` shows up alongside
+  MC's P10/P50/P90 in the Synthesis report — composed by the human reader.
+- **Discussed alternatives:**
+  - **B.** Risk widens MC stds proportionally to `level` (HIGH = 1.5x stds).
+    Catches uncertainty more honestly but adds hidden coupling.
+  - **C.** Risk injects a tail-risk catastrophic-scenario term in MC.
+    Most realistic but a big design change.
+- **Why A wins for Phase 0:** Per-agent traceability matters more than
+  honest-uncertainty modelling at this stage. If Risk silently widened
+  the MC histogram, you'd have to know that to interpret the chart.
+  Better to keep Risk's output explicit in the report and let the human
+  reader do the integration.
+- **Trigger to revisit (POSTPONED §2):** Synthesis reports feel
+  under-uncertain after Step 8 demo, OR a missed catastrophic scenario
+  burns the user → switch to Approach B or C.
+
 ### 6.8 `as_of` on NewsItem (schema addition)
 
 - **Decision:** `NewsItem` schema gained an `as_of: str | None = None`
@@ -589,6 +629,21 @@ FINAQ, why it was chosen, and any later revisions.
 - **Why:** Two judgments per call halves cost vs separate calls;
   sentiment-accuracy is computed only over decided items (UNCLEAR
   filtered out, not counted against the metric).
+
+### 7.6f Risk agent quality eval (3 tiers)
+
+- **Decision:** Risk has the same three-tier eval shape as the RAG-bound
+  agents. **Tier 1** (deterministic, `pytest -m integration`):
+  level↔score consistency, every threshold_breach references a real
+  thesis signal, every top_risk.sources is non-empty + valid. **Tier 2**
+  (`pytest -m eval`, ~$0.025): LLM-judge classifies each top_risk as
+  SUPPORTED / UNSUPPORTED + severity REASONABLE / TOO_HIGH / TOO_LOW;
+  computes `groundedness_rate` + `severity_sanity`. **Tier 3** (`pytest
+  -m eval`, ~$1+): RAGAS faithfulness on the Risk summary using worker
+  summaries as contexts.
+- **Why same shape as RAG eval:** Mission Control panel reads from the
+  same `data_cache/eval/runs/{suite=*}.json` convention; one card per
+  agent. Eval discipline is uniform across the pipeline.
 
 ### 7.6 Multi-signal per-query gate for Tier 2
 

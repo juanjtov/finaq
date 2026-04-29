@@ -71,8 +71,9 @@ revisit. If the trigger never fires, we never build it.
 | **Reference-answer generation for context_recall** (Tier 3 currently runs without ground_truth; adding it unlocks `context_recall` metric) | When we want to compare retrieval strategies head-to-head and `context_precision` alone isn't discriminative enough. | Curate reference answers per golden query (~1h) |
 | **Cost-tracking for eval runs** | When monthly eval cost crosses ~$10/mo and we want to budget. | Persist per-run token + dollar cost to `state.db.eval_runs` |
 | **Multi-ticker golden set** (Filings: NVDA-only; News: NVDA-only) | When ANET / AVGO / other tickers are ingested at scale and we need per-ticker quality bars. | Add 5–8 queries per ticker in `tests/eval/{filings,news}_golden_queries.py` |
-| **Risk-agent eval suite** (Tier 1+2+3 mirror, once Step 5d is real) | When Step 5d real implementation lands. | Mirror the Filings/News suite shape. |
-| **Synthesis-agent eval suite** (Tier 1+2+3 mirror, once Step 7 lands) | When Step 7 ships the Opus synthesis. | Mirror existing suites. |
+| **Synthesis-agent eval suite** (Tier 1+2+3 mirror, once Step 7 lands) | When Step 7 ships the LLM synthesis. | Mirror existing suites. |
+| **Risk widens Monte Carlo stds (Approach B)** | Synthesis reports feel under-uncertain after Step 8 demo, OR a missed catastrophic scenario causes a real loss. | High `level` would multiply MC stds by ~1.5x; ~30 lines of code, requires updating Synthesis to surface the widened distribution. |
+| **Risk injects tail-risk in Monte Carlo (Approach C)** | When Approach B isn't enough — the real risk profile has fat tails (e.g., regulatory shutdown). | Mixture distribution in MC: 95% normal model + 5% catastrophic mode. Bigger refactor; ~1h. |
 
 ### Fundamentals agent (within Step 5a's scope, may revisit when Step 5d lands)
 

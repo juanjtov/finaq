@@ -161,9 +161,60 @@ def test_top_risk_severity_clamped_to_1_through_5():
 
 
 def test_risk_output_clamps_score_0_to_10():
+    """`score_0_to_10` is now derived from `level`; the model validator
+    enforces the canonical mapping. Mismatches raise."""
     with pytest.raises(ValidationError):
-        RiskOutput(score_0_to_10=11, top_risks=[], summary="x")
-    RiskOutput(score_0_to_10=0, top_risks=[], summary="x")  # ok
+        # Out of 0..10 range
+        RiskOutput(level="LOW", score_0_to_10=11, top_risks=[], summary="x")
+    with pytest.raises(ValidationError):
+        # level + score don't match canonical mapping
+        RiskOutput(level="LOW", score_0_to_10=10, top_risks=[], summary="x")
+    # ok — LOW maps to 2
+    RiskOutput(level="LOW", score_0_to_10=2, top_risks=[], summary="x")
+    # ok — CRITICAL maps to 10
+    RiskOutput(level="CRITICAL", score_0_to_10=10, top_risks=[], summary="x")
+
+
+def test_risk_level_to_score_mapping_is_canonical():
+    from utils.schemas import RISK_LEVEL_TO_SCORE
+
+    assert RISK_LEVEL_TO_SCORE == {
+        "LOW": 2,
+        "MODERATE": 4,
+        "ELEVATED": 6,
+        "HIGH": 8,
+        "CRITICAL": 10,
+    }
+
+
+def test_risk_output_accepts_convergent_signals_and_threshold_breaches():
+    from utils.schemas import ConvergentSignal, ThresholdBreach
+
+    out = RiskOutput(
+        level="ELEVATED",
+        score_0_to_10=6,
+        top_risks=[],
+        convergent_signals=[
+            ConvergentSignal(
+                theme="supply concentration",
+                sources=["fundamentals", "news"],
+                explanation="Both Fundamentals and News surfaced supply-concentration risk.",
+            )
+        ],
+        threshold_breaches=[
+            ThresholdBreach(
+                signal="fcf_yield",
+                operator="<",
+                threshold_value=4,
+                observed_value=1.84,
+                explanation="FCF yield well below the 4% margin-of-safety floor.",
+                source="fundamentals",
+            )
+        ],
+        summary="x",
+    )
+    assert out.level == "ELEVATED"
+    assert out.threshold_breaches[0].observed_value == 1.84
 
 
 # --- Cross-thesis sanity check (Phase 3 pattern detection foreshadowing) -----

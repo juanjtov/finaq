@@ -247,11 +247,32 @@ Tavily search for `{ticker} {company_name}` over the past 90 days. Top 15 result
 
 ### 9.4 Risk (`agents/risk.py`)
 
-Reads `state.fundamentals`, `state.filings`, `state.news`. **No external calls** — purely a synthesis of red flags surfaced by the other three. Output:
+Reads `state.fundamentals`, `state.filings`, `state.news`. **No external calls** — purely a synthesis of red flags surfaced by the other three. The agent looks for four risk patterns:
+
+1. **Convergent signals** — same risk surfaces in 2+ source agents (strongest signal)
+2. **Threshold breaches** — `material_thresholds` from the thesis JSON that fired
+3. **Divergent signals** — sources contradict each other (tension itself is a risk)
+4. **Implicit gaps** — what the thesis assumes but the evidence doesn't support
+
+The LLM emits a categorical `level` (LOW / MODERATE / ELEVATED / HIGH / CRITICAL); the composite `score_0_to_10` is *derived* from `level` via the canonical mapping `{LOW:2, MODERATE:4, ELEVATED:6, HIGH:8, CRITICAL:10}`. The categorical primary keeps the judgment model-stable (same anti-pattern fix as the LLM-judge prompt — see ARCHITECTURE §7.3); the integer score is kept for spec compatibility and quick visualisation. Risk does **not** modify Monte Carlo inputs in Phase 0 (see ARCHITECTURE §6.10).
+
+Output:
 
 ```python
-{"risk": {"score_0_to_10": int, "top_risks": list[dict], "summary": str}}
+{
+  "risk": {
+    "level": str,                       # "LOW" | "MODERATE" | "ELEVATED" | "HIGH" | "CRITICAL"
+    "score_0_to_10": int,               # derived from level
+    "summary": str,                     # 3-5 sentences integrating the four risk patterns
+    "top_risks": list[TopRisk],         # 3-7 items, each with title + severity 1-5 + explanation + sources
+    "convergent_signals": list[dict],   # 0-5 items where ≥2 agents agreed
+    "threshold_breaches": list[dict],   # 0-N items, one per fired threshold
+    "errors": list[str],
+  }
+}
 ```
+
+`TopRisk.sources` is the list of worker agents (`fundamentals` / `filings` / `news`) that surfaced the underlying signal — required for downstream traceability into Synthesis.
 
 ### 9.5 Synthesis (`agents/synthesis.py`)
 

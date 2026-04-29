@@ -17,6 +17,18 @@ OPERATORS = (">", "<", "abs >", "contains")
 Operator = Literal[">", "<", "abs >", "contains"]
 RelationshipType = Literal["supplier", "customer", "peer", "competitor"]
 NewsSentiment = Literal["bull", "bear", "neutral"]
+RiskLevel = Literal["LOW", "MODERATE", "ELEVATED", "HIGH", "CRITICAL"]
+
+# Risk level → 0-10 score mapping. The LLM emits `level` (categorical, model-stable);
+# `score_0_to_10` is derived. Keeps spec-compliance with CLAUDE.md §9.4 while
+# avoiding the unstable-numeric-scale problem documented in ARCHITECTURE §7.6e.
+RISK_LEVEL_TO_SCORE: dict[str, int] = {
+    "LOW": 2,
+    "MODERATE": 4,
+    "ELEVATED": 6,
+    "HIGH": 8,
+    "CRITICAL": 10,
+}
 
 
 class Relationship(BaseModel):
@@ -148,13 +160,55 @@ class TopRisk(BaseModel):
     title: str
     severity: int = Field(ge=1, le=5)
     explanation: str
+    sources: list[str] = []  # which worker agents surfaced it: ["fundamentals", "news"]
+
+
+class ConvergentSignal(BaseModel):
+    """A risk theme that surfaced in 2+ source agents — strongest cross-modal signal."""
+
+    theme: str  # short descriptor, e.g. "supply concentration"
+    sources: list[str]  # ≥2 of: "fundamentals" | "filings" | "news"
+    explanation: str
+
+
+class ThresholdBreach(BaseModel):
+    """A material_threshold from the thesis JSON that the worker outputs imply has fired."""
+
+    signal: str  # threshold's signal name from the thesis JSON
+    operator: Operator
+    threshold_value: float | str
+    observed_value: float | str | None = None  # may be None if signal is qualitative
+    explanation: str
+    source: str  # "fundamentals" | "filings" | "news" — which agent surfaced the breach
 
 
 class RiskOutput(BaseModel):
+    """Output of the Risk agent — synthesis-only, reads other workers' outputs.
+
+    `level` is the primary categorical judgment (model-stable). `score_0_to_10`
+    is derived from `level` via RISK_LEVEL_TO_SCORE for spec-compatibility and
+    quick visualisation. The substantive output is `top_risks` plus the new
+    structured fields (`convergent_signals`, `threshold_breaches`).
+    """
+
+    level: RiskLevel
     score_0_to_10: int = Field(ge=0, le=10)
     top_risks: list[TopRisk]
+    convergent_signals: list[ConvergentSignal] = []
+    threshold_breaches: list[ThresholdBreach] = []
     summary: str
     errors: list[str] = []
+
+    @model_validator(mode="after")
+    def _score_matches_level(self) -> RiskOutput:
+        """Score must equal the canonical mapping for the given level."""
+        expected = RISK_LEVEL_TO_SCORE[self.level]
+        if self.score_0_to_10 != expected:
+            raise ValueError(
+                f"score_0_to_10 ({self.score_0_to_10}) does not match level {self.level!r} "
+                f"(expected {expected} per RISK_LEVEL_TO_SCORE)"
+            )
+        return self
 
 
 class SynthesisOutput(BaseModel):
