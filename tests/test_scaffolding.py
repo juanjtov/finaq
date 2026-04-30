@@ -105,3 +105,75 @@ def test_logger_writes_configured_format(caplog):
         "hello scaffolding" in record.message and record.name == "finaq"
         for record in caplog.records
     )
+
+
+# --- humanize_amount -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (215_938_000_000, "$215.94B"),
+        (30_000_000_000, "$30.00B"),
+        (1_500_000, "$1.50M"),
+        (2_500_000_000_000, "$2.50T"),
+        (213.17, "$213.17"),
+        (0, "$0.00"),
+        (-12_300_000, "$-12.30M"),  # negative passes through with sign
+    ],
+)
+def test_humanize_amount_with_dollar_prefix(value, expected):
+    from utils import humanize_amount
+
+    assert humanize_amount(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (24_300_000_000, "24.30B"),
+        (500_000_000, "500.00M"),
+        (1_500, "1.50K"),  # K only kicks in when no $ prefix
+    ],
+)
+def test_humanize_amount_no_prefix(value, expected):
+    from utils import humanize_amount
+
+    assert humanize_amount(value, prefix="") == expected
+
+
+def test_humanize_amount_handles_none():
+    from utils import humanize_amount
+
+    assert humanize_amount(None) == "—"
+
+
+def test_humanize_amount_handles_nan():
+    from utils import humanize_amount
+
+    assert humanize_amount(float("nan")) == "—"
+
+
+def test_humanize_amount_handles_non_numeric():
+    """Anything not coercible to float falls back to str()."""
+    from utils import humanize_amount
+
+    assert humanize_amount("oops") == "oops"
+
+
+def test_humanize_amount_currency_in_thousands_stays_uncompacted():
+    """$1,234 is more readable than $1.23K so we don't compact below 1M
+    when prefix='$'. The K threshold only kicks in for unit-less values."""
+    from utils import humanize_amount
+
+    # Currency: full number, comma separators
+    assert humanize_amount(1_234, prefix="$") == "$1,234.00"
+    # No prefix: K kicks in
+    assert humanize_amount(1_234, prefix="") == "1.23K"
+
+
+def test_humanize_amount_precision_argument():
+    from utils import humanize_amount
+
+    assert humanize_amount(215_938_000_000, precision=0) == "$216B"
+    assert humanize_amount(215_938_000_000, precision=3) == "$215.938B"

@@ -18,8 +18,7 @@ Three categories:
 
 | Step | What | Status | Notes |
 |---|---|---|---|
-| 5z | **Observability foundation** | pending | LangSmith env opt-in, `data/state.py` SQLite layer, `_safe_node` wires `record_*` calls. Unlocks mission-control surfaces in Steps 8/10/11/12. |
-| 8  | **Streamlit UI + Mission Control page** | pending | Main dashboard + `ui/pages/mission_control.py` reading `state.db`. Pre-cached demo runs (NVDA on AI cake, EME on Construction). |
+| 5z | **Observability foundation** | pending | LangSmith env opt-in, `data/state.py` SQLite layer, `_safe_node` wires `record_*` calls. Mission Control reads its placeholders today; Step 5z will populate them. |
 
 ### Phase 1 — personal MVP
 

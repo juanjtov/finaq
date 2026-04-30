@@ -1013,6 +1013,147 @@ FINAQ, why it was chosen, and any later revisions.
   rendering — all without writing a frontend. FastAPI + React would
   triple the surface area.
 
+### 10.3 Six dashboard surfaces (Step 8)
+
+- **Decision:** The Streamlit app is one main page (`ui/app.py`) plus
+  five auto-discovered subpages in `ui/pages/`. Each surface answers a
+  distinct user question:
+
+  | Surface | User question it answers | Source of truth |
+  |---|---|---|
+  | Dashboard (`app.py`) | "What does the model say about this ticker right now?" | Synthesis report + state |
+  | Direct Agent (`direct_agent.py`) | "Just re-run filings." / "Ask news about X." | `agents.qa.ask()` + `agents.<agent>.run()` |
+  | New Thesis (`new_thesis.py`) | "I want a new persistent thesis." | Pydantic-validated form → `theses/<slug>.json` |
+  | Architecture (`architecture.py`) | "What is this platform and how do its parts fit?" | Live read of `agents/`, `data/`, `utils/models.py`, `.env` |
+  | Methodology (`methodology.py`) | "Why are the numbers what they are?" | `docs/FINANCE_ASSUMPTIONS.md` + thesis `valuation` blocks |
+  | Mission Control (`mission_control.py`) | "Is the system healthy? What are the recent runs?" | `data_cache/eval/runs/` + (Step 5z) `state.db` |
+
+- **Why six (not three)**: Direct Agent + New Thesis serve actions (do
+  something), not viewing. Architecture + Methodology serve auditability
+  (the user can verify the model). Mission Control serves operations.
+  Lumping any of them into the main dashboard would clutter the
+  drill-in surface, which is the most-used path.
+- **Reusable widgets** in `ui/components.py`: `confidence_badge`,
+  `kpi_grid`, `mc_chart`, `scenario_card`, `evidence_list`,
+  `watchlist_card`, `freshness_card`, `agent_expander`, `page_header`.
+  Every page imports from this module so palette / layout drift across
+  surfaces is impossible.
+
+### 10.4 Per-agent `ask()` Q&A path
+
+- **Decision:** Each of the four worker agents (fundamentals, filings,
+  news, risk) gets a parallel **`ask()`** function alongside `run()`,
+  centralised in `agents/qa.py`. Q&A uses a cheap LLM (`MODEL_AGENT_QA`,
+  Haiku-tier) over the agent's existing structured output — except
+  Filings, which re-runs RAG retrieval scoped to the user's question.
+- **Why a separate module** rather than methods on each agent file:
+  the four functions share boilerplate (prompt loading, JSON parsing,
+  citation coercion, error fallback). DRY by rule of three is satisfied
+  with four call sites; a shared module is cheaper to maintain than
+  four near-duplicate per-agent methods.
+- **Why a separate model var** (`MODEL_AGENT_QA`): Q&A calls are
+  potentially frequent (dashboard interactions, Telegram bot turns) and
+  scoped to a single agent's payload — Haiku is the right tier. Using
+  `MODEL_TRIAGE` would conflate two unrelated cost surfaces.
+- **Reused by Phase 1 Telegram**: the `/fundamentals|/filings|/news|/risk
+  TICKER "<question>"` slash commands all dispatch through the same
+  `ask()` function — keeping the dashboard and bot capability identical.
+
+### 10.5 Form-based thesis creation (vs LLM-synthesized)
+
+- **Decision:** A persistent thesis is created via the Streamlit
+  `new_thesis.py` form: name + summary + universe + anchors +
+  relationships (data editor) + thresholds (data editor) + valuation
+  block. Pydantic validates; result is written to `theses/<slug>.json`.
+- **Why not LLM-synthesized for persistent theses**: persistent theses
+  drive Triage rules + per-thesis valuation. The `_basis` strings in the
+  valuation block are required — the user MUST own the rationale, not
+  delegate it. LLM-synthesized theses would hide assumptions inside the
+  LLM's prompt and produce confidently-wrong rationales.
+- **Distinct from Phase 1 `/analyze TOPIC`**: that command (Step 10)
+  creates a *transient* AI-synthesized thesis for a one-shot drill-in
+  and explicitly does NOT persist. The two surfaces serve different
+  workflows: form = "this is my thesis going forward"; `/analyze` = "let
+  me see what the system thinks about defense semis right now."
+
+---
+
+## §11 Observability (Step 5z)
+
+### 11.1 Two-layer observability: SQLite + LangSmith
+
+- **Decision:** Two complementary layers, both always-available, neither
+  required:
+  - **`data_cache/state.db`** (always on, no key) — local SQLite. Records
+    *what happened*: graph runs, node runs, alerts, triage runs, errors.
+    Module: `data/state.py`. Read by Mission Control panel.
+  - **LangSmith** (opt-in via `LANGSMITH_TRACING=true`, free tier) —
+    auto-instruments every LLM call with full prompt + response + tokens
+    + USD cost. No code change required; LangGraph picks up env vars on
+    process boot.
+- **Why two layers**: state.db answers "did the system run, how long, did
+  it fail" (operational) — LangSmith answers "what did this specific LLM
+  call cost / look like" (per-call audit). Trying to do both in SQLite
+  would duplicate LangSmith's work for no gain. Skipping LangSmith would
+  blind us to per-call costs (which are the dominant FINAQ expense).
+- **Why not Postgres / DataDog / Sentry**: single-user single-box. Adding
+  hosted observability requires either an SaaS account or a daemon — both
+  multiply maintenance. SQLite + LangSmith covers the operational and
+  per-call surface with zero infrastructure.
+
+### 11.2 `state.db` schema (5 tables + meta)
+
+  | Table | Purpose | Written by |
+  |---|---|---|
+  | `graph_runs` | One row per drill-in. status (running/completed/failed), duration, confidence, error rollup. | `invoke_with_telemetry()` |
+  | `node_runs` | One row per agent-node entry/exit. status, duration, error. FK to graph_runs. | `_safe_node` wrapper |
+  | `alerts` | Phase 1 Triage alerts. severity, signal, status (pending/acked/dismissed/actioned). | Phase 1 `agents/triage.py` |
+  | `triage_runs` | One row per scheduled Triage run. items_scanned, alerts_emitted, duration. | Phase 1 `scripts/run_triage.py` |
+  | `errors` | Centralised error log. Backs the Mission Control "Recent errors" panel. | `_safe_node`, agents on demand |
+  | `meta` | Schema version + future migration markers. | `init_db()` |
+
+  Migration is idempotent (`CREATE TABLE IF NOT EXISTS`); calling
+  `init_db()` twice is a no-op and existing rows survive.
+
+### 11.3 Run-ID propagation via `contextvars`
+
+- **Decision:** A single `current_run_id` `ContextVar` set at the top of
+  `invoke_with_telemetry()` and read by `_safe_node` for every node row.
+- **Why ContextVar (not state.run_id)**: keeps the FinaqState dict clean
+  of operational metadata. Adding `run_id` to the state shape would mean
+  every test fixture / agent contract has to know about it, even though
+  nothing in the agent code actually consumes it.
+- **Why not threadlocal**: agents run in `asyncio.to_thread`, which can
+  span threads. ContextVar is the asyncio-native equivalent and copies
+  correctly across `asyncio.gather`.
+- **Plain `graph.ainvoke()` still works**: when no contextvar is set,
+  `_safe_node` writes `node_runs.run_id = NULL`. Tests use this path
+  for speed. The dashboard always uses `invoke_with_telemetry()`.
+
+### 11.4 Telemetry never breaks the graph
+
+- **Decision:** `_safe_node` wraps the SQLite writes in a try/except that
+  catches and logs but does not propagate. If `state.db` is locked, full,
+  or corrupted, the graph still completes.
+- **Why**: observability is supposed to be invisible to the happy path.
+  A corrupt telemetry DB should never cause a real drill-in to fail; the
+  user should be able to recover by deleting `state.db` and continuing.
+- **Implication for tests**: the autouse `_isolated_state_db` fixture in
+  `tests/conftest.py` redirects `data.state.DB_PATH` to a tmp file per
+  test session, so unit tests never touch the user's real telemetry DB.
+
+### 11.5 Mission Control reads (only) state.db
+
+- **Decision:** The Mission Control page (`ui/pages/mission_control.py`)
+  reads exclusively from `state.db` for graph/node/error data — plus
+  filesystem freshness probes for the data caches and `data_cache/eval/runs/`
+  for eval-tier history. It also surfaces a LangSmith deep-link button
+  when LangSmith is configured.
+- **Why deep-link instead of mirror**: LangSmith already has a
+  full-featured UI for traces. Re-implementing it inside Streamlit would
+  be a multi-week project for marginal gain. A button that opens the
+  external dashboard with the right project filter is enough.
+
 ---
 
 ## How to update this doc

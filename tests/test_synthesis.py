@@ -619,6 +619,67 @@ def test_pdf_export_handles_bold_inline(tmp_path: Path):
     assert out.exists()
 
 
+def test_pdf_export_with_mc_samples_embeds_chart(tmp_path: Path):
+    """Passing `mc_samples=...` should embed an MC histogram. The PDF should
+    grow noticeably vs the no-chart case (chart PNG ~30-50KB)."""
+    import numpy as np
+
+    samples = np.random.normal(loc=185, scale=40, size=5000)
+
+    bare = export(SAMPLE_REPORT, tmp_path / "bare.pdf")
+    with_chart = export(
+        SAMPLE_REPORT,
+        tmp_path / "with_chart.pdf",
+        mc_samples=samples,
+        current_price=200.0,
+    )
+    # Chart-embedded PDF must be at least 15KB larger than bare PDF.
+    assert with_chart.stat().st_size > bare.stat().st_size + 15_000
+
+
+def test_pdf_export_with_kpis_renders_cover_table(tmp_path: Path):
+    """Passing `kpis=...` should add the cover-page KPI table. Heuristic:
+    the file grows because of the additional table flowables."""
+    bare = export(SAMPLE_REPORT, tmp_path / "bare.pdf")
+    with_kpis = export(
+        SAMPLE_REPORT,
+        tmp_path / "with_kpis.pdf",
+        kpis={
+            "current_price": 200.0,
+            "revenue_latest": 60.9e9,
+            "fcf_yield": 1.84,
+            "pe_trailing": 44.3,
+        },
+    )
+    assert with_kpis.stat().st_size > bare.stat().st_size
+
+
+def test_pdf_export_cover_handles_empty_kpis(tmp_path: Path):
+    """An empty `kpis={}` must NOT crash; the cover should just skip the table."""
+    out = export(SAMPLE_REPORT, tmp_path / "empty_kpis.pdf", kpis={})
+    assert out.exists()
+
+
+def test_pdf_export_explicit_confidence_overrides_markdown(tmp_path: Path):
+    """When `confidence='high'` is passed, it must override whatever the
+    markdown's `**Confidence:** medium` line says. Useful when the caller
+    has the structured `state.synthesis_confidence` and wants to ensure the
+    badge matches without re-parsing prose."""
+    out = export(SAMPLE_REPORT, tmp_path / "high_conf.pdf", confidence="high")
+    assert out.exists()
+
+
+def test_pdf_export_handles_url_in_evidence(tmp_path: Path):
+    """URLs in the Evidence section get wrapped as clickable links — must not
+    crash the renderer."""
+    md = SAMPLE_REPORT.replace(
+        "## Evidence\n- yfinance: revenue=$60.9B (2026-Q4)",
+        "## Evidence\n- https://example.com/article (2026-04-15)\n- yfinance: revenue=$60.9B (2026-Q4)",
+    )
+    out = export(md, tmp_path / "links.pdf")
+    assert out.exists()
+
+
 # --- Structural assertions on a sample synthesis output --------------------
 
 

@@ -37,6 +37,7 @@ All model strings below are passed as the `model` argument to OpenRouter. Confir
 | Router (Phase 1) | `anthropic/claude-haiku-4.5` | `MODEL_ROUTER` | Telegram intent classification, must be cheap + fast |
 | Ad-hoc Thesis (Phase 1) | `anthropic/claude-sonnet-4.6` | `MODEL_ADHOC_THESIS` | Decomposes a free-text topic into a thesis JSON for `/analyze` |
 | Judge (RAG eval) | `anthropic/claude-haiku-4.5` | `MODEL_JUDGE` | Used by `pytest -m eval` to score retrieval relevance and faithfulness; cheap-tier role |
+| Per-agent Q&A | `anthropic/claude-haiku-4.5` | `MODEL_AGENT_QA` | Powers `agents/qa.py.ask()` for the dashboard's Direct Agent panel + Phase 1 Telegram per-agent commands. Cheap-tier role since calls are frequent and scoped to a single agent's structured output. |
 | Discovery (Phase 2+) | `anthropic/claude-opus-4.7` | `MODEL_DISCOVERY` | Thesis decomposition, runs rarely |
 | Embeddings | `text-embedding-3-small` (via OpenRouter) | `MODEL_EMBEDDINGS` | ChromaDB filings collection |
 

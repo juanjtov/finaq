@@ -266,6 +266,23 @@ class RiskOutput(BaseModel):
 SynthesisConfidence = Literal["low", "medium", "high"]
 
 
+class AgentAnswer(BaseModel):
+    """Output of the per-agent free-text Q&A path (`ask()`).
+
+    Used by the dashboard's Direct Agent panel and Phase 1 Telegram
+    `/fundamentals|/filings|/news|/risk TICKER "<question>"` commands.
+    Smaller / cheaper LLM call than the agent's main `run()` step —
+    answers a focused question over the agent's existing structured output
+    (or, for Filings, re-runs RAG with the user's question).
+    """
+
+    agent: Literal["fundamentals", "filings", "news", "risk"]
+    question: str
+    answer: str
+    citations: list[Evidence] = []
+    errors: list[str] = []
+
+
 class SynthesisOutput(BaseModel):
     """Final report from the Synthesis agent.
 

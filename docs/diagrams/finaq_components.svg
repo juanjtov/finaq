@@ -1,0 +1,448 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1000"
+     font-family="Georgia, 'Iowan Old Style', 'Source Serif Pro', serif">
+
+  <!-- ======== CANVAS ======== -->
+  <rect width="1400" height="1000" fill="#FFFFFF"/>
+
+  <!-- ======== HEADER BAND ======== -->
+  <rect width="1400" height="138" fill="#F4ECDC"/>
+  <line x1="0" y1="138" x2="1400" y2="138" stroke="#E0D5C2" stroke-width="1"/>
+
+  <!-- Brand marks -->
+  <text x="50" y="34" font-size="9" fill="#2D4F3A" letter-spacing="2.5"
+        font-family="Helvetica, Arial, sans-serif" font-weight="600">FINAQ · COMPONENTS</text>
+  <text x="1350" y="34" font-size="9" fill="#2D4F3A" text-anchor="end" letter-spacing="2.5"
+        font-family="Helvetica, Arial, sans-serif" font-weight="600">v0.1 · 2026</text>
+
+  <!-- Title (left-aligned to match example layout) -->
+  <text x="50" y="78" font-size="38" font-weight="500" fill="#2D4F3A"
+        letter-spacing="0.5">Components</text>
+  <text x="50" y="106" font-size="13" fill="#1A1611" font-style="italic" opacity="0.78">
+    Reusable agents, connectors, and utilities — wire them into a drill-in flow.
+  </text>
+
+  <!-- Right-side meta -->
+  <text x="1350" y="78" font-size="11" fill="#2D4F3A" text-anchor="end"
+        font-family="Helvetica, Arial, sans-serif" letter-spacing="2" font-weight="600">
+    12  COMPONENTS
+  </text>
+  <text x="1350" y="100" font-size="11" fill="#1A1611" text-anchor="end"
+        font-style="italic" opacity="0.7">
+    9 LLM-powered  ·  3 pure-Python  ·  2 Phase 1+
+  </text>
+
+  <!-- ======== SEARCH BAR ======== -->
+  <g>
+    <rect x="50" y="170" width="500" height="44" rx="6"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <!-- Magnifying glass -->
+    <g transform="translate(72, 192)" stroke="#1A1611" stroke-width="1.4" fill="none" opacity="0.45">
+      <circle cx="0" cy="0" r="6"/>
+      <line x1="4.3" y1="4.3" x2="9" y2="9"/>
+    </g>
+    <text x="96" y="198" font-size="13" fill="#1A1611" opacity="0.42"
+          font-family="Helvetica, Arial, sans-serif" font-style="italic">
+      Search components…
+    </text>
+    <!-- Keyboard hint -->
+    <rect x="510" y="183" width="32" height="18" rx="3"
+          fill="#FBF5E8" stroke="#E0D5C2" stroke-width="0.8"/>
+    <text x="526" y="196" font-size="10" fill="#1A1611" text-anchor="middle"
+          font-family="Helvetica, Arial, sans-serif" font-weight="600" opacity="0.6">⌘K</text>
+  </g>
+
+  <!-- Filter chips on the right -->
+  <g>
+    <rect x="1042" y="178" width="68" height="26" rx="13"
+          fill="#2D4F3A" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="1076" y="195" font-size="10" font-weight="700" fill="#F4ECDC"
+          text-anchor="middle" letter-spacing="0.5"
+          font-family="Helvetica, Arial, sans-serif">All</text>
+
+    <rect x="1118" y="178" width="68" height="26" rx="13"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1"/>
+    <text x="1152" y="195" font-size="10" font-weight="600" fill="#1A1611"
+          text-anchor="middle" letter-spacing="0.4" opacity="0.7"
+          font-family="Helvetica, Arial, sans-serif">Agents</text>
+
+    <rect x="1194" y="178" width="68" height="26" rx="13"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1"/>
+    <text x="1228" y="195" font-size="10" font-weight="600" fill="#1A1611"
+          text-anchor="middle" letter-spacing="0.4" opacity="0.7"
+          font-family="Helvetica, Arial, sans-serif">Data</text>
+
+    <rect x="1270" y="178" width="80" height="26" rx="13"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1"/>
+    <text x="1310" y="195" font-size="10" font-weight="600" fill="#1A1611"
+          text-anchor="middle" letter-spacing="0.4" opacity="0.7"
+          font-family="Helvetica, Arial, sans-serif">Phase 1+</text>
+  </g>
+
+  <!-- ======== CARD 01 — SEC Filings ======== -->
+  <g>
+    <rect x="50" y="240" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <!-- Swatch + icon -->
+    <rect x="74" y="264" width="34" height="34" rx="5"
+          fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(79, 269)" stroke="#1A1611" stroke-width="1.4" fill="none">
+      <rect x="2" y="0" width="20" height="24" rx="2"/>
+      <line x1="6" y1="7" x2="18" y2="7"/>
+      <line x1="6" y1="13" x2="18" y2="13"/>
+      <line x1="6" y1="19" x2="14" y2="19"/>
+    </g>
+    <!-- Title + subtitle -->
+    <text x="122" y="285" font-size="17" font-weight="600" fill="#1A1611">SEC Filings</text>
+    <text x="122" y="304" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      DATA  CONNECTOR  ·  IDEMPOTENT
+    </text>
+    <!-- Description -->
+    <text x="74" y="338" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="74" dy="0">Pulls 10-K and 10-Q full-text filings from EDGAR;</tspan>
+      <tspan x="74" dy="17">cached on disk by accession number.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 02 — Market Data ======== -->
+  <g>
+    <rect x="493" y="240" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <rect x="517" y="264" width="34" height="34" rx="5"
+          fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(522, 269)" stroke="#1A1611" stroke-width="1.4" fill="none">
+      <polyline points="2,21 7,16 12,18 17,8 22,12"/>
+      <line x1="2" y1="24" x2="22" y2="24" opacity="0.4"/>
+    </g>
+    <text x="565" y="285" font-size="17" font-weight="600" fill="#1A1611">Market Data</text>
+    <text x="565" y="304" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      DATA  CONNECTOR  ·  24h CACHE
+    </text>
+    <text x="517" y="338" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="517" dy="0">Five-year price history, financials, and sector</tspan>
+      <tspan x="517" dy="17">multiples via yfinance with retry on flake.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 03 — Tavily News ======== -->
+  <g>
+    <rect x="936" y="240" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <rect x="960" y="264" width="34" height="34" rx="5"
+          fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(965, 269)" stroke="#1A1611" stroke-width="1.4" fill="none">
+      <circle cx="10" cy="10" r="7"/>
+      <line x1="15" y1="15" x2="22" y2="22"/>
+    </g>
+    <text x="1008" y="285" font-size="17" font-weight="600" fill="#1A1611">Tavily News</text>
+    <text x="1008" y="304" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      DATA  CONNECTOR  ·  90-DAY WINDOW
+    </text>
+    <text x="960" y="338" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="960" dy="0">Catalyst-oriented news search keyed to ticker;</tspan>
+      <tspan x="960" dy="17">top-15 results harvested per drill.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 04 — Fundamentals Agent ======== -->
+  <g>
+    <rect x="50" y="415" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <rect x="74" y="439" width="34" height="34" rx="5"
+          fill="#E5D2A8" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(79, 444)" stroke="#1A1611" stroke-width="1.4" fill="none">
+      <rect x="2" y="13" width="4" height="11"/>
+      <rect x="9" y="6" width="4" height="18"/>
+      <rect x="16" y="9" width="4" height="15"/>
+    </g>
+    <text x="122" y="460" font-size="17" font-weight="600" fill="#1A1611">Fundamentals</text>
+    <text x="122" y="479" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      WORKER AGENT  ·  DRILL-IN
+    </text>
+    <!-- LLM pill -->
+    <rect x="395" y="446" width="48" height="20" rx="4"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="419" y="460" font-size="9" font-weight="700" fill="#2D4F3A"
+          text-anchor="middle" letter-spacing="0.6"
+          font-family="Helvetica, Arial, sans-serif">+ LLM</text>
+    <text x="74" y="513" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="74" dy="0">Summarizes growth, margins, and FCF; emits</tspan>
+      <tspan x="74" dy="17">Monte Carlo prior parameters for downstream sim.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 05 — Filings RAG Agent ======== -->
+  <g>
+    <rect x="493" y="415" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <rect x="517" y="439" width="34" height="34" rx="5"
+          fill="#C8DACC" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(522, 444)" stroke="#1A1611" stroke-width="1.4" fill="none">
+      <rect x="2" y="2" width="15" height="20" rx="1.5"/>
+      <rect x="7" y="6" width="15" height="20" rx="1.5"/>
+      <line x1="10" y1="14" x2="19" y2="14"/>
+      <line x1="10" y1="20" x2="17" y2="20"/>
+    </g>
+    <text x="565" y="460" font-size="17" font-weight="600" fill="#1A1611">Filings RAG</text>
+    <text x="565" y="479" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      WORKER AGENT  ·  CHROMADB
+    </text>
+    <rect x="838" y="446" width="48" height="20" rx="4"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="862" y="460" font-size="9" font-weight="700" fill="#2D4F3A"
+          text-anchor="middle" letter-spacing="0.6"
+          font-family="Helvetica, Arial, sans-serif">+ LLM</text>
+    <text x="517" y="513" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="517" dy="0">Three thesis-aware sub-queries — risk factors,</tspan>
+      <tspan x="517" dy="17">MD&amp;A trajectory, and segment performance.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 06 — News Catalyst Agent ======== -->
+  <g>
+    <rect x="936" y="415" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <rect x="960" y="439" width="34" height="34" rx="5"
+          fill="#DCC5B8" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(965, 444)" stroke="#1A1611" stroke-width="1.4" fill="none">
+      <path d="M 2 12 Q 6 4 12 12 T 22 12"/>
+      <path d="M 2 20 Q 6 12 12 20 T 22 20" opacity="0.55"/>
+    </g>
+    <text x="1008" y="460" font-size="17" font-weight="600" fill="#1A1611">News Catalyst</text>
+    <text x="1008" y="479" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      WORKER AGENT  ·  DRILL-IN
+    </text>
+    <rect x="1281" y="446" width="48" height="20" rx="4"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="1305" y="460" font-size="9" font-weight="700" fill="#2D4F3A"
+          text-anchor="middle" letter-spacing="0.6"
+          font-family="Helvetica, Arial, sans-serif">+ LLM</text>
+    <text x="960" y="513" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="960" dy="0">Distills 5–7 catalysts and concerns, each tagged</tspan>
+      <tspan x="960" dy="17">bull / bear / neutral with linked source URLs.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 07 — Risk Synthesis ======== -->
+  <g>
+    <rect x="50" y="590" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <rect x="74" y="614" width="34" height="34" rx="5"
+          fill="#B5BBA0" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(79, 619)" stroke="#1A1611" stroke-width="1.4" fill="none">
+      <path d="M 12 2 L 22 22 L 2 22 Z"/>
+      <line x1="12" y1="10" x2="12" y2="16"/>
+      <circle cx="12" cy="19" r="0.9" fill="#1A1611"/>
+    </g>
+    <text x="122" y="635" font-size="17" font-weight="600" fill="#1A1611">Risk Synthesis</text>
+    <text x="122" y="654" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      HIGHER-ORDER  ·  NO EXTERNAL CALLS
+    </text>
+    <rect x="395" y="621" width="48" height="20" rx="4"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="419" y="635" font-size="9" font-weight="700" fill="#2D4F3A"
+          text-anchor="middle" letter-spacing="0.6"
+          font-family="Helvetica, Arial, sans-serif">+ LLM</text>
+    <text x="74" y="688" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="74" dy="0">Surfaces convergent signals, threshold breaches,</tspan>
+      <tspan x="74" dy="17">and implicit thesis gaps across all workers.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 08 — Monte Carlo Engine ======== -->
+  <g>
+    <rect x="493" y="590" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <rect x="517" y="614" width="34" height="34" rx="5"
+          fill="#EDE5D5" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(522, 619)" stroke="#1A1611" stroke-width="1.4" fill="none">
+      <path d="M 1 22 Q 5 22 7 16 Q 10 4 12 4 Q 14 4 17 16 Q 19 22 23 22"/>
+      <line x1="1" y1="24" x2="23" y2="24" opacity="0.4"/>
+    </g>
+    <text x="565" y="635" font-size="17" font-weight="600" fill="#1A1611">Monte Carlo Engine</text>
+    <text x="565" y="654" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      PURE PYTHON  ·  VECTORIZED NUMPY
+    </text>
+    <text x="517" y="688" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="517" dy="0">10,000 fair-value sims over growth, margin, and</tspan>
+      <tspan x="517" dy="17">exit-multiple priors. Returns P10 / P50 / P90 + samples.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 09 — Synthesis Report ======== -->
+  <g>
+    <rect x="936" y="590" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <rect x="960" y="614" width="34" height="34" rx="5"
+          fill="#2D4F3A" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(965, 619)" stroke="#F4ECDC" stroke-width="1.4" fill="none">
+      <rect x="2" y="2" width="20" height="22" rx="2"/>
+      <line x1="6" y1="7" x2="18" y2="7"/>
+      <line x1="6" y1="11" x2="18" y2="11"/>
+      <line x1="6" y1="15" x2="18" y2="15"/>
+      <line x1="6" y1="19" x2="14" y2="19"/>
+    </g>
+    <text x="1008" y="635" font-size="17" font-weight="600" fill="#1A1611">Synthesis Report</text>
+    <text x="1008" y="654" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      HIGHER-ORDER  ·  DRILL-IN CAPSTONE
+    </text>
+    <rect x="1281" y="621" width="48" height="20" rx="4"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="1305" y="635" font-size="9" font-weight="700" fill="#2D4F3A"
+          text-anchor="middle" letter-spacing="0.6"
+          font-family="Helvetica, Arial, sans-serif">+ LLM</text>
+    <text x="960" y="688" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="960" dy="0">Institutional Markdown report — Bull, Bear, Risks,</tspan>
+      <tspan x="960" dy="17">MC distribution, Action, Watchlist, and Evidence.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 10 — PDF Report Export ======== -->
+  <g>
+    <rect x="50" y="765" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
+    <rect x="74" y="789" width="34" height="34" rx="5"
+          fill="#EDE5D5" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(79, 794)" stroke="#1A1611" stroke-width="1.3" fill="none">
+      <rect x="2" y="0" width="20" height="24" rx="2"/>
+    </g>
+    <text x="91" y="813" font-size="8" font-weight="700" fill="#1A1611"
+          text-anchor="middle" font-family="Helvetica, Arial, sans-serif">PDF</text>
+    <text x="122" y="810" font-size="17" font-weight="600" fill="#1A1611">PDF Report Export</text>
+    <text x="122" y="829" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      PURE PYTHON  ·  REPORTLAB
+    </text>
+    <text x="74" y="863" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="74" dy="0">Renders the synthesis Markdown into a styled,</tspan>
+      <tspan x="74" dy="17">sage-paletted institutional PDF brief.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 11 — Telegram Bot (P1+, dashed) ======== -->
+  <g>
+    <rect x="493" y="765" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <rect x="517" y="789" width="34" height="34" rx="5"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(522, 794)" stroke="#1A1611" stroke-width="1.4" fill="none">
+      <path d="M 2 12 L 23 3 L 18 22 L 12 16 L 2 12 Z"/>
+      <line x1="12" y1="16" x2="18" y2="9"/>
+    </g>
+    <text x="565" y="810" font-size="17" font-weight="600" fill="#1A1611">Telegram Bot</text>
+    <text x="565" y="829" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      CHANNEL  ·  BIDIRECTIONAL
+    </text>
+    <!-- P1+ pill -->
+    <rect x="846" y="796" width="40" height="20" rx="4"
+          fill="#2D4F3A" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="866" y="810" font-size="9" font-weight="700" fill="#F4ECDC"
+          text-anchor="middle" letter-spacing="0.6"
+          font-family="Helvetica, Arial, sans-serif">P1+</text>
+    <text x="517" y="863" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="517" dy="0">Slash commands trigger drill-ins; alerts and</tspan>
+      <tspan x="517" dy="17">replies push back to your phone.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== CARD 12 — Triage Loop (P1+, dashed) ======== -->
+  <g>
+    <rect x="936" y="765" width="413" height="155" rx="10"
+          fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <rect x="960" y="789" width="34" height="34" rx="5"
+          fill="#C9D9C5" stroke="#2D4F3A" stroke-width="1"/>
+    <g transform="translate(965, 794)" stroke="#1A1611" stroke-width="1.4" fill="none">
+      <circle cx="12" cy="12" r="10"/>
+      <circle cx="12" cy="12" r="5.5" opacity="0.55"/>
+      <line x1="12" y1="12" x2="20" y2="5"/>
+    </g>
+    <text x="1008" y="810" font-size="17" font-weight="600" fill="#1A1611">Triage Loop</text>
+    <text x="1008" y="829" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
+      AUTONOMOUS  ·  CONTINUOUS POLLING
+    </text>
+    <!-- P1+ pill -->
+    <rect x="1241" y="796" width="40" height="20" rx="4"
+          fill="#2D4F3A" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="1261" y="810" font-size="9" font-weight="700" fill="#F4ECDC"
+          text-anchor="middle" letter-spacing="0.6"
+          font-family="Helvetica, Arial, sans-serif">P1+</text>
+    <!-- + LLM pill -->
+    <rect x="1289" y="796" width="48" height="20" rx="4"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="1313" y="810" font-size="9" font-weight="700" fill="#2D4F3A"
+          text-anchor="middle" letter-spacing="0.6"
+          font-family="Helvetica, Arial, sans-serif">+ LLM</text>
+    <text x="960" y="863" font-size="11.5" fill="#1A1611" opacity="0.75"
+          font-style="italic">
+      <tspan x="960" dy="0">Watches EDGAR + Tavily across all theses;</tspan>
+      <tspan x="960" dy="17">auto-fires drill-ins on material breach.</tspan>
+    </text>
+  </g>
+
+  <!-- ======== FOOTER ======== -->
+  <line x1="50" y1="950" x2="1350" y2="950"
+        stroke="#E0D5C2" stroke-width="0.5"/>
+
+  <text x="50" y="975" font-size="9" font-weight="700" fill="#2D4F3A"
+        letter-spacing="2.5"
+        font-family="Helvetica, Arial, sans-serif">PALETTE</text>
+
+  <!-- Inline category swatches -->
+  <g transform="translate(125, 967)">
+    <rect width="13" height="13" rx="2" fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="20" y="11" font-size="10" fill="#1A1611"
+          font-family="Helvetica, Arial, sans-serif" letter-spacing="0.4">Data connector</text>
+  </g>
+  <g transform="translate(245, 967)">
+    <rect width="13" height="13" rx="2" fill="#E5D2A8" stroke="#2D4F3A" stroke-width="1"/>
+    <rect x="14" width="13" height="13" rx="2" fill="#C8DACC" stroke="#2D4F3A" stroke-width="1"/>
+    <rect x="28" width="13" height="13" rx="2" fill="#DCC5B8" stroke="#2D4F3A" stroke-width="1"/>
+    <rect x="42" width="13" height="13" rx="2" fill="#B5BBA0" stroke="#2D4F3A" stroke-width="1"/>
+    <rect x="56" width="13" height="13" rx="2" fill="#2D4F3A" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="76" y="11" font-size="10" fill="#1A1611"
+          font-family="Helvetica, Arial, sans-serif" letter-spacing="0.4">Worker / higher-order agents</text>
+  </g>
+  <g transform="translate(545, 967)">
+    <rect width="13" height="13" rx="2" fill="#EDE5D5" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="20" y="11" font-size="10" fill="#1A1611"
+          font-family="Helvetica, Arial, sans-serif" letter-spacing="0.4">Pure-Python utility</text>
+  </g>
+  <g transform="translate(700, 967)">
+    <rect width="13" height="13" rx="2" fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1"/>
+    <text x="20" y="11" font-size="10" fill="#1A1611"
+          font-family="Helvetica, Arial, sans-serif" letter-spacing="0.4">Output channel</text>
+  </g>
+  <g transform="translate(840, 967)">
+    <rect width="13" height="13" rx="2" fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.2" stroke-dasharray="3,2"/>
+    <text x="20" y="11" font-size="10" fill="#1A1611"
+          font-family="Helvetica, Arial, sans-serif" letter-spacing="0.4">Phase 1+ (deferred)</text>
+  </g>
+
+  <text x="1350" y="978" font-size="9.5" fill="#2D4F3A" text-anchor="end"
+        letter-spacing="2" font-style="italic"
+        font-family="Helvetica, Arial, sans-serif" opacity="0.78">
+    research that thinks across theses, not tickers
+  </text>
+
+</svg>

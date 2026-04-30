@@ -379,6 +379,108 @@ async def test_run_returns_null_hypothesis_when_no_kpis(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_preserves_deterministic_kpis_when_llm_drops_them(monkeypatch):
+    """Real-world bug: the LLM sometimes echoes the kpis dict but omits one-off
+    keys like `shares_outstanding` or `current_price`. Both are required by
+    Monte Carlo downstream — if the LLM drops them, MC silently skips.
+
+    Fix: deterministic compute_kpis() values override anything the LLM
+    emitted with the same name, AND any deterministic-only key is always
+    present in the final output. This test enforces that contract."""
+    from agents import fundamentals as f
+
+    deterministic_kpis = {
+        "revenue_latest": 215_938_000_000.0,
+        "shares_outstanding": 24_300_000_000.0,
+        "current_price": 213.17,
+        "pe_trailing": 47.5,
+        "fcf_yield": 1.8,
+    }
+
+    # LLM emits a kpis dict that DROPS shares_outstanding and current_price
+    # (a real failure mode we observed in production).
+    llm_payload = {
+        "summary": "NVDA looks expensive on FCF yield but priced for growth.",
+        "kpis": {
+            "revenue_latest": 215_938_000_000.0,  # echoed
+            "pe_trailing": 47.5,  # echoed
+            "fcf_yield": 1.8,  # echoed
+            "thesis_alignment_score": 0.85,  # LLM-only enrichment — must survive
+            # NOTE: no shares_outstanding, no current_price
+        },
+        "projections": {
+            "revenue_growth_mean": 0.20,
+            "revenue_growth_std": 0.05,
+            "margin_mean": 0.55,
+            "margin_std": 0.05,
+            "exit_multiple_mean": 32.0,
+            "exit_multiple_std": 5.0,
+        },
+        "evidence": [
+            {"source": "yfinance", "note": "fcf_yield", "excerpt": "1.8%"},
+        ],
+    }
+
+    monkeypatch.setattr(f, "compute_kpis", lambda financials: deterministic_kpis)
+    monkeypatch.setattr(f, "get_financials", lambda t: {"info": {"longName": "NVDA"}})
+    monkeypatch.setattr(f, "_call_llm", lambda *args, **kwargs: llm_payload)
+
+    state = {"ticker": "NVDA", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    result = await run(state)
+    out = FundamentalsOutput.model_validate(result["fundamentals"])
+
+    # Deterministic-only keys must be in the final kpis even though the LLM
+    # dropped them.
+    assert out.kpis.get("shares_outstanding") == 24_300_000_000.0, (
+        "shares_outstanding lost to LLM drop"
+    )
+    assert out.kpis.get("current_price") == 213.17, "current_price lost to LLM drop"
+
+    # LLM-only enrichment keys must also survive.
+    assert out.kpis.get("thesis_alignment_score") == 0.85
+
+    # Echoed keys still match deterministic values.
+    assert out.kpis.get("revenue_latest") == 215_938_000_000.0
+
+
+@pytest.mark.asyncio
+async def test_run_deterministic_kpis_override_llm_hallucinations(monkeypatch):
+    """If the LLM hallucinates a different value for a deterministic key,
+    the deterministic value MUST win. Otherwise an LLM brain fart can corrupt
+    Monte Carlo's input distribution."""
+    from agents import fundamentals as f
+
+    deterministic_kpis = {"shares_outstanding": 24_300_000_000.0, "current_price": 213.17}
+    llm_payload = {
+        "summary": "x",
+        "kpis": {
+            # Hallucinated values — should be overridden
+            "shares_outstanding": 999_999.0,
+            "current_price": 9999.99,
+        },
+        "projections": {
+            "revenue_growth_mean": 0.20,
+            "revenue_growth_std": 0.05,
+            "margin_mean": 0.55,
+            "margin_std": 0.05,
+            "exit_multiple_mean": 32.0,
+            "exit_multiple_std": 5.0,
+        },
+        "evidence": [],
+    }
+    monkeypatch.setattr(f, "compute_kpis", lambda financials: deterministic_kpis)
+    monkeypatch.setattr(f, "get_financials", lambda t: {"info": {"longName": "NVDA"}})
+    monkeypatch.setattr(f, "_call_llm", lambda *args, **kwargs: llm_payload)
+
+    state = {"ticker": "NVDA", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    result = await run(state)
+    out = FundamentalsOutput.model_validate(result["fundamentals"])
+
+    assert out.kpis.get("shares_outstanding") == 24_300_000_000.0
+    assert out.kpis.get("current_price") == 213.17
+
+
+@pytest.mark.asyncio
 async def test_run_uses_history_derived_fallback_on_llm_failure(monkeypatch):
     """LLM fails but compute_kpis succeeded — fallback uses *those* values, not
     the null hypothesis. Confirms approach (A): degrade with history when we have it."""

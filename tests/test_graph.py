@@ -302,18 +302,25 @@ async def test_risk_starts_only_after_all_three_workers_complete(ai_cake):
 
 @pytest.mark.asyncio
 async def test_astream_emits_events_in_dependency_order(ai_cake):
+    """Topology assertions (revised late Step 8 — see ARCHITECTURE.md §1.1):
+      - load_thesis precedes all 3 workers (fundamentals, filings, news)
+      - All 3 workers precede risk (Risk fan-in)
+      - Fundamentals precedes monte_carlo (MC's only data dependency)
+      - Both risk AND monte_carlo precede synthesis (Synthesis fan-in)
+    Note: risk and monte_carlo can interleave — they run in parallel."""
     graph = build_graph()
     seen: list[str] = []
     async for event in graph.astream({"ticker": "NVDA", "thesis": ai_cake}):
         seen.extend(event.keys())
 
-    # load_thesis must precede each worker; risk must come after all workers; etc.
     assert "load_thesis" in seen
     for worker in ("fundamentals", "filings", "news"):
         assert seen.index("load_thesis") < seen.index(worker)
-    for worker in ("fundamentals", "filings", "news"):
         assert seen.index(worker) < seen.index("risk")
-    assert seen.index("risk") < seen.index("monte_carlo")
+    # MC depends on Fundamentals only (parallel to Risk)
+    assert seen.index("fundamentals") < seen.index("monte_carlo")
+    # Synthesis fan-in: both Risk and MC must precede it
+    assert seen.index("risk") < seen.index("synthesis")
     assert seen.index("monte_carlo") < seen.index("synthesis")
 
 

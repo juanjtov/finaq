@@ -1,0 +1,543 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 990"
+     font-family="Georgia, 'Iowan Old Style', 'Source Serif Pro', serif">
+
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#2D4F3A"/>
+    </marker>
+    <marker id="arr-soft" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="5.5" markerHeight="5.5" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#2D4F3A" opacity="0.78"/>
+    </marker>
+    <marker id="arr-taupe" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#8E7C61"/>
+    </marker>
+  </defs>
+
+  <!-- ======== CANVAS ======== -->
+  <rect width="1400" height="990" fill="#FFFFFF"/>
+
+  <!-- ======== HEADER BAND ======== -->
+  <rect width="1400" height="138" fill="#F4ECDC"/>
+  <line x1="0" y1="138" x2="1400" y2="138" stroke="#E0D5C2" stroke-width="1"/>
+
+  <!-- Editorial rule above title -->
+  <line x1="612" y1="34" x2="788" y2="34" stroke="#2D4F3A" stroke-width="0.7" opacity="0.55"/>
+
+  <!-- Title -->
+  <text x="700" y="68" font-size="36" font-weight="500" fill="#2D4F3A"
+        text-anchor="middle" letter-spacing="2.5">FINAQ</text>
+  <text x="700" y="93" font-size="11" fill="#1A1611"
+        text-anchor="middle" letter-spacing="6"
+        font-family="Helvetica, Arial, sans-serif">PERSONAL  EQUITY  RESEARCH  ADVISOR</text>
+  <text x="700" y="118" font-size="12.5" fill="#1A1611"
+        text-anchor="middle" font-style="italic" opacity="0.78">
+        Multi-agent drill-in platform · LangGraph orchestration · OpenRouter routing
+  </text>
+
+  <!-- Top-left brand mark -->
+  <text x="50" y="34" font-size="9" fill="#2D4F3A" letter-spacing="2.5"
+        font-family="Helvetica, Arial, sans-serif" font-weight="600">FINAQ · 01</text>
+  <!-- Top-right date stamp -->
+  <text x="1350" y="34" font-size="9" fill="#2D4F3A" text-anchor="end" letter-spacing="2.5"
+        font-family="Helvetica, Arial, sans-serif" font-weight="600">PHASE 0 · 2026 · v0.1</text>
+
+  <!-- ======== COLUMN SECTION HEADERS ======== -->
+  <text x="160" y="178" font-size="10" font-weight="700" fill="#2D4F3A"
+        text-anchor="middle" letter-spacing="3.5"
+        font-family="Helvetica, Arial, sans-serif">DATA  SOURCES</text>
+  <line x1="80" y1="187" x2="240" y2="187" stroke="#2D4F3A" stroke-width="0.8"/>
+
+  <text x="700" y="178" font-size="10" font-weight="700" fill="#2D4F3A"
+        text-anchor="middle" letter-spacing="3.5"
+        font-family="Helvetica, Arial, sans-serif">ORCHESTRATOR</text>
+  <line x1="610" y1="187" x2="790" y2="187" stroke="#2D4F3A" stroke-width="0.8"/>
+
+  <text x="1240" y="178" font-size="10" font-weight="700" fill="#2D4F3A"
+        text-anchor="middle" letter-spacing="3.5"
+        font-family="Helvetica, Arial, sans-serif">OUTPUTS</text>
+  <line x1="1160" y1="187" x2="1320" y2="187" stroke="#2D4F3A" stroke-width="0.8"/>
+
+  <!-- ======== LEFT COLUMN: 4 DATA SOURCES ======== -->
+  <!-- Box: 220×100, x 50-270, y 200/320/440/560, mid-y 250/370/490/610 -->
+
+  <!-- 01 SEC EDGAR -->
+  <g>
+    <rect x="50" y="200" width="220" height="100" rx="8"
+          fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="65" y="223" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="1.5" font-family="Helvetica, Arial, sans-serif">01</text>
+    <text x="160" y="247" font-size="14.5" font-weight="600" fill="#1A1611"
+          text-anchor="middle">SEC EDGAR</text>
+    <text x="160" y="270" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">10-K · 10-Q full text</text>
+    <text x="160" y="289" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">data/edgar.py</text>
+  </g>
+
+  <!-- 02 yfinance -->
+  <g>
+    <rect x="50" y="320" width="220" height="100" rx="8"
+          fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="65" y="343" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="1.5" font-family="Helvetica, Arial, sans-serif">02</text>
+    <text x="160" y="367" font-size="14.5" font-weight="600" fill="#1A1611"
+          text-anchor="middle">yfinance</text>
+    <text x="160" y="390" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">price · financials · sector multiples</text>
+    <text x="160" y="409" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">data/yfin.py · 24h cache</text>
+  </g>
+
+  <!-- 03 Tavily Search -->
+  <g>
+    <rect x="50" y="440" width="220" height="100" rx="8"
+          fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="65" y="463" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="1.5" font-family="Helvetica, Arial, sans-serif">03</text>
+    <text x="160" y="487" font-size="14.5" font-weight="600" fill="#1A1611"
+          text-anchor="middle">Tavily Search</text>
+    <text x="160" y="510" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">news catalysts · 90-day window</text>
+    <text x="160" y="529" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">tavily-python</text>
+  </g>
+
+  <!-- 04 US Treasury / FRED (rate priors for MC) -->
+  <g>
+    <rect x="50" y="560" width="220" height="100" rx="8"
+          fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="65" y="583" font-size="9" font-weight="700" fill="#2D4F3A"
+          letter-spacing="1.5" font-family="Helvetica, Arial, sans-serif">04</text>
+    <text x="160" y="607" font-size="14.5" font-weight="600" fill="#1A1611"
+          text-anchor="middle">US Treasury</text>
+    <text x="160" y="630" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">10y rate · MC discount priors</text>
+    <text x="160" y="649" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">data/treasury.py</text>
+  </g>
+
+  <!-- 05 Notion (theses) — Phase 1+, dashed -->
+  <g>
+    <rect x="50" y="680" width="220" height="62" rx="8"
+          fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <text x="160" y="704" font-size="13" font-weight="600" fill="#1A1611"
+          text-anchor="middle">Notion · Theses</text>
+    <text x="160" y="722" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">live theses + research notes</text>
+    <text x="160" y="736" font-size="8.5" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">PHASE 1+  ·  /theses (P0)</text>
+  </g>
+
+  <!-- ======== CENTER PANEL: MULTI-AGENT DAG ======== -->
+  <g>
+    <!-- Outer panel -->
+    <rect x="335" y="200" width="730" height="540" rx="14"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="2"/>
+
+    <!-- Phase tag (top-right) -->
+    <rect x="980" y="212" width="74" height="20" rx="3" fill="#2D4F3A"/>
+    <text x="1017" y="226" font-size="9.5" font-weight="700" fill="#F4ECDC"
+          text-anchor="middle" letter-spacing="1.5"
+          font-family="Helvetica, Arial, sans-serif">PHASE 0</text>
+
+    <!-- Panel title -->
+    <text x="700" y="234" font-size="17" font-weight="600" fill="#2D4F3A"
+          text-anchor="middle" letter-spacing="0.3">Multi-Agent Drill-In</text>
+    <text x="700" y="254" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          font-style="italic" opacity="0.75">
+      LangGraph DAG · async fan-out · all LLM calls via OpenRouter
+    </text>
+
+    <!-- Title rule -->
+    <line x1="430" y1="266" x2="970" y2="266" stroke="#2D4F3A"
+          stroke-width="0.5" opacity="0.32"/>
+
+    <!-- Triggers banner -->
+    <text x="700" y="285" font-size="10" fill="#1A1611" text-anchor="middle"
+          font-family="Helvetica, Arial, sans-serif" letter-spacing="0.4">
+      <tspan font-weight="700" fill="#2D4F3A" letter-spacing="2">TRIGGERED  BY</tspan>
+      <tspan dx="6" opacity="0.85">·  Streamlit "Run drill" (P0)  ·  Triage loop (P1+)  ·  /analyze command (P1+)  ·  Discovery (P2+)</tspan>
+    </text>
+
+    <!-- Banner divider rule -->
+    <line x1="430" y1="299" x2="970" y2="299" stroke="#2D4F3A"
+          stroke-width="0.5" opacity="0.32"/>
+
+    <!-- 1) Load Thesis (top center) -->
+    <rect x="565" y="318" width="270" height="44" rx="6"
+          fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.4"/>
+    <text x="700" y="338" font-size="12.5" font-weight="600" fill="#1A1611"
+          text-anchor="middle">Load Thesis</text>
+    <text x="700" y="354" font-size="9.5" fill="#2D4F3A" text-anchor="middle"
+          font-style="italic" opacity="0.85">JSON → pydantic-validated FinaqState</text>
+
+    <!-- Vertical arrow Load Thesis → fork -->
+    <line x1="700" y1="362" x2="700" y2="392" stroke="#2D4F3A"
+          stroke-width="1.4" marker-end="url(#arr)"/>
+
+    <!-- Fork (horizontal busbar) -->
+    <line x1="455" y1="392" x2="945" y2="392" stroke="#2D4F3A" stroke-width="1.4"/>
+    <line x1="455" y1="392" x2="455" y2="412" stroke="#2D4F3A"
+          stroke-width="1.4" marker-end="url(#arr)"/>
+    <line x1="700" y1="392" x2="700" y2="412" stroke="#2D4F3A"
+          stroke-width="1.4" marker-end="url(#arr)"/>
+    <line x1="945" y1="392" x2="945" y2="412" stroke="#2D4F3A"
+          stroke-width="1.4" marker-end="url(#arr)"/>
+
+    <!-- 2) Parallel agents — Fundamentals · Filings · News -->
+    <g>
+      <rect x="365" y="420" width="180" height="74" rx="6"
+            fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.4"/>
+      <text x="455" y="445" font-size="12.5" font-weight="600" fill="#1A1611"
+            text-anchor="middle">Fundamentals</text>
+      <text x="455" y="463" font-size="9.5" fill="#1A1611" text-anchor="middle"
+            opacity="0.7" font-style="italic">5y CAGR · margins · MC priors</text>
+      <text x="455" y="481" font-size="8.5" fill="#2D4F3A" text-anchor="middle"
+            letter-spacing="0.8" font-family="Helvetica, Arial, sans-serif"
+            font-weight="700">SONNET 4.6</text>
+    </g>
+
+    <g>
+      <rect x="610" y="420" width="180" height="74" rx="6"
+            fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.4"/>
+      <text x="700" y="445" font-size="12.5" font-weight="600" fill="#1A1611"
+            text-anchor="middle">Filings  (RAG)</text>
+      <text x="700" y="463" font-size="9.5" fill="#1A1611" text-anchor="middle"
+            opacity="0.7" font-style="italic">risk · MD&amp;A · segments</text>
+      <text x="700" y="481" font-size="8.5" fill="#2D4F3A" text-anchor="middle"
+            letter-spacing="0.8" font-family="Helvetica, Arial, sans-serif"
+            font-weight="700">SONNET 4.6  ·  CHROMA</text>
+    </g>
+
+    <g>
+      <rect x="855" y="420" width="180" height="74" rx="6"
+            fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.4"/>
+      <text x="945" y="445" font-size="12.5" font-weight="600" fill="#1A1611"
+            text-anchor="middle">News</text>
+      <text x="945" y="463" font-size="9.5" fill="#1A1611" text-anchor="middle"
+            opacity="0.7" font-style="italic">catalysts · concerns · sentiment</text>
+      <text x="945" y="481" font-size="8.5" fill="#2D4F3A" text-anchor="middle"
+            letter-spacing="0.8" font-family="Helvetica, Arial, sans-serif"
+            font-weight="700">SONNET 4.6  ·  TAVILY</text>
+    </g>
+
+    <!-- Join: parallel → Risk -->
+    <line x1="455" y1="495" x2="455" y2="514" stroke="#2D4F3A" stroke-width="1.4"/>
+    <line x1="700" y1="495" x2="700" y2="514" stroke="#2D4F3A" stroke-width="1.4"/>
+    <line x1="945" y1="495" x2="945" y2="514" stroke="#2D4F3A" stroke-width="1.4"/>
+    <line x1="455" y1="514" x2="945" y2="514" stroke="#2D4F3A" stroke-width="1.4"/>
+    <line x1="700" y1="514" x2="700" y2="534" stroke="#2D4F3A"
+          stroke-width="1.4" marker-end="url(#arr)"/>
+
+    <!-- 3) Risk Synthesis -->
+    <g>
+      <rect x="565" y="540" width="270" height="44" rx="6"
+            fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.4"/>
+      <text x="700" y="560" font-size="12.5" font-weight="600" fill="#1A1611"
+            text-anchor="middle">Risk Synthesis</text>
+      <text x="700" y="576" font-size="9.5" fill="#2D4F3A" text-anchor="middle"
+            font-style="italic" opacity="0.85">
+        convergent signals · threshold breaches  ·  SONNET 4.6
+      </text>
+    </g>
+
+    <!-- Risk → Monte Carlo -->
+    <line x1="700" y1="585" x2="700" y2="606" stroke="#2D4F3A"
+          stroke-width="1.4" marker-end="url(#arr)"/>
+
+    <!-- 4) Monte Carlo -->
+    <g>
+      <rect x="565" y="610" width="270" height="44" rx="6"
+            fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1.4"/>
+      <text x="700" y="630" font-size="12.5" font-weight="600" fill="#1A1611"
+            text-anchor="middle">Monte Carlo  ·  Fair Value</text>
+      <text x="700" y="646" font-size="9.5" fill="#2D4F3A" text-anchor="middle"
+            font-style="italic" opacity="0.85">
+        10K vectorized sims  ·  NumPy  ·  no LLM
+      </text>
+    </g>
+
+    <!-- Monte Carlo → Synthesis -->
+    <line x1="700" y1="655" x2="700" y2="676" stroke="#2D4F3A"
+          stroke-width="1.4" marker-end="url(#arr)"/>
+
+    <!-- 5) Synthesis (highlighted — sage fill) -->
+    <g>
+      <rect x="565" y="680" width="270" height="48" rx="6"
+            fill="#2D4F3A" stroke="#2D4F3A" stroke-width="1.4"/>
+      <text x="700" y="702" font-size="13" font-weight="600" fill="#F4ECDC"
+            text-anchor="middle">Synthesis</text>
+      <text x="700" y="719" font-size="9.5" fill="#F4ECDC" text-anchor="middle"
+            font-style="italic" opacity="0.88">
+        institutional Markdown report  ·  OPUS 4.7
+      </text>
+    </g>
+  </g>
+
+  <!-- ======== RIGHT COLUMN: 5 OUTPUTS ======== -->
+
+  <!-- 01 Telegram (P1+, dashed) -->
+  <g>
+    <rect x="1130" y="200" width="220" height="100" rx="8"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <text x="1335" y="223" font-size="9" font-weight="700" fill="#2D4F3A"
+          text-anchor="end" letter-spacing="1.5"
+          font-family="Helvetica, Arial, sans-serif">01</text>
+    <text x="1240" y="247" font-size="14.5" font-weight="600" fill="#1A1611"
+          text-anchor="middle">Telegram Bot</text>
+    <text x="1240" y="270" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">alerts · /drill /analyze /scan</text>
+    <text x="1240" y="289" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">PHASE 1+</text>
+  </g>
+
+  <!-- 02 Streamlit -->
+  <g>
+    <rect x="1130" y="320" width="220" height="100" rx="8"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="1335" y="343" font-size="9" font-weight="700" fill="#2D4F3A"
+          text-anchor="end" letter-spacing="1.5"
+          font-family="Helvetica, Arial, sans-serif">02</text>
+    <text x="1240" y="367" font-size="14.5" font-weight="600" fill="#1A1611"
+          text-anchor="middle">Streamlit Dashboard</text>
+    <text x="1240" y="390" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">drill-in · MC chart · evidence</text>
+    <text x="1240" y="409" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">ui/app.py</text>
+  </g>
+
+  <!-- 03 PDF Report -->
+  <g>
+    <rect x="1130" y="440" width="220" height="100" rx="8"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="1335" y="463" font-size="9" font-weight="700" fill="#2D4F3A"
+          text-anchor="end" letter-spacing="1.5"
+          font-family="Helvetica, Arial, sans-serif">03</text>
+    <text x="1240" y="487" font-size="14.5" font-weight="600" fill="#1A1611"
+          text-anchor="middle">PDF Report</text>
+    <text x="1240" y="510" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">styled · sage palette · ReportLab</text>
+    <text x="1240" y="529" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">utils/pdf_export.py</text>
+  </g>
+
+  <!-- 04 Notion · Reports (P1+, dashed) -->
+  <g>
+    <rect x="1130" y="560" width="220" height="100" rx="8"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <text x="1335" y="583" font-size="9" font-weight="700" fill="#2D4F3A"
+          text-anchor="end" letter-spacing="1.5"
+          font-family="Helvetica, Arial, sans-serif">04</text>
+    <text x="1240" y="607" font-size="14.5" font-weight="600" fill="#1A1611"
+          text-anchor="middle">Notion · Reports</text>
+    <text x="1240" y="630" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">memory of record · alerts · one-way</text>
+    <text x="1240" y="649" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">PHASE 1+</text>
+  </g>
+
+  <!-- 05 Healthchecks.io (P1+, dashed) -->
+  <g>
+    <rect x="1130" y="680" width="220" height="62" rx="8"
+          fill="#F4ECDC" stroke="#2D4F3A" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <text x="1240" y="704" font-size="13" font-weight="600" fill="#1A1611"
+          text-anchor="middle">Healthchecks.io</text>
+    <text x="1240" y="722" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">liveness ping · paging</text>
+    <text x="1240" y="736" font-size="8.5" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">PHASE 1+</text>
+  </g>
+
+  <!-- ======== CONNECTING ARROWS ======== -->
+
+  <!-- Inputs → center panel left edge (x 270 → x 335) -->
+  <path d="M 270 250 C 295 250, 320 280, 335 280"
+        fill="none" stroke="#2D4F3A" stroke-width="1.3"
+        marker-end="url(#arr-soft)"/>
+  <path d="M 270 370 C 295 370, 320 400, 335 400"
+        fill="none" stroke="#2D4F3A" stroke-width="1.3"
+        marker-end="url(#arr-soft)"/>
+  <path d="M 270 490 C 295 490, 320 470, 335 470"
+        fill="none" stroke="#2D4F3A" stroke-width="1.3"
+        marker-end="url(#arr-soft)"/>
+  <path d="M 270 610 C 300 610, 320 555, 335 555"
+        fill="none" stroke="#2D4F3A" stroke-width="1.3"
+        marker-end="url(#arr-soft)"/>
+  <path d="M 270 711 C 300 711, 320 645, 335 645"
+        fill="none" stroke="#2D4F3A" stroke-width="1.3" stroke-dasharray="5,3"
+        marker-end="url(#arr-soft)" opacity="0.85"/>
+
+  <!-- Center → outputs (x 1065 → x 1130) -->
+  <path d="M 1065 280 C 1090 280, 1110 250, 1130 250"
+        fill="none" stroke="#2D4F3A" stroke-width="1.3"
+        marker-end="url(#arr-soft)"/>
+  <path d="M 1065 400 C 1090 400, 1110 370, 1130 370"
+        fill="none" stroke="#2D4F3A" stroke-width="1.3"
+        marker-end="url(#arr-soft)"/>
+  <path d="M 1065 470 C 1090 470, 1110 490, 1130 490"
+        fill="none" stroke="#2D4F3A" stroke-width="1.3"
+        marker-end="url(#arr-soft)"/>
+  <path d="M 1065 555 C 1090 555, 1110 610, 1130 610"
+        fill="none" stroke="#2D4F3A" stroke-width="1.3"
+        marker-end="url(#arr-soft)"/>
+  <path d="M 1065 645 C 1095 645, 1110 711, 1130 711"
+        fill="none" stroke="#2D4F3A" stroke-width="1.3"
+        marker-end="url(#arr-soft)"/>
+
+  <!-- ======== MEMORY & TELEMETRY SECTION ======== -->
+
+  <!-- Section divider rule -->
+  <line x1="50" y1="773" x2="1350" y2="773"
+        stroke="#E0D5C2" stroke-width="1"/>
+
+  <text x="700" y="800" font-size="10" font-weight="700" fill="#2D4F3A"
+        text-anchor="middle" letter-spacing="3.5"
+        font-family="Helvetica, Arial, sans-serif">MEMORY  ·  TELEMETRY  ·  EVALUATION</text>
+
+  <!-- Drop arrow from center panel → memory zone -->
+  <path d="M 700 740 L 700 770" stroke="#2D4F3A" stroke-width="1.2"
+        stroke-dasharray="3,3" opacity="0.55" marker-end="url(#arr-soft)"/>
+
+  <!-- 5 boxes: 240 wide, gap = (1300 - 5*240)/4 = 25 -->
+  <!-- x positions: 50, 315, 580, 845, 1110 -->
+
+  <!-- ChromaDB -->
+  <g>
+    <rect x="50" y="820" width="240" height="120" rx="8"
+          fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="170" y="848" font-size="14" font-weight="600" fill="#1A1611"
+          text-anchor="middle">ChromaDB</text>
+    <text x="170" y="869" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">filings vector store</text>
+    <text x="170" y="889" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.62">single 'filings' collection</text>
+    <text x="170" y="906" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.62">ticker meta-filter · 800-tok chunks</text>
+    <text x="170" y="928" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">data_cache/chroma/</text>
+  </g>
+
+  <!-- SQLite state.db -->
+  <g>
+    <rect x="315" y="820" width="240" height="120" rx="8"
+          fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="435" y="848" font-size="14" font-weight="600" fill="#1A1611"
+          text-anchor="middle">SQLite  ·  state.db</text>
+    <text x="435" y="869" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">runs · alerts · cost · errors</text>
+    <text x="435" y="889" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.62">single source of truth for</text>
+    <text x="435" y="906" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.62">Mission Control dashboard</text>
+    <text x="435" y="928" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">data/state.py</text>
+  </g>
+
+  <!-- Local JSON cache -->
+  <g>
+    <rect x="580" y="820" width="240" height="120" rx="8"
+          fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="700" y="848" font-size="14" font-weight="600" fill="#1A1611"
+          text-anchor="middle">Local JSON Cache</text>
+    <text x="700" y="869" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">yfin (24h) · theses · runs</text>
+    <text x="700" y="889" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.62">memory-of-record stand-in</text>
+    <text x="700" y="906" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.62">until Phase 1 Notion sync</text>
+    <text x="700" y="928" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">data_cache/memory/</text>
+  </g>
+
+  <!-- LangSmith -->
+  <g>
+    <rect x="845" y="820" width="240" height="120" rx="8"
+          fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="965" y="848" font-size="14" font-weight="600" fill="#1A1611"
+          text-anchor="middle">LangSmith</text>
+    <text x="965" y="869" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">LLM tracing · token cost</text>
+    <text x="965" y="889" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.62">replay · per-call latency</text>
+    <text x="965" y="906" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.62">opt-in · only outbound dep</text>
+    <text x="965" y="928" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">LANGSMITH_TRACING=true</text>
+  </g>
+
+  <!-- Eval Harness -->
+  <g>
+    <rect x="1110" y="820" width="240" height="120" rx="8"
+          fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.5"/>
+    <text x="1230" y="848" font-size="14" font-weight="600" fill="#1A1611"
+          text-anchor="middle">Eval Harness</text>
+    <text x="1230" y="869" font-size="10.5" fill="#1A1611" text-anchor="middle"
+          opacity="0.72" font-style="italic">RAG faithfulness · risk regression</text>
+    <text x="1230" y="889" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.62">judge: HAIKU 4.5</text>
+    <text x="1230" y="906" font-size="10" fill="#1A1611" text-anchor="middle"
+          opacity="0.62">scores feed Mission Control</text>
+    <text x="1230" y="928" font-size="9" fill="#2D4F3A" text-anchor="middle"
+          letter-spacing="1.2" font-family="Helvetica, Arial, sans-serif"
+          font-weight="600">pytest -m eval</text>
+  </g>
+
+  <!-- ======== FOOTER LEGEND ======== -->
+  <line x1="50" y1="960" x2="1350" y2="960"
+        stroke="#E0D5C2" stroke-width="0.5"/>
+
+  <!-- Legend swatches -->
+  <g transform="translate(50, 974)">
+    <rect width="13" height="13" fill="#2D4F3A"/>
+    <text x="20" y="11" font-size="10" fill="#1A1611"
+          font-family="Helvetica, Arial, sans-serif" letter-spacing="0.4">
+      Opus 4.7  —  Synthesis
+    </text>
+  </g>
+  <g transform="translate(220, 974)">
+    <rect width="13" height="13" fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.2"/>
+    <text x="20" y="11" font-size="10" fill="#1A1611"
+          font-family="Helvetica, Arial, sans-serif" letter-spacing="0.4">
+      Sonnet 4.6  —  worker agents
+    </text>
+  </g>
+  <g transform="translate(420, 974)">
+    <rect width="13" height="13" fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1.2"/>
+    <text x="20" y="11" font-size="10" fill="#1A1611"
+          font-family="Helvetica, Arial, sans-serif" letter-spacing="0.4">
+      Pure-Python  ·  no LLM (MC, loaders)
+    </text>
+  </g>
+  <g transform="translate(665, 974)">
+    <rect width="13" height="13" fill="#FFFFFF" stroke="#2D4F3A" stroke-width="1.2" stroke-dasharray="3,2"/>
+    <text x="20" y="11" font-size="10" fill="#1A1611"
+          font-family="Helvetica, Arial, sans-serif" letter-spacing="0.4">
+      Phase 1+  —  Triage, Telegram, Notion
+    </text>
+  </g>
+
+  <!-- Right-side tagline -->
+  <text x="1350" y="985" font-size="9.5" fill="#2D4F3A" text-anchor="end"
+        letter-spacing="2" font-style="italic"
+        font-family="Helvetica, Arial, sans-serif" opacity="0.78">
+    research that thinks across theses, not tickers
+  </text>
+
+</svg>

@@ -394,6 +394,18 @@ async def run(state: FinaqState) -> dict:
     else:
         try:
             llm_out = await asyncio.to_thread(_call_llm, ticker, thesis, kpis)
+            # Insurance: deterministic compute_kpis() is the source of truth
+            # for yfinance-derived KPIs. The LLM is supposed to ECHO + ADD,
+            # not replace — but in practice it sometimes drops one-off keys
+            # like `shares_outstanding` or `current_price`. Both are required
+            # downstream by Monte Carlo. We merge so:
+            #   - LLM-only enrichment keys are preserved (e.g. thesis-derived)
+            #   - Deterministic keys override anything the LLM emitted with
+            #     the same name (prevents hallucinated values for hard data)
+            llm_kpis = (llm_out.get("kpis") or {}) if isinstance(llm_out, dict) else {}
+            merged_kpis = {**llm_kpis, **kpis}
+            if isinstance(llm_out, dict):
+                llm_out["kpis"] = merged_kpis
             out = FundamentalsOutput.model_validate(llm_out)
             out.errors = errors  # propagate yfinance errors even on LLM success
         except Exception as e:
