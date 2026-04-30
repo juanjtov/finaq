@@ -8,6 +8,12 @@ font = "sans serif"
 [server]
 headless = false
 port = 8501
+# Auto-rerun the dashboard whenever a watched source file is saved. Without
+# this Streamlit shows a "Source file changed" banner and waits for a click;
+# with it, save → rerun is one step. `pip install watchdog` makes the file
+# watcher near-instant (otherwise it polls).
+runOnSave = true
+fileWatcherType = "auto"
 
 [browser]
 gatherUsageStats = false

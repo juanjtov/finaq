@@ -6,6 +6,7 @@ chromadb
 yfinance
 sec-edgar-downloader
 streamlit
+watchdog  # snappy file-watching for streamlit's runOnSave (otherwise it polls)
 numpy
 pandas
 matplotlib

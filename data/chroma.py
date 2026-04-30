@@ -338,11 +338,22 @@ def _filing_meta_from_path(path: Path) -> tuple[str, str]:
     return filing_type, accession
 
 
+# ChromaDB's `add`/`upsert` API caps batch size around 5461 (it's the
+# default max_batch_size from chromadb.config). Filings like SMCI's 10-K
+# can produce 7000+ chunks in a single call, which raises ValueError.
+# We chunk the upsert into batches well below the cap.
+_UPSERT_BATCH_SIZE = 4000
+
+
 def ingest_filing(ticker: str, filing_path: Path) -> int:
     """Chunk a filing, embed via OpenRouter, upsert into the `filings` collection.
 
     Idempotent — re-running on the same file replaces existing chunks for that
     (ticker, accession) tuple. Returns the number of chunks written.
+
+    Large filings (typically big-cap 10-Ks like SMCI / DELL) can produce more
+    chunks than ChromaDB's per-call max_batch_size (~5461). We batch the
+    upsert in `_UPSERT_BATCH_SIZE`-sized chunks to stay well below the cap.
     """
     text = _extract_text(filing_path)
     if not text:
@@ -379,7 +390,13 @@ def ingest_filing(ticker: str, filing_path: Path) -> int:
     if not docs:
         return 0
 
-    coll.upsert(ids=ids, documents=docs, metadatas=metas)
+    # Batched upsert — stays under ChromaDB's max_batch_size limit.
+    for i in range(0, len(docs), _UPSERT_BATCH_SIZE):
+        coll.upsert(
+            ids=ids[i : i + _UPSERT_BATCH_SIZE],
+            documents=docs[i : i + _UPSERT_BATCH_SIZE],
+            metadatas=metas[i : i + _UPSERT_BATCH_SIZE],
+        )
     logger.info(f"Ingested {ticker} {filing_type} {accession}: {len(docs)} chunks")
     return len(docs)
 
@@ -495,3 +512,31 @@ def query(
         fused = semantic_ranking_indices
 
     return [candidates[i] for i in fused[:k]]
+
+
+def has_ticker(ticker: str) -> bool:
+    """Return True if at least one chunk for `ticker` exists in ChromaDB.
+
+    Distinguishes "ticker isn't ingested yet → run scripts/ingest_universe"
+    from "the question doesn't match any retrieved chunks." The Filings
+    agent uses this to emit a precise actionable error message instead of
+    a generic "no chunks retrieved" warning.
+
+    Implementation: a single-result `get(where={"ticker": ...})` round-trip.
+    Cheap (~1ms) — uses the metadata index, no embedding call.
+    """
+    if not ticker:
+        return False
+    try:
+        coll = _get_collection()
+        # `limit=1` short-circuits as soon as ChromaDB finds one matching chunk.
+        result = coll.get(where={"ticker": ticker.upper()}, limit=1)
+        ids = result.get("ids") or []
+        return len(ids) > 0
+    except Exception as e:
+        # Be conservative: if the check fails (e.g. collection missing),
+        # return False so the caller surfaces the "ingest first" hint.
+        from utils import logger
+
+        logger.warning(f"[chroma.has_ticker] check failed for {ticker}: {e}")
+        return False

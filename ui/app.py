@@ -39,7 +39,7 @@ import asyncio
 import json
 import re
 import time
-from datetime import date
+from datetime import date, datetime
 
 import numpy as np
 import streamlit as st
@@ -125,24 +125,81 @@ def _confidence_from_markdown(md: str) -> str:
     return m.group(1).lower() if m else "medium"
 
 
-def _demo_path(ticker: str, thesis_slug: str) -> Path:
+_RUN_ID_FILENAME_LEN = 8  # short prefix of UUID for filename brevity
+
+
+def _demo_path(ticker: str, thesis_slug: str, run_id: str | None = None) -> Path:
+    """Demo-cache filename. New format includes a short run_id suffix so each
+    drill-in produces a NEW file (`__a1b2c3d4.json`) instead of overwriting.
+    Legacy format (no run_id) is kept for backward-compat reads."""
+    if run_id:
+        return DEMO_DIR / f"{ticker.upper()}__{thesis_slug}__{run_id[:_RUN_ID_FILENAME_LEN]}.json"
     return DEMO_DIR / f"{ticker.upper()}__{thesis_slug}.json"
 
 
-def _try_load_demo(ticker: str, thesis_slug: str) -> dict | None:
-    path = _demo_path(ticker, thesis_slug)
-    if path.exists():
-        return json.loads(path.read_text())
-    return None
+def _list_run_history(ticker: str, thesis_slug: str) -> list[dict]:
+    """All cached drill-ins for this ticker × thesis, newest first.
+
+    Each entry: `{run_id, path, mtime, started_at, confidence, convergence}`.
+    Uses file mtime for ordering (no state.db cross-reference needed) and
+    pulls the inline metadata from each file's JSON for display.
+    """
+    if not DEMO_DIR.exists():
+        return []
+    pattern = f"{ticker.upper()}__{thesis_slug}__*.json"
+    files = sorted(DEMO_DIR.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    legacy = DEMO_DIR / f"{ticker.upper()}__{thesis_slug}.json"
+    if legacy.exists():
+        files.append(legacy)  # show legacy as oldest entry
+    out: list[dict] = []
+    for path in files:
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        mc = data.get("monte_carlo") or {}
+        out.append(
+            {
+                "run_id": data.get("run_id") or "(legacy)",
+                "path": path,
+                "mtime": path.stat().st_mtime,
+                "confidence": data.get("synthesis_confidence", "?"),
+                "convergence": (mc.get("convergence_ratio") if mc else None),
+                "method": (mc.get("method") if mc else None),
+            }
+        )
+    return out
+
+
+def _try_load_demo(
+    ticker: str, thesis_slug: str, run_id: str | None = None
+) -> dict | None:
+    """Load a cached drill-in.
+
+    - If `run_id` is given: load that specific run's file.
+    - If not: pick the most recent file for this ticker × thesis (across
+      both new run_id-keyed format and legacy single-file format).
+    """
+    if run_id:
+        path = _demo_path(ticker, thesis_slug, run_id=run_id)
+        if path.exists():
+            return json.loads(path.read_text())
+        return None
+    history = _list_run_history(ticker, thesis_slug)
+    if not history:
+        return None
+    return json.loads(history[0]["path"].read_text())
 
 
 def _save_demo(ticker: str, thesis_slug: str, final_state: dict) -> Path:
     """Persist a freshly-run drill-in so it can be re-rendered without
-    re-running the graph. We strip the `messages` list to keep the file
-    small (Streamlit doesn't need per-node timings to render)."""
+    re-running the graph. Files are keyed by run_id so each drill-in is
+    preserved as its own snapshot — the previous run is no longer
+    overwritten. We strip the `messages` list to keep the file small."""
     DEMO_DIR.mkdir(parents=True, exist_ok=True)
     payload = {k: v for k, v in final_state.items() if k != "messages"}
-    path = _demo_path(ticker, thesis_slug)
+    run_id = final_state.get("run_id")
+    path = _demo_path(ticker, thesis_slug, run_id=run_id)
     path.write_text(json.dumps(payload, default=str, indent=2))
     return path
 
@@ -238,15 +295,60 @@ def render_sidebar() -> dict:
                 st.session_state["_chip_pick"] = t
                 st.rerun()
 
+    # Run-history dropdown: lets the user load any past drill-in for this
+    # ticker × thesis, not just the latest. Without this, the dashboard
+    # always shows the most recent run and previous snapshots are inaccessible.
+    history = _list_run_history(ticker, thesis_slug) if ticker else []
+    history_choice: str | None = None
+    if history:
+        labels = ["Latest"]
+        for entry in history:
+            ts = datetime.fromtimestamp(entry["mtime"]).strftime("%Y-%m-%d %H:%M")
+            conv = entry.get("convergence")
+            conv_str = f"conv={conv:.2f}" if isinstance(conv, (int, float)) else "—"
+            labels.append(
+                f"{ts} · {entry.get('confidence', '?')} · {conv_str} "
+                f"· {entry['run_id'][:8]}"
+            )
+        picked = st.sidebar.selectbox(
+            "Run history",
+            labels,
+            index=0,
+            help="Load a past drill-in for this ticker × thesis. "
+            "Each run is now stored as its own file (no overwriting).",
+        )
+        if picked != "Latest":
+            # Map label back to the run_id portion (last token after '·').
+            run_id_short = picked.split("·")[-1].strip()
+            for entry in history:
+                if entry["run_id"].startswith(run_id_short):
+                    history_choice = entry["run_id"]
+                    break
+
     use_cached = st.sidebar.toggle(
-        "Use cached demo if available",
+        "Auto-load latest cached run on first view",
         value=True,
-        help="Faster preview — skips the LLM run if a cached drill-in exists.",
+        help=(
+            "When ON, the dashboard auto-loads the most recent cached drill-in "
+            "for this ticker × thesis as the default view. The 🔍 Run drill-in "
+            "button ALWAYS runs the agents fresh — this toggle only affects the "
+            "no-click default."
+        ),
     )
 
     cols = st.sidebar.columns(2)
     run_drill = cols[0].button("🔍 Run drill-in", use_container_width=True)
     run_scan = cols[1].button("🛰️ Run scan", use_container_width=True)
+
+    # Reload button: clears every @st.cache_data result + reruns the script.
+    # Useful during development when a thesis JSON / source-data file has
+    # changed and Streamlit's cache is serving stale results. Streamlit's
+    # `runOnSave=true` auto-reruns on Python file edits but does NOT
+    # invalidate cache_data; this button is the explicit nuke.
+    if st.sidebar.button("🔄 Reload (clear cache)", use_container_width=True):
+        st.cache_data.clear()
+        st.toast("Cache cleared. Re-running…", icon="🔄")
+        st.rerun()
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Pages")
@@ -260,35 +362,37 @@ def render_sidebar() -> dict:
         "run_drill": run_drill,
         "run_scan": run_scan,
         "use_cached": use_cached,
+        "history_run_id": history_choice,
     }
 
 
 # --- Run helpers ------------------------------------------------------------
 
 
-def _execute_drill(ticker: str, thesis_slug: str, use_cached: bool) -> dict:
-    """Resolve the final state for the ticker × thesis pair. Either pulls
-    from the cached demo or invokes the LangGraph end-to-end run, with
-    progress streamed via `st.status()`."""
-    if use_cached:
-        cached = _try_load_demo(ticker, thesis_slug)
-        if cached:
-            st.toast("Loaded cached demo run.", icon="⚡")
-            return cached
+def _kick_off_drill(ticker: str, thesis_slug: str) -> None:
+    """Start a drill-in in a background daemon thread and return immediately.
 
-    with st.status(f"Running drill-in on {ticker} · {thesis_slug}", expanded=True) as status:
-        status.update(label="Building graph + loading thesis", state="running")
-        t0 = time.perf_counter()
-        final = _run_full_graph(ticker, thesis_slug)
-        elapsed = time.perf_counter() - t0
-        status.update(
-            label=f"Drill-in complete ({elapsed:.1f}s)",
-            state="complete",
-            expanded=False,
+    The graph runs in `ui/_runner.py` so navigating to a different page
+    (Architecture, Methodology, Mission Control, etc.) does NOT kill the
+    in-flight `asyncio.run`. The dashboard polls `is_running()` on each
+    rerun and renders a "🏃 Running…" panel until the cached state file
+    appears on disk.
+    """
+    from ui._runner import is_running, kick_off_drill
+
+    if is_running(ticker, thesis_slug):
+        st.toast(
+            f"Drill-in already running for {ticker} × {thesis_slug}.",
+            icon="🏃",
         )
-    saved = _save_demo(ticker, thesis_slug, final)
-    st.toast(f"Cached run saved to {saved.name}", icon="💾")
-    return final
+        return
+    started = kick_off_drill(ticker, thesis_slug)
+    if started:
+        st.toast(
+            f"Drill-in started for {ticker} × {thesis_slug}. "
+            "You can switch tabs / pages — the run will continue in the background.",
+            icon="🏃",
+        )
 
 
 def _render_triage_fixture() -> None:
@@ -314,13 +418,199 @@ def _render_triage_fixture() -> None:
             st.markdown(f"  - [evidence]({a['evidence_url']})")
 
 
+# --- Running-status panel (background-thread runner) ----------------------
+
+
+def _render_running_panel(ticker: str, thesis_slug: str) -> None:
+    """Render a sticky 'Running…' panel while a background drill-in is in
+    flight. Schedules an auto-rerun every 2s so elapsed time updates.
+
+    This is what the user sees instead of the report when they've clicked
+    Run drill-in but the agents aren't done yet. They can switch tabs /
+    navigate to other pages and the run will keep going."""
+    from ui._runner import elapsed_seconds, get_run_status
+
+    elapsed = elapsed_seconds(ticker, thesis_slug) or 0.0
+    rec = get_run_status(ticker, thesis_slug)
+    error = rec.get("error") if rec else None
+
+    page_header(
+        f"🏃 Running drill-in on {ticker}",
+        subtitle=f"Thesis: {thesis_slug} · Elapsed: {int(elapsed)}s",
+    )
+
+    if error:
+        st.error(
+            f"Drill-in failed: {error}\n\n"
+            "Click 🔍 Run drill-in again to retry."
+        )
+        # Don't auto-rerun — let the user read the error and decide.
+        from ui._runner import clear_record
+
+        clear_record(ticker, thesis_slug)
+        return
+
+    st.info(
+        "The drill-in is executing the LangGraph pipeline (Fundamentals → "
+        "Filings → News → Risk → Monte Carlo → Synthesis). Expected "
+        "duration: 60-180 seconds. **Switch tabs or pages freely — the "
+        "run will continue in the background.** When complete, the report "
+        "will load automatically."
+    )
+
+    # Per-stage progress: read state.db node_runs to show which agent is
+    # currently running. Approximation — the run_id may not be set yet.
+    from data import state as state_db
+
+    rec_runs = state_db.recent_runs(limit=5)
+    matching = [
+        r
+        for r in rec_runs
+        if r["ticker"] == ticker.upper() and r["status"] == "running"
+    ]
+    if matching:
+        run_id = matching[0]["run_id"]
+        nodes = state_db.all_node_runs_for(run_id)
+        if nodes:
+            done = [n["node"] for n in nodes if n["status"] == "completed"]
+            if done:
+                st.success(f"✓ Completed: {', '.join(done)}")
+
+    # Schedule a polling rerun. 2s is short enough that elapsed time feels
+    # live, long enough to avoid hammering Streamlit's reactivity loop.
+    time.sleep(2)
+    st.rerun()
+
+
+# --- Pre-flight ingest check (Filings corpus) ------------------------------
+
+
+def _run_ingestion_for(ticker: str) -> tuple[bool, str]:
+    """Synchronous wrapper around scripts.ingest_universe.ingest_ticker.
+    Returns (success, message). Used by the dashboard's 'Ingest now' button.
+    """
+    import asyncio as _asyncio
+
+    from scripts.ingest_universe import ingest_ticker
+
+    try:
+        chunks = _asyncio.run(ingest_ticker(ticker))
+        if chunks > 0:
+            return True, f"Ingested {chunks} chunks for {ticker}."
+        return False, f"Ingestion ran but produced 0 chunks for {ticker}."
+    except Exception as e:
+        return False, f"Ingestion failed for {ticker}: {e}"
+
+
+def _render_ingest_banner(ticker: str) -> bool:
+    """If `ticker` isn't in ChromaDB, render a banner explaining what to do.
+
+    Three branches:
+      - Foreign issuer (e.g. TSM, ASML): files 20-F/6-K, not 10-K/10-Q.
+        Re-running ingestion won't help — the kinds aren't supported yet.
+        Render an info banner pointing at POSTPONED.md (no "Ingest now" button).
+      - Not ingested + supported kinds expected: render the standard
+        "📥 Ingest now" button to download + chunk + embed.
+      - Already ingested: short-circuit, return False.
+
+    Result is cached in session_state so we don't recheck ChromaDB on every
+    rerun.
+    """
+    from data.chroma import has_ticker
+    from data.edgar import has_filings_in_unsupported_kinds
+
+    cache_key = f"_ingest_check::{ticker}"
+    if st.session_state.get(cache_key) == "ingested":
+        return False
+    ingested = has_ticker(ticker)
+    if ingested:
+        st.session_state[cache_key] = "ingested"
+        return False
+
+    unsupported_kinds = has_filings_in_unsupported_kinds(ticker)
+
+    if unsupported_kinds:
+        # Foreign-issuer path — re-ingestion won't help.
+        kinds_str = ", ".join(unsupported_kinds)
+        st.markdown(
+            f"""
+            <div style="background:#FBF5E8; border:1px solid #E0D5C2;
+                border-left:6px solid #E0D5C2; border-radius:6px;
+                padding:1rem 1.2rem; margin-bottom:1rem;">
+                <div style="color:#1A1611; font-weight:700; font-size:1rem;
+                    letter-spacing:0.04em;">🌍 FOREIGN ISSUER · UNSUPPORTED CORPUS</div>
+                <div style="color:#1A1611; margin-top:0.4rem; line-height:1.45;">
+                    <b>{ticker}</b> files <b>{kinds_str}</b> with the SEC,
+                    not 10-K/10-Q. The current ingest pipeline only handles
+                    10-K + 10-Q, so {ticker}'s filings are NOT in ChromaDB.
+                </div>
+                <div style="color:#1A1611; opacity:0.75; font-size:0.85rem;
+                    margin-top:0.5rem;">
+                    Re-running <code>scripts.ingest_universe</code> will not
+                    help. 20-F + 6-K support is tracked in
+                    <code>docs/POSTPONED.md</code>. Drill-ins on {ticker} will
+                    still run, but Filings will be empty and Synthesis will
+                    flag this as a coverage gap.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return True
+
+    # Standard path: ticker just hasn't been ingested yet.
+    st.markdown(
+        f"""
+        <div style="background:#FBF5E8; border:1px solid #2D4F3A;
+            border-left:6px solid #2D4F3A; border-radius:6px;
+            padding:1rem 1.2rem; margin-bottom:1rem;">
+            <div style="color:#2D4F3A; font-weight:700; font-size:1rem;
+                letter-spacing:0.04em;">📥 INGEST REQUIRED</div>
+            <div style="color:#1A1611; margin-top:0.4rem; line-height:1.45;">
+                <b>{ticker}</b> isn't in ChromaDB yet. Filings retrieval
+                will return zero chunks → Risk and Synthesis will run on a
+                Filings-less state and the report will be incomplete.
+            </div>
+            <div style="color:#1A1611; opacity:0.75; font-size:0.85rem;
+                margin-top:0.5rem;">
+                Click below to download {ticker}'s recent 10-K + 10-Q from SEC
+                EDGAR, chunk + embed them, and add to ChromaDB. ~5-10 min the
+                first time; subsequent ingests of the same ticker are no-ops.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button(f"📥 Ingest {ticker} now", type="primary", key=f"ingest_btn_{ticker}"):
+        with st.status(f"Ingesting {ticker} — downloading + chunking + embedding…", expanded=True) as status:
+            ok, msg = _run_ingestion_for(ticker)
+            if ok:
+                status.update(label=msg, state="complete")
+                st.session_state[cache_key] = "ingested"
+                st.toast(msg, icon="✅")
+                st.rerun()
+            else:
+                status.update(label=msg, state="error")
+                st.error(msg)
+    return True
+
+
 # --- Main render -----------------------------------------------------------
+
+
+_MC_HISTOGRAM_SEED = 42  # mirrors utils.monte_carlo.simulate's default seed
 
 
 def _resolve_mc_samples(mc: dict) -> list[float]:
     """Return the MC sample array. If the cache stored only percentiles
     (no `samples` field), regenerate a visually-similar normal distribution
-    from the P10/P50/P90 spread so the histogram still renders."""
+    from the P10/P50/P90 spread so the histogram still renders.
+
+    Uses a fixed seed so the regenerated histogram is reproducible across
+    reruns — same cached state → same chart bars. The actual MC simulation
+    in utils.monte_carlo.simulate() also uses a fixed seed; this helper
+    just ensures the *cosmetic regeneration* doesn't introduce visible
+    jitter when the user clicks around or Streamlit reruns the page."""
     samples = mc.get("samples")
     if samples is not None and len(samples) > 0:
         return list(samples)
@@ -330,7 +620,8 @@ def _resolve_mc_samples(mc: dict) -> list[float]:
         hi = dcf.get("p90") or 0
         mid = dcf.get("p50") or (lo + hi) / 2
         std = max((hi - lo) / 2.6, 1.0)
-        return list(np.random.normal(loc=mid, scale=std, size=8000))
+        rng = np.random.default_rng(_MC_HISTOGRAM_SEED)
+        return list(rng.normal(loc=mid, scale=std, size=8000))
     return []
 
 
@@ -558,18 +849,54 @@ def main() -> None:
         return
 
     state: dict | None = None
+    history_run_id = sel.get("history_run_id")  # may be None ("Latest")
+
+    # Pre-flight check: if the selected ticker isn't ingested, render the
+    # ingestion banner BEFORE the drill-in or cached-load logic. The banner
+    # is non-blocking — the user can still click Run drill-in, but they're
+    # warned that Filings will come back empty without ingestion.
+    if sel.get("ticker") and history_run_id is None:
+        # Skip the banner when loading a historical run — that run already
+        # has its filings data baked in, and re-ingesting the ticker now
+        # wouldn't change what the historical view shows.
+        _render_ingest_banner(sel["ticker"])
+
+    # If a run is in flight (started this session OR a previous tab) for the
+    # current ticker × thesis, render the running panel instead of trying to
+    # load a (possibly-stale) cached state. The panel auto-reruns every 2s.
+    from ui._runner import is_running as _is_running
+
+    if sel.get("ticker") and _is_running(sel["ticker"], sel["thesis_slug"]):
+        _render_running_panel(sel["ticker"], sel["thesis_slug"])
+        return
+
     if sel.get("run_drill"):
         if not sel["ticker"]:
             st.warning("Enter a ticker first.")
             return
-        state = _execute_drill(
-            sel["ticker"], sel["thesis_slug"], use_cached=sel.get("use_cached", True)
+        # Run drill-in always runs the agents fresh — the use_cached toggle
+        # only governs the no-click default-view path below.
+        _kick_off_drill(sel["ticker"], sel["thesis_slug"])
+        # Render the running panel immediately; subsequent reruns will
+        # poll until the file appears on disk.
+        _render_running_panel(sel["ticker"], sel["thesis_slug"])
+        return
+    elif sel.get("use_cached", True):
+        # No-click default view — load a cached demo if one exists. Honors
+        # run-history selection: if the user picked an older run, load that
+        # specific file; otherwise load the most recent file for this
+        # ticker × thesis.
+        cached = (
+            _try_load_demo(sel["ticker"], sel["thesis_slug"], run_id=history_run_id)
+            if sel.get("ticker")
+            else None
         )
-    else:
-        # Default view — load cached demo if it exists for the current selection
-        cached = _try_load_demo(sel["ticker"], sel["thesis_slug"]) if sel.get("ticker") else None
         if cached:
             state = cached
+            if history_run_id:
+                st.toast(
+                    f"Loaded historical run {history_run_id[:8]}", icon="🕘"
+                )
         else:
             page_header(
                 "FINAQ",
@@ -583,6 +910,17 @@ def main() -> None:
                 "Click **Run drill-in** in the sidebar to generate one."
             )
             return
+    else:
+        # Auto-load toggle is OFF and no Run drill-in was clicked — show the
+        # landing message instead of silently presenting stale state.
+        page_header(
+            "FINAQ",
+            subtitle=(
+                "Auto-load disabled. Click 🔍 Run drill-in to generate a "
+                "fresh analysis."
+            ),
+        )
+        return
 
     if state is not None:
         render_report(state)

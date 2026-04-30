@@ -276,7 +276,7 @@ class AgentAnswer(BaseModel):
     (or, for Filings, re-runs RAG with the user's question).
     """
 
-    agent: Literal["fundamentals", "filings", "news", "risk"]
+    agent: Literal["fundamentals", "filings", "news", "risk", "synthesis"]
     question: str
     answer: str
     citations: list[Evidence] = []

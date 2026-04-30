@@ -23,5 +23,6 @@ class FinaqState(TypedDict, total=False):
     synthesis_confidence: str  # low|medium|high — duplicated from inside the markdown
     gaps: list[str]  # upstream content Synthesis wished it had (retrospective observability)
     watchlist: list[str]  # forward-looking events to track before next drill-in (per-agent suffix)
+    run_id: str  # set by invoke_with_telemetry; lets the dashboard key cached files by run
     messages: Annotated[list[dict[str, Any]], operator.add]
     errors: Annotated[list[str], operator.add]

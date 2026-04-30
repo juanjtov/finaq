@@ -175,12 +175,69 @@ async def run(state: FinaqState) -> dict:
 
     total_chunks = sum(len(c) for _, c in subqueries_with_chunks)
     if total_chunks == 0:
+        # Three failure modes that look the same on the wire:
+        #   (a) Foreign issuer — files 20-F/6-K, not 10-K/10-Q. Our pipeline
+        #       only ingests the latter two, so the corpus is empty AND the
+        #       fix is NOT to re-run scripts.ingest_universe (won't help).
+        #       Detected when the EDGAR cache shows other-kind directories.
+        #   (b) Ticker not yet ingested → empty corpus, actionable: run script.
+        #   (c) Ticker IS ingested but the 3 subqueries all returned 0
+        #       (rare; would mean the subquery is poorly matched to content).
+        # The Mission Control "Recent errors" panel + dashboard banner key
+        # off these messages, so they need to be precise.
+        from data.chroma import has_ticker
+        from data.edgar import has_filings_in_unsupported_kinds
+
+        ticker_ingested = await asyncio.to_thread(has_ticker, ticker)
+        unsupported_kinds = await asyncio.to_thread(
+            has_filings_in_unsupported_kinds, ticker
+        )
+
+        if not ticker_ingested and unsupported_kinds:
+            # (a) Foreign issuer / wrong filing kinds present
+            kinds_str = ", ".join(unsupported_kinds)
+            specific_error = (
+                f"foreign_issuer: {ticker} files {kinds_str} (not 10-K/10-Q). "
+                f"Our pipeline only ingests 10-K + 10-Q today — see "
+                f"docs/POSTPONED.md for 20-F/6-K support roadmap. "
+                f"Re-running scripts.ingest_universe will NOT help."
+            )
+            summary = (
+                f"{ticker} is a foreign-issuer or non-standard-kind filer "
+                f"({kinds_str}). The current pipeline ingests 10-K + 10-Q only, "
+                f"so {ticker}'s SEC filings are NOT in ChromaDB. This is a "
+                f"known limitation tracked in `docs/POSTPONED.md`."
+            )
+        elif not ticker_ingested:
+            # (b) Ticker just hasn't been ingested yet
+            specific_error = (
+                f"ticker_not_ingested: {ticker} has zero chunks in ChromaDB. "
+                f"Run `python -m scripts.ingest_universe {ticker}` "
+                f"(or `--thesis <slug>` for the whole thesis universe)."
+            )
+            summary = (
+                f"No filings data for {ticker}. ChromaDB has not been ingested "
+                f"for this ticker — run `python -m scripts.ingest_universe "
+                f"{ticker}` to populate, then re-run the drill-in."
+            )
+        else:
+            # (c) Ingested, but subqueries all missed
+            specific_error = (
+                f"empty_query_match: {ticker} is ingested but the subqueries "
+                "matched no chunks. Check the subquery templates against "
+                "the actual filing content."
+            )
+            summary = (
+                f"{ticker} is ingested but the 3 thesis-aware subqueries "
+                "returned no relevant chunks. The retrieval pool may be too "
+                "narrow for this thesis × ticker pair."
+            )
         out = FilingsOutput(
-            summary=f"No filings data available for {ticker} in ChromaDB. Have filings been ingested?",
+            summary=summary,
             risk_themes=[],
             mdna_quotes=[],
             evidence=[],
-            errors=errors + ["no chunks retrieved"],
+            errors=errors + [specific_error],
         )
     else:
         # Step 2 — LLM synthesis (off-loop)
@@ -199,8 +256,26 @@ async def run(state: FinaqState) -> dict:
                 errors=errors,
             )
 
+    # Stash the retrieval audit on the agent's payload so a post-completion
+    # sidecar (utils/live_eval.evaluate_filings_retrieval) can grade
+    # retrieval quality without re-running RAG. Only kept when there's
+    # something to grade — keeps the cached state JSON lean otherwise.
+    payload = out.model_dump()
+    if total_chunks > 0:
+        payload["_retrieval_audit"] = [
+            {
+                "label": sq.get("label"),
+                "question": sq.get("question"),
+                "chunks": [
+                    {"text": c.get("text", ""), "metadata": c.get("metadata") or {}}
+                    for c in chunks
+                ],
+            }
+            for sq, chunks in subqueries_with_chunks
+        ]
+
     return {
-        "filings": out.model_dump(),
+        "filings": payload,
         "messages": [
             {
                 "node": NODE,

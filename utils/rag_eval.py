@@ -278,16 +278,22 @@ def judge_relevance(question: str, chunks: list[dict]) -> JudgeReport:
 
 
 def write_eval_run(run: dict[str, Any]) -> Path:
-    """Persist an eval run's results so the Mission Control panel (Step 8) can
-    render them. Returns the path written to."""
+    """Persist an eval run's results so the Mission Control panel can render
+    them. Returns the path written to.
+
+    Filenames include the suite + a microsecond-precision timestamp so
+    multiple writes within the same second (e.g. live_eval persisting 3
+    subquery rows in quick succession) don't collide.
+    """
     EVAL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    suite = str(run.get("suite") or "eval")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%f")
     run_with_meta = {
         "timestamp": datetime.now(UTC).isoformat(),
         "epoch": time.time(),
         **run,
     }
-    path = EVAL_OUTPUT_DIR / f"{ts}.json"
+    path = EVAL_OUTPUT_DIR / f"{ts}__{suite}.json"
     path.write_text(json.dumps(run_with_meta, indent=2, default=str))
     return path
 

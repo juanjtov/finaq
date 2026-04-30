@@ -124,41 +124,141 @@ def render_freshness_panel() -> None:
         freshness_card("Cached drill-ins", str(n_demos), latest_str)
 
 
+def _normalise_score(r: dict) -> float | None:
+    """Map every eval suite's score convention onto a single 0-1 numeric
+    so we can chart trends across suites. Returns None when the run has
+    no comparable score (e.g. a structural-counts summary row)."""
+    if "score" in r and r["score"] is not None:
+        # Tier 2 LLM-judge: integer 0-3 (NONE/WEAK/PARTIAL/HIGH)
+        try:
+            return float(r["score"]) / 3.0
+        except (TypeError, ValueError):
+            return None
+    if "groundedness_rate" in r and r["groundedness_rate"] is not None:
+        # RAG eval: already 0-1
+        try:
+            return float(r["groundedness_rate"])
+        except (TypeError, ValueError):
+            return None
+    if "precision_at_k" in r and r["precision_at_k"] is not None:
+        try:
+            return float(r["precision_at_k"])
+        except (TypeError, ValueError):
+            return None
+    if "ndcg_at_k" in r and r["ndcg_at_k"] is not None:
+        try:
+            return float(r["ndcg_at_k"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _format_score_for_display(r: dict) -> str:
+    if "score" in r and r["score"] is not None:
+        # Show as label + raw int for readability
+        label = str(r.get("label", ""))
+        return f"{label} ({r['score']}/3)" if label else str(r["score"])
+    if "groundedness_rate" in r and r["groundedness_rate"] is not None:
+        return f"{float(r['groundedness_rate']):.2f}"
+    if "precision_at_k" in r and r["precision_at_k"] is not None:
+        return f"P@K={float(r['precision_at_k']):.2f}"
+    if "ndcg_at_k" in r and r["ndcg_at_k"] is not None:
+        return f"NDCG={float(r['ndcg_at_k']):.2f}"
+    return "—"
+
+
+def _suite_trend_dataframe(suite_runs: list[dict]) -> pd.DataFrame | None:
+    """Build a per-suite (timestamp → normalised-score) dataframe for the
+    line chart. Returns None if no runs have a comparable score."""
+    pts = []
+    for r in suite_runs:
+        s = _normalise_score(r)
+        ts = r.get("timestamp")
+        if s is None or not ts:
+            continue
+        pts.append({"timestamp": ts[:19], "score": s})
+    if not pts:
+        return None
+    df = pd.DataFrame(pts).sort_values("timestamp")
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    return df.set_index("timestamp")
+
+
 def render_eval_runs() -> None:
-    st.markdown("### Eval runs")
+    st.markdown("### Eval test runs")
+    st.caption(
+        "Quality-grading runs from `pytest -m eval` — automated scoring of "
+        "agent outputs (Tier 2 LLM-judge, RAG retrieval, RAGAS). NOT the "
+        "same as drill-in graph runs; these are unit-test artefacts. Use "
+        "the per-suite expanders below to track quality trends over time."
+    )
     runs = _load_eval_runs()
     if not runs:
         st.info("No eval runs recorded yet. Run `pytest -m eval` to generate.")
         return
 
-    # Aggregate counts by suite
+    # Aggregate by suite
     by_suite: dict[str, list[dict]] = {}
     for r in runs:
         by_suite.setdefault(r.get("suite", "unknown"), []).append(r)
 
-    cols = st.columns(min(4, len(by_suite)))
+    # Top-line summary cards: one per suite, colour-coded by latest score
+    st.markdown("#### Suite summary")
+    cols = st.columns(min(4, max(1, len(by_suite))))
     for col, (suite, suite_runs) in zip(cols, by_suite.items(), strict=False):
         with col, st.container(border=True):
             st.markdown(f"**{suite}**")
             st.metric("Runs recorded", len(suite_runs))
-            latest = suite_runs[0]
-            st.caption(f"Latest: {latest.get('timestamp', '?')[:19]}")
+            latest = suite_runs[0]  # _load_eval_runs returns reverse-sorted
+            score_str = _format_score_for_display(latest)
+            ts = (latest.get("timestamp") or "?")[:16].replace("T", " ")
+            st.caption(f"Latest: {ts} · {score_str}")
 
     section_divider()
-    st.markdown("#### Recent runs")
+
+    # Per-suite expander with: trend chart + recent rows
+    st.markdown("#### Per-suite trends")
+    st.caption(
+        "Score axis is normalised to 0-1 across suites so trends are "
+        "visually comparable. Tier 2 LLM-judge maps NONE/WEAK/PARTIAL/HIGH "
+        "to 0/0.33/0.66/1.0; RAG suites use their native 0-1 metric."
+    )
+    for suite in sorted(by_suite.keys()):
+        suite_runs = by_suite[suite]
+        with st.expander(f"📊 {suite} — {len(suite_runs)} run(s)"):
+            trend = _suite_trend_dataframe(suite_runs)
+            if trend is not None and len(trend) >= 2:
+                st.line_chart(trend, height=180)
+            elif trend is not None and len(trend) == 1:
+                st.caption(
+                    f"One run only — score: {trend['score'].iloc[0]:.2f} "
+                    f"(line chart needs ≥2 points)."
+                )
+            else:
+                st.caption("No comparable score on these runs (likely a structural-counts summary).")
+
+            # Inline recent rows for this suite
+            rows = []
+            for r in suite_runs[:25]:
+                rows.append(
+                    {
+                        "timestamp": str(r.get("timestamp", "?"))[:19],
+                        "tier": str(r.get("tier", "?")),
+                        "ticker": str(r.get("ticker", "?")),
+                        "thesis": str(r.get("thesis", "?")),
+                        "score": _format_score_for_display(r),
+                        "rationale": str(r.get("rationale") or "")[:120],
+                    }
+                )
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    section_divider()
+
+    # All-runs flat table (kept as before, mostly for raw scrolling)
+    st.markdown("#### All recent eval runs (flat)")
     rows = []
-    for r in runs[:25]:
-        # Eval suites use different score conventions: Tier 2 LLM-judge uses
-        # an integer `score` (0-3) plus `label`; RAG eval uses a float
-        # `groundedness_rate` (0..1). Coerce all to a single string column so
-        # pyarrow / Streamlit's dataframe renderer doesn't choke on mixed
-        # types.
-        if "score" in r and r["score"] is not None:
-            score_str = str(r["score"])
-        elif "groundedness_rate" in r and r["groundedness_rate"] is not None:
-            score_str = f"{float(r['groundedness_rate']):.2f}"
-        else:
-            score_str = "—"
+    for r in runs[:50]:
         rows.append(
             {
                 "timestamp": str(r.get("timestamp", "?"))[:19],
@@ -166,7 +266,7 @@ def render_eval_runs() -> None:
                 "suite": str(r.get("suite", "?")),
                 "ticker": str(r.get("ticker", "?")),
                 "thesis": str(r.get("thesis", "?")),
-                "score": score_str,
+                "score": _format_score_for_display(r),
                 "label": str(r.get("label", "—")),
                 "rationale": str(r.get("rationale") or "")[:80],
             }
@@ -178,7 +278,12 @@ def render_eval_runs() -> None:
 
 def render_state_db_panel() -> None:
     """Step 5z observability — reads from data/state.py SQLite telemetry."""
-    st.markdown("### Graph runs (Step 5z observability)")
+    st.markdown("### Drill-in runs")
+    st.caption(
+        "Every full LangGraph drill-in (the dashboard's 🔍 Run drill-in "
+        "button), with timing, status, and per-node telemetry. Backed by "
+        "`data_cache/state.db`."
+    )
     from data import state as state_db
 
     # Read the runtime DB_PATH (set in conftest fixtures during tests, or
@@ -233,7 +338,7 @@ def render_state_db_panel() -> None:
     section_divider()
 
     # Recent runs table
-    st.markdown("#### Recent runs")
+    st.markdown("#### Recent drill-in runs")
     runs = state_db.recent_runs(limit=25)
     if runs:
         rows = []

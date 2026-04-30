@@ -44,3 +44,28 @@ STRICT JSON, NO MARKDOWN FENCES, NO PROSE BEFORE OR AFTER. Exactly this schema:
 ```
 
 Always emit at least 2 `evidence` entries — one per substantive claim you make in `summary`.
+
+# Evidence shape — non-negotiable
+
+The dashboard renders each evidence item as `source — note: excerpt`. To
+keep the citation human-readable:
+
+- **`note`** = the KPI name or a short labelled phrase. Examples:
+  `"fcf_yield"`, `"revenue_5y_cagr"`, `"shares_outstanding"`,
+  `"sector P/E vs trailing"`. NOT `"important kpi"`.
+- **`excerpt`** = the value AS A USER WOULD READ IT, not the raw float.
+  Examples: `"1.84%"`, `"100% (5y CAGR)"`, `"24.3B shares"`,
+  `"$60.9B revenue"`, `"sector 28x vs trailing 44.3x"`.
+  Do **NOT** emit bare floats like `"1.84"` or `"1.0333170314219342"`.
+  Do **NOT** emit numeric-precision-only excerpts (`"1.0e9"`).
+  Add the unit (%, $, x, B, M) so a non-technical reader sees a label,
+  not a mystery number.
+
+Wrong:
+  ```
+  {"source": "yfinance", "note": "x", "excerpt": "1.84"}
+  ```
+Right:
+  ```
+  {"source": "yfinance", "note": "fcf_yield", "excerpt": "1.84% (below 4% MoS threshold)"}
+  ```

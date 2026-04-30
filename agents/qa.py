@@ -37,8 +37,8 @@ from utils.schemas import AgentAnswer, Evidence
 from utils.state import FinaqState
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
-AGENT_NAMES = ("fundamentals", "filings", "news", "risk")
-AgentName = Literal["fundamentals", "filings", "news", "risk"]
+AGENT_NAMES = ("fundamentals", "filings", "news", "risk", "synthesis")
+AgentName = Literal["fundamentals", "filings", "news", "risk", "synthesis"]
 # Bumped from 800 → 1500 in late Step 8: with 800 the LLM occasionally hit
 # the limit mid-JSON and produced an "Unterminated string" parse error.
 # 1500 gives enough headroom for a ~800-word answer plus 4-5 citations.
@@ -187,6 +187,48 @@ def _risk_context(state: FinaqState) -> str:
                 f"{b.get('threshold_value', '')} (observed={b.get('observed_value', '')}, "
                 f"source={b.get('source', '')})"
             )
+    return "\n".join(parts)
+
+
+def _synthesis_context(state: FinaqState) -> str:
+    """Render the full synthesis report + structured metadata + brief
+    upstream-agent summaries so the QA model can ground answers in the
+    user's actual report. Different from the other agents' context
+    builders: those scope to ONE agent's payload; synthesis Q&A spans
+    the whole drill-in narrative."""
+    report = state.get("report", "") or ""
+    confidence = state.get("synthesis_confidence", "?")
+    gaps = state.get("gaps") or []
+    watchlist = state.get("watchlist") or []
+    fund = state.get("fundamentals") or {}
+    filings = state.get("filings") or {}
+    news = state.get("news") or {}
+    risk = state.get("risk") or {}
+    mc = state.get("monte_carlo") or {}
+
+    parts = [
+        "SYNTHESIS REPORT (markdown):",
+        report,
+        "",
+        "STRUCTURED METADATA:",
+        f"  confidence: {confidence}",
+        f"  gaps ({len(gaps)}): {gaps}",
+        f"  watchlist ({len(watchlist)}): {watchlist}",
+        "",
+        "UPSTREAM AGENT SUMMARIES (so you can answer 'why?'):",
+        f"  fundamentals: {_truncate(fund.get('summary', ''), 400)}",
+        f"  filings: {_truncate(filings.get('summary', ''), 400)}",
+        f"  news: {_truncate(news.get('summary', ''), 400)}",
+        f"  risk level: {risk.get('level', '?')} (score {risk.get('score_0_to_10', '?')})",
+        f"  risk summary: {_truncate(risk.get('summary', ''), 400)}",
+    ]
+    if mc and mc.get("method") not in (None, "skipped"):
+        dcf = mc.get("dcf") or {}
+        parts.append(
+            f"  monte_carlo dcf: P10={dcf.get('p10')}, P50={dcf.get('p50')}, "
+            f"P90={dcf.get('p90')}, current_price={mc.get('current_price')}, "
+            f"convergence_ratio={mc.get('convergence_ratio')}"
+        )
     return "\n".join(parts)
 
 
@@ -370,6 +412,23 @@ async def ask(state: FinaqState, agent: AgentName, question: str) -> AgentAnswer
                 errors=errors + ["no chunks retrieved"],
             )
         agent_context = _filings_context_from_chunks(chunks)
+    elif agent == "synthesis":
+        # Synthesis Q&A is over the report itself, not a single agent's
+        # payload. The user is asking "explain bullet 2" or "why high
+        # confidence?" — the LLM needs the whole report + brief upstream
+        # summaries so it can ground its answer.
+        if not state.get("report"):
+            return AgentAnswer(
+                agent=agent,
+                question=question,
+                answer=(
+                    "No synthesis report in this drill-in's state. Run a "
+                    "drill-in first — the synthesis report is what this "
+                    "Q&A grounds itself in."
+                ),
+                errors=["state.report is empty"],
+            )
+        agent_context = _synthesis_context(state)
     else:  # pragma: no cover — guarded by AGENT_NAMES check above
         raise AssertionError(f"unreachable: {agent}")
 

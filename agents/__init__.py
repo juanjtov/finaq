@@ -48,8 +48,25 @@ def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
         t0 = time.perf_counter()
         error_msg: str | None = None
         try:
-            return await run_fn(state)
-        except Exception as e:  # surface, do not propagate
+            result = await run_fn(state)
+            # Surface "soft failures" — agents that return successfully but
+            # carry non-empty `errors` lists in their payload. The canonical
+            # case: Filings returns {filings: {errors: ["no chunks retrieved"]}}
+            # when ChromaDB is empty for the ticker — completes without
+            # raising, so was previously invisible in Mission Control.
+            try:
+                for value in (result or {}).values():
+                    if not isinstance(value, dict):
+                        continue
+                    for err in value.get("errors") or []:
+                        if err:
+                            state_db.record_error(name, str(err), run_id=run_id)
+            except Exception as scan_exc:
+                logger.warning(
+                    f"[telemetry] payload-error scan failed for {name}: {scan_exc}"
+                )
+            return result
+        except Exception as e:  # raised exception — escalates to node-run 'failed'
             error_msg = str(e)
             logger.error(f"{name}: {e}")
             return {
@@ -263,4 +280,9 @@ async def invoke_with_telemetry(graph: Any, initial_state: dict[str, Any]) -> di
         confidence=confidence,
         duration_s=time.perf_counter() - t0,
     )
+
+    # Stamp the run_id onto the final state so downstream consumers (the
+    # Streamlit dashboard's run-history cache) can key files by it without
+    # having to re-query state.db.
+    final["run_id"] = run_id
     return final

@@ -60,6 +60,30 @@ def _filings_dir(ticker: str, kind: str) -> Path:
     return EDGAR_DIR / "sec-edgar-filings" / ticker / kind
 
 
+def has_filings_in_unsupported_kinds(ticker: str) -> list[str]:
+    """Return any filing-kind directories on disk for this ticker that AREN'T
+    in our supported set (currently 10-K, 10-Q).
+
+    Used by the Filings agent to detect foreign issuers (TSM/ASML file 20-F
+    + 6-K, no 10-K/10-Q) so it can emit a precise error rather than the
+    generic "not ingested" message. The dashboard's ingest banner reads
+    this too — for foreign issuers it should NOT prompt for re-ingest
+    (won't help) but should explain the corpus gap.
+
+    Returns e.g. `["20-F", "6-K"]` for ASML, or `[]` if the ticker either
+    has no EDGAR cache OR has only-supported kinds.
+    """
+    ticker_root = EDGAR_DIR / "sec-edgar-filings" / ticker.upper()
+    if not ticker_root.exists():
+        return []
+    supported = set(DEFAULT_LIMITS.keys())  # currently {"10-K", "10-Q"}
+    return sorted(
+        p.name
+        for p in ticker_root.iterdir()
+        if p.is_dir() and p.name not in supported and any(p.iterdir())
+    )
+
+
 def _existing_filings(ticker: str, kind: str) -> list[Path]:
     folder = _filings_dir(ticker, kind)
     if not folder.exists():

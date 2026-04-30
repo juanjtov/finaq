@@ -281,3 +281,46 @@ async def test_plain_ainvoke_still_works_without_telemetry_setup(ai_cake):
     nodes = state_db.recent_node_runs(limit=20)
     orphan = [n for n in nodes if n["run_id"] is None]
     assert len(orphan) >= 7, f"expected ≥7 orphan node rows, got {len(orphan)}"
+
+
+@pytest.mark.asyncio
+async def test_soft_failure_in_agent_payload_is_recorded_in_errors_table(
+    monkeypatch, ai_cake
+):
+    """Real failure mode (CRDO case): Filings returns SUCCESSFULLY but with
+    `errors=['no chunks retrieved']` in its payload because ChromaDB has no
+    ingest for that ticker. Previously this completed silently (status='completed',
+    no error row). The scan in _safe_node should now surface it."""
+    from agents import filings as filings_mod
+
+    async def filings_with_soft_error(state):
+        return {
+            "filings": {
+                "summary": f"No filings data available for {state.get('ticker')}.",
+                "risk_themes": [],
+                "mdna_quotes": [],
+                "evidence": [],
+                "errors": ["no chunks retrieved"],
+            },
+            "messages": [{"node": "filings", "event": "completed"}],
+        }
+
+    monkeypatch.setattr(filings_mod, "run", filings_with_soft_error)
+
+    graph = build_graph()
+    await invoke_with_telemetry(graph, {"ticker": "ZZZZ", "thesis": ai_cake})
+
+    # The filings node should still be 'completed' (no exception raised)…
+    runs = state_db.recent_runs(limit=1)
+    run_id = runs[0]["run_id"]
+    nodes = state_db.all_node_runs_for(run_id)
+    filings_node = next(n for n in nodes if n["node"] == "filings")
+    assert filings_node["status"] == "completed"
+
+    # … but the errors table should contain the soft-failure message.
+    errs = state_db.recent_errors()
+    soft_errs = [e for e in errs if e["agent"] == "filings"]
+    assert any("no chunks retrieved" in (e["message"] or "") for e in soft_errs), (
+        f"soft failure not propagated. Recorded errors for filings: "
+        f"{[e['message'] for e in soft_errs]}"
+    )

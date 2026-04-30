@@ -232,6 +232,105 @@ def test_chroma_filing_meta_from_path_extracts_kind_and_accession():
     assert accession == "0001-25-000123"
 
 
+def test_ingest_filing_batches_upsert_when_chunk_count_exceeds_chroma_limit(
+    tmp_path, monkeypatch
+):
+    """Real failure mode (SMCI/DELL ingestion): a 10-K can produce >5461
+    chunks in one filing — ChromaDB's `add`/`upsert` raises
+    `ValueError: Batch size … is greater than max batch size of 5461`.
+    The fix batches the upsert; this test asserts upsert is called multiple
+    times for a synthetic large filing, never with more than _UPSERT_BATCH_SIZE
+    items per call."""
+    from data import chroma as ch
+
+    # Fake collection that just records every call.
+    upsert_calls: list[int] = []
+
+    class _FakeCollection:
+        def upsert(self, ids, documents, metadatas):
+            upsert_calls.append(len(ids))
+
+    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
+
+    # Synthesize a fake "extracted text" that produces >5461 chunks. Bypass
+    # the SEC-filing parser by stubbing _extract_text + _split_into_items +
+    # _chunk_tokens to return a known number of chunks directly.
+    n_chunks_total = 7200  # SMCI's actual size in production
+    monkeypatch.setattr(ch, "_extract_text", lambda p: "x")  # non-empty short-circuits the bail
+    monkeypatch.setattr(
+        ch,
+        "_split_into_items",
+        lambda text: [("1A", "Risk Factors", "stub body")],
+    )
+    monkeypatch.setattr(
+        ch,
+        "_chunk_tokens",
+        lambda body, encoder: [f"chunk-{i}" for i in range(n_chunks_total)],
+    )
+    monkeypatch.setattr(
+        ch,
+        "_filing_meta_from_path",
+        lambda path: ("10-K", "0001-25-000999"),
+    )
+    monkeypatch.setattr(ch, "parse_filed_date", lambda path: "2026-02-26")
+
+    # Need a tiktoken encoder placeholder; the lambda above ignores it.
+    monkeypatch.setattr(
+        ch.tiktoken, "get_encoding", lambda name: object()
+    )
+
+    fake_path = tmp_path / "full-submission.txt"
+    fake_path.write_text("ignored — _extract_text is stubbed")
+
+    written = ch.ingest_filing("SMCI", fake_path)
+    assert written == n_chunks_total
+    # Multiple batches because total > _UPSERT_BATCH_SIZE
+    assert len(upsert_calls) >= 2, (
+        f"expected >=2 upsert calls for {n_chunks_total} chunks, got {len(upsert_calls)}"
+    )
+    # No single batch exceeds the configured limit (ChromaDB max is 5461;
+    # we use 4000 to stay well below it).
+    assert all(n <= ch._UPSERT_BATCH_SIZE for n in upsert_calls), (
+        f"a batch exceeded the upsert limit: {upsert_calls}"
+    )
+    # The total writes match.
+    assert sum(upsert_calls) == n_chunks_total
+
+
+def test_ingest_filing_single_upsert_when_chunk_count_below_limit(tmp_path, monkeypatch):
+    """Small filings (under the batch limit) should still produce exactly
+    one upsert call — no per-batch overhead when there's nothing to batch."""
+    from data import chroma as ch
+
+    upsert_calls: list[int] = []
+
+    class _FakeCollection:
+        def upsert(self, ids, documents, metadatas):
+            upsert_calls.append(len(ids))
+
+    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
+    monkeypatch.setattr(ch, "_extract_text", lambda p: "x")
+    monkeypatch.setattr(
+        ch,
+        "_split_into_items",
+        lambda text: [("1A", "Risk Factors", "stub body")],
+    )
+    monkeypatch.setattr(
+        ch,
+        "_chunk_tokens",
+        lambda body, encoder: [f"chunk-{i}" for i in range(500)],
+    )
+    monkeypatch.setattr(ch, "_filing_meta_from_path", lambda path: ("10-Q", "0001-25-001"))
+    monkeypatch.setattr(ch, "parse_filed_date", lambda path: "2026-02-26")
+    monkeypatch.setattr(ch.tiktoken, "get_encoding", lambda name: object())
+
+    fake_path = tmp_path / "full-submission.txt"
+    fake_path.write_text("ignored")
+
+    ch.ingest_filing("CRDO", fake_path)
+    assert upsert_calls == [500]
+
+
 # --- Hybrid retrieval: BM25 + RRF -------------------------------------------
 
 

@@ -351,7 +351,7 @@ def test_coerce_answer_handles_missing_citations_field():
 async def test_ask_rejects_unknown_agent():
     state = _state_with()
     with pytest.raises(ValueError, match="unknown agent"):
-        await ask(state, "synthesis", "q")  # type: ignore[arg-type]
+        await ask(state, "load_thesis", "q")  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -476,3 +476,78 @@ async def test_ask_filings_handles_chroma_failure(monkeypatch):
     out = await ask(state, "filings", "anything?")
     assert "No filings chunks retrieved" in out.answer
     assert any("retrieval" in e for e in out.errors)
+
+
+# --- synthesis Q&A ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ask_synthesis_returns_no_data_message_when_report_missing():
+    """Synthesis Q&A grounds itself in state.report; without one, return a
+    graceful 'run drill-in first' message rather than an LLM-generated
+    fabrication."""
+    state = _state_with()  # no report
+    out = await ask(state, "synthesis", "Why high confidence?")
+    assert "No synthesis report" in out.answer
+    assert any("state.report" in e for e in out.errors)
+
+
+@pytest.mark.asyncio
+async def test_ask_synthesis_propagates_llm_output_when_call_succeeds(monkeypatch):
+    from agents import qa
+
+    fake_resp = {
+        "answer": "Confidence is medium because Fundamentals + News converged but Risk was ELEVATED (Top risk #1).",
+        "citations": [
+            {
+                "source": "synthesis",
+                "note": "Top risks · #1",
+                "excerpt": "Supply concentration",
+            }
+        ],
+    }
+    monkeypatch.setattr(qa, "_call_llm", lambda system, user: fake_resp)
+
+    state = _state_with(
+        fundamentals=_populated_fundamentals(),
+        news=_populated_news(),
+        risk=_populated_risk(),
+        report=(
+            "# NVDA — AI cake thesis update\n\n"
+            "**Date:** 2026-04-30 · **Confidence:** medium\n\n"
+            "## Top risks\n1. Supply concentration — severity 4 — TSM dependency.\n"
+        ),
+        synthesis_confidence="medium",
+        gaps=["no Q3 forward guidance"],
+        watchlist=["Q3 earnings call (news)"],
+    )
+    out = await ask(state, "synthesis", "Why is confidence medium?")
+    assert "Confidence is medium" in out.answer
+    assert out.agent == "synthesis"
+    assert any(c.note and "Top risks" in c.note for c in out.citations)
+
+
+def test_synthesis_context_includes_report_metadata_and_upstream():
+    """The synthesis context builder must include the report markdown,
+    structured fields (confidence, gaps, watchlist), AND brief upstream
+    summaries so the QA model can answer 'why?' grounded in real data."""
+    from agents.qa import _synthesis_context
+
+    state = _state_with(
+        fundamentals=_populated_fundamentals(),
+        risk=_populated_risk(),
+        report="# Heading\n\n## What this means\nPlain English summary.",
+        synthesis_confidence="high",
+        gaps=["gap one"],
+        watchlist=["item one (news)"],
+    )
+    ctx = _synthesis_context(state)
+    assert "SYNTHESIS REPORT" in ctx
+    assert "Plain English summary" in ctx
+    assert "confidence: high" in ctx
+    assert "gap one" in ctx
+    assert "item one (news)" in ctx
+    # Upstream summaries should appear
+    assert "47% YoY" in ctx
+    # Risk level surfaced
+    assert "level: ELEVATED" in ctx

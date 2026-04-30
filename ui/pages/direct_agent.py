@@ -64,6 +64,12 @@ SUGGESTED_QUESTIONS: dict[str, list[str]] = {
         "Are any thesis material thresholds currently breached?",
         "Are there divergent signals between News and Filings?",
     ],
+    "synthesis": [
+        "Why is the confidence label what it is?",
+        "Expand on the most important bear-case bullet.",
+        "What would change the action recommendation?",
+        "Reconcile the tension between bull and bear cases.",
+    ],
 }
 
 
@@ -221,7 +227,26 @@ def main() -> None:
     with cols[0]:
         thesis_slug = st.selectbox("Thesis", slugs)
     with cols[1]:
-        ticker = st.text_input("Ticker", value="NVDA").upper()
+        # Ticker is a dropdown limited to the active thesis's universe — no
+        # more arbitrary text entry that defaults to NVDA on every thesis.
+        thesis = _load_thesis(thesis_slug)
+        anchors = thesis.get("anchor_tickers") or []
+        universe = thesis.get("universe") or anchors
+        if not universe:
+            st.warning(f"Thesis `{thesis_slug}` has an empty universe.")
+            return
+        # Render anchors with a ⭐ prefix so the user can spot them at a glance.
+        formatted = [f"⭐ {t}" if t in anchors else t for t in universe]
+
+        def _strip_chip(label: str) -> str:
+            return label.lstrip("⭐ ").strip()
+
+        choice = st.selectbox(
+            "Ticker",
+            formatted,
+            help="Tickers limited to the active thesis's universe. ⭐ marks anchors.",
+        )
+        ticker = _strip_chip(choice).upper()
     with cols[2]:
         agent = st.selectbox(
             "Agent",
@@ -230,7 +255,8 @@ def main() -> None:
                 "fundamentals: KPIs + projections · "
                 "filings: SEC RAG · "
                 "news: 90d Tavily · "
-                "risk: cross-modal synthesis"
+                "risk: cross-modal synthesis · "
+                "synthesis: explain the report"
             ),
         )
 

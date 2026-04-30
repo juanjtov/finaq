@@ -164,7 +164,18 @@ def scenario_card(mc: dict) -> None:
 
 def evidence_list(evidence: Iterable[dict], heading: str | None = None) -> None:
     """Render a flat list of evidence items as palette-coded bullet rows
-    with clickable URLs / accession numbers. Used inside per-agent expanders."""
+    with clickable URLs / accession numbers. Used inside per-agent expanders.
+
+    Three rendering shapes based on what the evidence carries:
+      - URL-bearing (news / Tavily): source · date — [link](url)
+      - Accession-bearing (filings / EDGAR): source · item · date — `accession` — _excerpt_
+      - Neither URL nor accession (Fundamentals KPIs): the `note` field is
+        the human-readable label (e.g. "fcf_yield") and `excerpt` is the
+        value ("1.84%"). Render as `source — note: excerpt`. Without this
+        special case, Fundamentals citations show as bare numbers like
+        "fundamentals — 1.84" (the "labelled value" reading the user
+        wanted to see was missing).
+    """
     items = list(evidence or [])
     if heading:
         st.caption(heading)
@@ -177,15 +188,29 @@ def evidence_list(evidence: Iterable[dict], heading: str | None = None) -> None:
         accession = ev.get("accession")
         item = ev.get("item")
         excerpt = (ev.get("excerpt") or "").strip()
+        note = (ev.get("note") or "").strip()
         as_of = ev.get("as_of")
-        # Compose the lead line (source · item · date)
+
+        # KPI-style evidence (no URL, no accession): show note + excerpt as a
+        # labelled "key: value" pair instead of a bare number.
+        if not url and not accession:
+            label_parts = [f"**{source}**"]
+            if note:
+                label_parts.append(note)
+            if as_of:
+                label_parts.append(as_of)
+            lead = " · ".join(label_parts)
+            value = excerpt if excerpt else "(no value)"
+            st.markdown(f"- {lead} — `{value[:200]}`")
+            continue
+
+        # Default rendering for URL-bearing or accession-bearing evidence.
         lead_parts = [f"**{source}**"]
         if item:
             lead_parts.append(item)
         if as_of:
             lead_parts.append(as_of)
         lead = " · ".join(lead_parts)
-        # Body line
         body_parts: list[str] = []
         if url:
             body_parts.append(f"[link]({url})")
@@ -245,25 +270,34 @@ def watchlist_card(watchlist: list[str]) -> None:
 
 
 def freshness_card(label: str, timestamp: str | None, note: str = "") -> None:
-    """A small data-source freshness card used on Mission Control and (in
-    Step 5z onward) tied to `data_cache/state.db`."""
+    """Small data-source freshness card used on Mission Control / Architecture.
+
+    Implementation note: Streamlit 1.56's markdown renderer mangles
+    multi-line HTML when an inner block is empty (e.g. `<div></div>` from
+    `note=""` on the Architecture page) and surfaces the closing tag as
+    literal `</div>` text. Two fixes:
+      1. The HTML is now a single line (no embedded newlines that Markdown
+         can mis-tokenise as paragraph breaks).
+      2. The note `<div>` is conditionally omitted when empty.
+    """
     text = timestamp or "—"
-    st.markdown(
-        f"""
-        <div style="border:1px solid {TAUPE}; border-radius:6px; padding:0.6rem 0.9rem;
-            background:{EGGSHELL}; min-height:4rem;">
-            <div style="font-size:0.7rem; color:{INK}; letter-spacing:0.05em;
-                text-transform:uppercase; font-weight:600;">{label}</div>
-            <div style="color:{INK}; font-size:0.95rem; font-weight:600; margin-top:0.2rem;">
-                {text}
-            </div>
-            <div style="color:{INK}; opacity:0.65; font-size:0.8rem; margin-top:0.2rem;">
-                {note}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    note_div = (
+        f'<div style="color:{INK}; opacity:0.65; font-size:0.8rem; '
+        f'margin-top:0.2rem;">{note}</div>'
+        if note
+        else ""
     )
+    html = (
+        f'<div style="border:1px solid {TAUPE}; border-radius:6px; '
+        f'padding:0.6rem 0.9rem; background:{EGGSHELL}; min-height:4rem;">'
+        f'<div style="font-size:0.7rem; color:{INK}; letter-spacing:0.05em; '
+        f'text-transform:uppercase; font-weight:600;">{label}</div>'
+        f'<div style="color:{INK}; font-size:0.95rem; font-weight:600; '
+        f'margin-top:0.2rem;">{text}</div>'
+        f"{note_div}"
+        f"</div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 # --- Page header ------------------------------------------------------------

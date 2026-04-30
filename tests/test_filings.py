@@ -107,19 +107,80 @@ def test_strip_code_fences(raw, expected):
 
 
 @pytest.mark.asyncio
-async def test_run_returns_no_chunks_message_when_chroma_empty(monkeypatch):
-    """If retrieval returns nothing, FilingsOutput is still schema-valid and
-    surfaces a clear error so downstream agents don't operate on empty data
-    without knowing it."""
+async def test_run_returns_ticker_not_ingested_message_when_chroma_empty(monkeypatch):
+    """When ChromaDB has no chunks for the ticker AT ALL, surface a precise
+    actionable error pointing at scripts.ingest_universe — not a generic
+    'no chunks retrieved' message."""
     from agents import filings as f
 
     monkeypatch.setattr(f, "_retrieve_for_subquery", lambda *a, **kw: [])
+    # has_ticker returns False → "ticker_not_ingested" path
+    monkeypatch.setattr("data.chroma.has_ticker", lambda ticker: False)
 
     state = {"ticker": "ZZZZ", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
     result = await run(state)
     out = FilingsOutput.model_validate(result["filings"])
     assert "ZZZZ" in out.summary
-    assert any("no chunks" in e for e in out.errors)
+    assert any("ticker_not_ingested" in e for e in out.errors)
+    assert any("scripts.ingest_universe" in e for e in out.errors)
+
+
+@pytest.mark.asyncio
+async def test_run_returns_empty_query_match_when_ticker_ingested_but_no_hits(
+    monkeypatch,
+):
+    """When ChromaDB DOES have chunks for the ticker but the 3 subqueries all
+    return 0 matches, emit a different (rare) error so we know the issue is
+    the query templates, not the corpus."""
+    from agents import filings as f
+
+    monkeypatch.setattr(f, "_retrieve_for_subquery", lambda *a, **kw: [])
+    monkeypatch.setattr("data.chroma.has_ticker", lambda ticker: True)
+    monkeypatch.setattr("data.edgar.has_filings_in_unsupported_kinds", lambda t: [])
+
+    state = {"ticker": "ABCD", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    result = await run(state)
+    out = FilingsOutput.model_validate(result["filings"])
+    assert "ABCD" in out.summary
+    assert any("empty_query_match" in e for e in out.errors)
+    # Should NOT recommend running the ingest script — this is not an ingest issue.
+    assert not any("scripts.ingest_universe" in e for e in out.errors)
+
+
+@pytest.mark.asyncio
+async def test_run_returns_foreign_issuer_message_when_unsupported_kinds_present(
+    monkeypatch,
+):
+    """Real failure mode: TSM + ASML file 20-F + 6-K, not 10-K + 10-Q. Our
+    pipeline only ingests the latter; ChromaDB stays empty even after a
+    successful download attempt. The agent should detect the EDGAR cache
+    HAS filings in 20-F/6-K dirs and emit a precise message — NOT prompt
+    the user to re-run scripts.ingest_universe (which won't help)."""
+    from agents import filings as f
+
+    monkeypatch.setattr(f, "_retrieve_for_subquery", lambda *a, **kw: [])
+    monkeypatch.setattr("data.chroma.has_ticker", lambda ticker: False)
+    monkeypatch.setattr(
+        "data.edgar.has_filings_in_unsupported_kinds",
+        lambda ticker: ["20-F", "6-K"] if ticker == "TSM" else [],
+    )
+
+    state = {"ticker": "TSM", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    result = await run(state)
+    out = FilingsOutput.model_validate(result["filings"])
+
+    # Foreign-issuer error path
+    assert any("foreign_issuer" in e for e in out.errors)
+    assert any("20-F" in e for e in out.errors)
+    assert any("6-K" in e for e in out.errors)
+
+    # Must NOT suggest re-running scripts.ingest_universe (won't help)
+    assert not any(
+        "scripts.ingest_universe" in e and "Run" in e for e in out.errors
+    ), f"foreign-issuer error should not prompt re-ingest: {out.errors}"
+    # Summary explains the situation
+    assert "20-F" in out.summary
+    assert "TSM" in out.summary
 
 
 @pytest.mark.asyncio
