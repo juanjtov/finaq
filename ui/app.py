@@ -102,6 +102,22 @@ def load_thesis(slug: str) -> dict:
     return json.loads((THESES_DIR / f"{slug}.json").read_text())
 
 
+_DOLLAR_BEFORE_DIGIT = re.compile(r"\$(?=\d)")
+
+
+def _md_safe(text: str) -> str:
+    """Escape `$` followed by a digit so Streamlit's KaTeX doesn't grab a
+    pair of dollar amounts and render the span between them as inline math
+    (italic, no spaces). Stored markdown stays untouched — only render-side.
+
+    Example: ``"$205.66 is below $250"`` → ``"\\$205.66 is below \\$250"``.
+    KaTeX no longer matches the pair, the literal `$` survives the escape.
+    """
+    if not text:
+        return text
+    return _DOLLAR_BEFORE_DIGIT.sub(r"\\$", text)
+
+
 def _section(md: str, header: str) -> str:
     lines = md.splitlines()
     start = next(
@@ -707,7 +723,7 @@ def render_dashboard_view(state: dict) -> None:
         risk_gauge(risk.get("level"), risk.get("score_0_to_10"))
         if risk.get("summary"):
             st.markdown("")
-            st.caption(risk["summary"])
+            st.caption(_md_safe(risk["summary"]))
     with rcol_b:
         st.markdown("**Top risks**")
         top_risks_chips(risk.get("top_risks") or [], limit=5)
@@ -727,7 +743,7 @@ def render_dashboard_view(state: dict) -> None:
     with acol:
         st.markdown("### 🎯 Action")
         action = _section(report, "Action recommendation")
-        st.markdown(action or "_(no recommendation)_")
+        st.markdown(_md_safe(action) if action else "_(no recommendation)_")
 
     section_divider()
 
@@ -735,7 +751,7 @@ def render_dashboard_view(state: dict) -> None:
     what_this_means = _section(report, "What this means")
     if what_this_means:
         st.markdown("### 💡 In plain English")
-        st.info(what_this_means)
+        st.info(_md_safe(what_this_means))
 
 
 def render_report_view(state: dict) -> None:
@@ -745,7 +761,7 @@ def render_report_view(state: dict) -> None:
     if not report.strip():
         st.warning("No synthesis report produced for this run.")
         return
-    st.markdown(report)
+    st.markdown(_md_safe(report))
 
 
 def render_agent_details_view(state: dict) -> None:
@@ -772,7 +788,7 @@ def render_agent_details_view(state: dict) -> None:
     st.markdown("**Top-level evidence (from synthesis):**")
     evidence_md = _section(state.get("report") or "", "Evidence")
     if evidence_md:
-        st.markdown(evidence_md)
+        st.markdown(_md_safe(evidence_md))
     else:
         st.caption("No Evidence section in the synthesis report.")
 

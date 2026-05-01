@@ -331,15 +331,27 @@ def test_mission_control_renders_with_populated_state_db():
 
 
 def test_direct_agent_page_renders_agent_dropdown():
+    """The Agent selectbox must:
+      - Exist on the page
+      - Include ALL five agents (fundamentals, filings, news, risk, synthesis).
+        Catches the regression where AGENT_NAMES was extended but the
+        dropdown still rendered an old cached tuple — see Step 8 retro."""
     at = AppTest.from_file(
         str(PAGES_DIR / "direct_agent.py"), default_timeout=DASHBOARD_TIMEOUT_S
     )
     at.run()
     assert not at.exception
     selectboxes = at.selectbox
-    assert any(
-        sb.label == "Agent" for sb in selectboxes
-    ), f"Direct Agent missing 'Agent' selectbox; saw: {[s.label for s in selectboxes]}"
+    agent_box = next((sb for sb in selectboxes if sb.label == "Agent"), None)
+    assert agent_box is not None, (
+        f"Direct Agent missing 'Agent' selectbox; saw: {[s.label for s in selectboxes]}"
+    )
+    options = list(agent_box.options or [])
+    expected = {"fundamentals", "filings", "news", "risk", "synthesis"}
+    missing = expected - set(options)
+    assert not missing, (
+        f"Agent dropdown missing options: {sorted(missing)}; saw: {options}"
+    )
 
 
 # --- New Thesis form fields -----------------------------------------------
@@ -355,3 +367,36 @@ def test_new_thesis_page_renders_thesis_name_input():
     assert any(
         "Thesis name" in (ti.label or "") for ti in text_inputs
     ), f"New Thesis form missing 'Thesis name' input; saw: {[t.label for t in text_inputs]}"
+
+
+# --- Render-side dollar-escape regression ----------------------------------
+#
+# Streamlit's markdown renderer uses KaTeX for math, which matches `$...$`
+# pairs — when the synthesis report contains "the current price of $205.66 is
+# below $250 target", KaTeX greedily renders the span between them as inline
+# math (italic, no spaces). _md_safe escapes `$` followed by a digit so KaTeX
+# leaves dollar amounts alone. This test pins the behaviour so a future edit
+# can't silently regress the report text into garbage italic.
+
+
+def test_md_safe_escapes_dollar_before_digit():
+    from ui.app import _md_safe
+
+    assert _md_safe(
+        "current price of $205.66 is below $250 target"
+    ) == "current price of \\$205.66 is below \\$250 target"
+
+
+def test_md_safe_leaves_lone_dollar_alone():
+    from ui.app import _md_safe
+
+    # No digit after the `$` → not a dollar amount, leave it alone so genuine
+    # math (rare in financial reports but possible) still renders.
+    assert _md_safe("symbol $ alone") == "symbol $ alone"
+
+
+def test_md_safe_idempotent_on_empty_input():
+    from ui.app import _md_safe
+
+    assert _md_safe("") == ""
+    assert _md_safe("plain text no markup") == "plain text no markup"

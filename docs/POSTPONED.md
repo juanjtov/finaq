@@ -114,6 +114,14 @@ revisit. If the trigger never fires, we never build it.
 
 ---
 
+### Notion / API surface lessons learned
+
+| Item | Trigger | Effort |
+|---|---|---|
+| **Pin notion-client + lock API version** | We hit `notion-client 3.0.0` defaulting to `Notion-Version: 2025-09-03`, which silently drops the legacy `properties=` arg on `databases.create` (schema must be passed via `initial_data_source={"properties": ...}`) and replaces `databases.query` with `data_sources.query`. The 4 DBs were created without schemas; only the regression-guard test `tests/test_notion.py::test_notion_module_does_not_call_legacy_databases_query` and `tests/test_bootstrap_notion.py::test_create_db_uses_initial_data_source` keep us from regressing. If a future Notion API version re-shapes the data-source pattern, both tests will start failing in CI before the dashboard ships broken writes. | When a future Notion-Version (e.g. `2026-XX-XX`) deprecates the data-sources shape OR `notion-client` ships a 4.x major. | 1–2h: pin `notion-client==3.x` in requirements.txt, run a probe write to a throwaway DB, update bootstrap + read paths, re-run smoke. |
+
+---
+
 ## §3 Out of scope (explicitly not building)
 
 These have been considered and ruled out. Re-opening any requires a deliberate

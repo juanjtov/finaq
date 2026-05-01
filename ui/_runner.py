@@ -137,11 +137,68 @@ def _worker(ticker: str, thesis_slug: str, record: dict[str, Any]) -> None:
         # Persist the cached demo so the dashboard's load path picks it up.
         _save_run_to_demo_dir(ticker.upper(), thesis_slug, final)
 
-        # Sidecar: per-drill-in RAG eval. Opt-in via env var.
+        # Sidecar 1: per-drill-in RAG eval. Opt-in via EVAL_LIVE_DRILL_INS.
         _maybe_run_live_eval(final, thesis)
+
+        # Sidecar 2: write report + watchlist to Notion. No-op when
+        # NOTION_API_KEY isn't set. Best-effort — never blocks the drill-in.
+        _maybe_write_to_notion(final, thesis)
     except Exception as e:
         logger.error(f"[runner] drill-in failed for {ticker} × {thesis_slug}: {e}")
         record["error"] = str(e)
+
+
+def _maybe_write_to_notion(final: dict[str, Any], thesis: dict) -> None:
+    """Persist the synthesis report + watchlist items to Notion. No-op when
+    Notion isn't configured (NOTION_API_KEY unset). Errors logged but never
+    propagate — the dashboard should never block on a Notion outage."""
+    try:
+        from data import notion as _notion
+    except ImportError:
+        return
+    if not _notion.is_configured():
+        return
+    report_md = final.get("report") or ""
+    if not report_md.strip():
+        return
+    ticker = final.get("ticker") or "?"
+    thesis_name = (
+        thesis.get("name") if isinstance(thesis, dict) else str(thesis or "?")
+    )
+    fund = final.get("fundamentals") or {}
+    kpis = fund.get("kpis") or {}
+    mc = final.get("monte_carlo") or {}
+    p50 = (mc.get("dcf") or {}).get("p50") if isinstance(mc.get("dcf"), dict) else None
+    try:
+        url = _notion.write_report(
+            ticker=ticker,
+            thesis_name=thesis_name,
+            markdown=report_md,
+            confidence=final.get("synthesis_confidence"),
+            p50=p50,
+            current_price=kpis.get("current_price"),
+            run_id=final.get("run_id"),
+        )
+        if url:
+            logger.info(f"[runner] notion report persisted: {url}")
+    except Exception as e:
+        logger.warning(f"[runner] notion report write failed: {e}")
+
+    # Persist the watchlist items as separate rows so Phase 1 Triage can
+    # read them back and turn them into monitoring rules.
+    watchlist = final.get("watchlist") or []
+    if watchlist:
+        try:
+            inserted = _notion.write_watchlist_items(
+                items=watchlist,
+                ticker=ticker,
+                thesis_name=thesis_name,
+                run_id=final.get("run_id"),
+            )
+            if inserted:
+                logger.info(f"[runner] notion watchlist: +{inserted} item(s)")
+        except Exception as e:
+            logger.warning(f"[runner] notion watchlist write failed: {e}")
 
 
 def _maybe_run_live_eval(final: dict[str, Any], thesis: dict) -> None:

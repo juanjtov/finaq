@@ -409,6 +409,73 @@ def render_recent_demos() -> None:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+def render_notion_panel() -> None:
+    """Show whether Notion is configured + the most recent reports written.
+    Notion is the long-term content memory (Step 9). When unconfigured,
+    explain how to set it up; when configured, deep-link to recent reports."""
+    st.markdown("### Notion (long-term memory)")
+    try:
+        from data import notion as _notion
+    except ImportError:
+        st.warning("`notion-client` not installed. Add it to requirements.txt.")
+        return
+
+    if not _notion.is_configured():
+        st.info(
+            "Notion is **not configured**. To enable long-term memory of every "
+            "drill-in (reports, watchlist, alerts), follow the setup steps in "
+            "`scripts/bootstrap_notion.py`'s docstring + "
+            "`docs/ARCHITECTURE.md` §12.\n\n"
+            "When `NOTION_API_KEY` is set in `.env`, every drill-in writes its "
+            "report to your Notion Reports database in the background — "
+            "this panel will then surface a deep-link list."
+        )
+        return
+
+    st.caption(
+        "Notion is connected. Every drill-in writes the synthesis report + "
+        "watchlist items to your workspace as a sidecar of the runner thread. "
+        "Failures are logged but never block the dashboard."
+    )
+
+    # Last 10 reports — best-effort; surface errors as a caption if the
+    # query fails (Notion outage shouldn't break Mission Control).
+    try:
+        reports = _notion.read_recent_reports(limit=10)
+    except Exception as e:
+        st.warning(f"Could not query Notion Reports DB: {e}")
+        return
+
+    if not reports:
+        st.caption(
+            "Reports DB is empty. Run a drill-in from the dashboard — the "
+            "report will appear here within a few seconds of completion."
+        )
+        return
+
+    rows = []
+    for r in reports:
+        rows.append(
+            {
+                "title": r.get("title") or "—",
+                "ticker": r.get("ticker") or "?",
+                "thesis": r.get("thesis") or "?",
+                "confidence": r.get("confidence") or "—",
+                "date": r.get("date") or "—",
+                "url": r.get("url") or "",
+            }
+        )
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "url": st.column_config.LinkColumn("Open in Notion", display_text="Open ↗")
+        },
+    )
+
+
 def main() -> None:
     page_header(
         "Mission Control",
@@ -420,9 +487,11 @@ def main() -> None:
     )
     render_freshness_panel()
     section_divider()
-    render_eval_runs()
-    section_divider()
     render_state_db_panel()
+    section_divider()
+    render_notion_panel()
+    section_divider()
+    render_eval_runs()
     section_divider()
     render_recent_demos()
 
