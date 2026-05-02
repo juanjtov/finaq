@@ -283,6 +283,30 @@ class AgentAnswer(BaseModel):
     errors: list[str] = []
 
 
+RouterIntent = Literal[
+    "drill", "analyze", "scan", "note", "thesis", "status", "help", "unknown"
+]
+
+
+class RouterDecision(BaseModel):
+    """Output of `agents/router.py:classify()`. The Telegram bot's NL-fallback
+    dispatcher uses this to decide whether to invoke a slash-command handler
+    or ask the user to clarify.
+
+    `confidence` is the LLM's self-reported certainty in [0, 1]. The bot
+    dispatches when `confidence >= ROUTER_CONFIDENCE_THRESHOLD` (0.7) AND
+    `intent != "unknown"`. Below that, the bot replies with a clarification
+    prompt rather than risk running the wrong action and burning OpenRouter
+    credits. Threshold is documented in docs/POSTPONED.md §2 — the trigger
+    to revisit is "≥10% of NL messages get clarification prompts when the
+    intent was actually obvious to a human reader".
+    """
+
+    intent: RouterIntent
+    args: dict[str, str] = Field(default_factory=dict)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class SynthesisOutput(BaseModel):
     """Final report from the Synthesis agent.
 

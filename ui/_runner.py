@@ -134,15 +134,19 @@ def _worker(ticker: str, thesis_slug: str, record: dict[str, Any]) -> None:
 
         final = asyncio.run(_run())
         record["run_id"] = final.get("run_id")
-        # Persist the cached demo so the dashboard's load path picks it up.
-        _save_run_to_demo_dir(ticker.upper(), thesis_slug, final)
 
         # Sidecar 1: per-drill-in RAG eval. Opt-in via EVAL_LIVE_DRILL_INS.
         _maybe_run_live_eval(final, thesis)
 
         # Sidecar 2: write report + watchlist to Notion. No-op when
         # NOTION_API_KEY isn't set. Best-effort — never blocks the drill-in.
+        # Mutates `final` in place to add `notion_report_url` so downstream
+        # consumers (Telegram /drill reply, Mission Control) can link out.
         _maybe_write_to_notion(final, thesis)
+
+        # Persist the cached demo AFTER sidecars so the saved JSON contains
+        # any URLs / sidecar additions. The dashboard load path picks it up.
+        _save_run_to_demo_dir(ticker.upper(), thesis_slug, final)
     except Exception as e:
         logger.error(f"[runner] drill-in failed for {ticker} × {thesis_slug}: {e}")
         record["error"] = str(e)
@@ -180,6 +184,9 @@ def _maybe_write_to_notion(final: dict[str, Any], thesis: dict) -> None:
             run_id=final.get("run_id"),
         )
         if url:
+            # Stash on the state so Telegram /drill replies and Mission
+            # Control can link out without re-querying Notion.
+            final["notion_report_url"] = url
             logger.info(f"[runner] notion report persisted: {url}")
     except Exception as e:
         logger.warning(f"[runner] notion report write failed: {e}")

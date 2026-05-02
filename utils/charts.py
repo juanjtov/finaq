@@ -154,3 +154,39 @@ def mc_histogram_to_bytes(
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor=WHITE)
     plt.close(fig)
     return buf.getvalue()
+
+
+# --- Sample resolution (shared between dashboard + Telegram bot) ----------
+
+
+_MC_HISTOGRAM_SEED = 42  # mirrors utils.monte_carlo.simulate's default seed
+
+
+def resolve_mc_samples(mc: dict) -> list[float]:
+    """Return the MC sample array for histogram rendering.
+
+    Saved demo files store percentiles + metadata but not the raw 10k-sample
+    array (size optimisation). When a caller needs to redraw the histogram —
+    Streamlit dashboard rerun, Telegram bot photo upload, future PDF re-export
+    — we regenerate a visually-similar normal distribution from the
+    P10/P50/P90 spread using a fixed RNG seed. Same cached state → same
+    chart bars across surfaces, no jitter.
+
+    Returns an empty list when neither raw samples nor DCF percentiles are
+    present (e.g. MC was skipped because shares_outstanding was missing —
+    see ARCHITECTURE §6.10).
+    """
+    samples = mc.get("samples")
+    if samples is not None and len(samples) > 0:
+        return list(samples)
+    dcf = mc.get("dcf") or {}
+    if dcf:
+        lo = dcf.get("p10") or 0
+        hi = dcf.get("p90") or 0
+        mid = dcf.get("p50") or (lo + hi) / 2
+        # Std derived from P10–P90 spread assuming roughly normal: 2.563σ
+        # covers the 80% interval, so spread / 2.6 ≈ σ.
+        std = max((hi - lo) / 2.6, 1.0)
+        rng = np.random.default_rng(_MC_HISTOGRAM_SEED)
+        return list(rng.normal(loc=mid, scale=std, size=8000))
+    return []

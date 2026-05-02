@@ -1,0 +1,966 @@
+"""Telegram bot runner — Step 10b skeleton (allowlist + /help + /start).
+
+This module builds a `python-telegram-bot.Application` configured with:
+  - the FINAQ bot token (`TELEGRAM_BOT_TOKEN` from .env)
+  - an allowlist of chat_ids (`TELEGRAM_CHAT_ID`, comma-separated for
+    future multi-account, single value today)
+  - the `/help` and `/start` command handlers (the welcome message)
+
+Subsequent step files (10c–10g) layer in /drill, /scan, /status, /note,
+/thesis, /analyze, and the natural-language fallback.
+
+Why a separate module rather than inlining handlers in
+`scripts/run_telegram_bot.py`:
+  - Handlers are unit-testable in isolation (`tests/test_telegram.py`)
+    without spinning up the long-poll loop.
+  - `scripts/run_telegram_bot.py` stays a 10-line entrypoint that becomes
+    a systemd unit in Step 12.
+  - Other future code paths (e.g. Triage's "send alert" call in Step 11)
+    can `from data.telegram import send_alert` without dragging in the
+    bot-startup machinery.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import logging as _logging
+import os
+from datetime import UTC, datetime, timedelta
+from functools import wraps
+from pathlib import Path
+from typing import Callable, Coroutine
+from urllib.parse import urlencode
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+from utils import logger
+
+# Mute httpx INFO logging — it logs every request URL including the bot
+# token (e.g. `POST https://api.telegram.org/bot<TOKEN>/getUpdates`),
+# which lands in our log file and leaks the secret if logs are shared.
+# WARNING level still surfaces 4xx/5xx errors we'd want to see.
+_logging.getLogger("httpx").setLevel(_logging.WARNING)
+
+# --- Allowlist --------------------------------------------------------------
+
+# Loaded from `TELEGRAM_CHAT_ID` at `build_app()` time. Comma-separated to
+# leave room for future multi-account use without a schema change. Today
+# it carries exactly one ID — yours.
+_allowed_chat_ids: set[int] = set()
+
+
+def _parse_allowlist(raw: str | None) -> set[int]:
+    """Parse a comma-separated string of chat_ids. Empty / whitespace
+    entries are dropped; non-numeric entries raise a clear error so a
+    typo in `.env` doesn't silently disable the allowlist."""
+    if not raw:
+        return set()
+    out: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.add(int(part))
+        except ValueError:
+            raise ValueError(
+                f"TELEGRAM_CHAT_ID contains non-numeric entry {part!r} — "
+                f"each comma-separated value must be a Telegram chat_id (integer)"
+            )
+    return out
+
+
+def _is_allowed(update: Update) -> bool:
+    chat = update.effective_chat
+    return chat is not None and chat.id in _allowed_chat_ids
+
+
+# --- HTML escape -----------------------------------------------------------
+#
+# We send replies with `parse_mode="HTML"` rather than the legacy Markdown
+# mode. Markdown breaks on innocuous content (e.g. `nvda_halo` reads as an
+# unterminated italic, and many ticker / signal strings carry `_` or `*`).
+# HTML only needs `<`, `>`, `&` escaped — much more forgiving for user-
+# generated and machine-generated content alike.
+
+_HTML_ESCAPES = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
+
+
+def _h(text: str | None) -> str:
+    """Escape text for safe interpolation into Telegram HTML messages."""
+    if text is None:
+        return ""
+    out = str(text)
+    for char, repl in _HTML_ESCAPES.items():
+        out = out.replace(char, repl)
+    return out
+
+
+# --- Safe send (retry + disk fallback for long-running replies) -----------
+
+
+_SEND_RETRY_DELAYS_S = (2, 5, 10)
+"""Backoff between retry attempts. Total ~17s of patience covers brief
+VPN reconnects, transient ISP/Telegram routing flaps, and DPI-driven
+RST storms that resolve quickly. Beyond that the network is genuinely
+gone and the on-disk fallback kicks in."""
+
+_SEND_FALLBACK_DIR = Path("data_cache/telegram/pending")
+"""Where we write a reply that couldn't be delivered after retries. The
+user can recover the content here even if the bot can never reach
+Telegram. Single-user system — no inbox semantics, just a paper trail."""
+
+
+async def _send_safe(
+    update: Update,
+    text: str,
+    *,
+    label: str = "reply",
+    **kwargs,
+) -> bool:
+    """Send `text` via `update.message.reply_text(...)` with retries on
+    transient network errors. Returns True on delivery, False after
+    final failure (in which case the body is written to
+    `data_cache/telegram/pending/` so it isn't lost).
+
+    `label` is a short string used in logs / fallback filenames so the
+    operator knows which reply was lost (e.g. "drill-NVDA-summary").
+
+    Use this for ANY reply that took meaningful work to compute — drill-in
+    summaries especially. Short ack messages don't need the wrapper
+    (they're cheap to retry by user-facing UX: just resend the command).
+    """
+    from telegram.error import NetworkError, TimedOut
+
+    last_error: Exception | None = None
+    for attempt, delay in enumerate(_SEND_RETRY_DELAYS_S, start=1):
+        try:
+            await update.message.reply_text(text, **kwargs)
+            if attempt > 1:
+                logger.info(
+                    f"[telegram] {label} delivered on attempt {attempt}"
+                )
+            return True
+        except (NetworkError, TimedOut) as e:
+            last_error = e
+            logger.warning(
+                f"[telegram] {label} send attempt {attempt} failed "
+                f"({type(e).__name__}): {e}; retrying in {delay}s"
+            )
+            await asyncio.sleep(delay)
+        except Exception as e:
+            # Non-network failure (e.g. BadRequest from malformed HTML).
+            # Don't retry — fix the message, not the network.
+            logger.error(
+                f"[telegram] {label} send failed permanently "
+                f"({type(e).__name__}): {e}"
+            )
+            last_error = e
+            break
+
+    # All retries exhausted (or non-retryable failure). Persist body so
+    # the user can recover it from disk.
+    try:
+        _SEND_FALLBACK_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+        path = _SEND_FALLBACK_DIR / f"{ts}__{label}.html"
+        path.write_text(text)
+        logger.error(
+            f"[telegram] {label} could not be delivered "
+            f"({type(last_error).__name__ if last_error else 'unknown'}); "
+            f"body saved to {path}"
+        )
+    except Exception as e:  # pragma: no cover — disk write should not fail
+        logger.error(f"[telegram] could not even write fallback file: {e}")
+    return False
+
+
+async def _send_mc_chart(
+    update: Update,
+    state: dict,
+    *,
+    label: str = "mc-chart",
+) -> bool:
+    """Render the MC histogram from `state.monte_carlo` and send it as a
+    Telegram photo with a short caption. Returns True on delivery, False
+    on render failure or persistent network failure.
+
+    The chart is generated on-the-fly via `utils.charts.mc_histogram_to_bytes`
+    using `resolve_mc_samples` to recover the sample array from the saved
+    DCF percentiles (saved demos drop the 8k-sample array for size). Same
+    fixed seed as the dashboard, so the bot's chart matches what the user
+    sees if they tap through to Streamlit.
+    """
+    from telegram.error import NetworkError, TimedOut
+
+    mc = state.get("monte_carlo") or {}
+    if not mc:
+        return False
+
+    try:
+        from utils.charts import mc_histogram_to_bytes, resolve_mc_samples
+
+        samples = resolve_mc_samples(mc)
+        if not samples:
+            logger.info(f"[telegram] {label}: no MC samples to render")
+            return False
+        ticker = state.get("ticker") or "?"
+        thesis = (state.get("thesis") or {}).get("name") or "?"
+        title = f"{ticker} — Monte Carlo fair-value distribution"
+        png_bytes = mc_histogram_to_bytes(
+            samples,
+            current_price=mc.get("current_price"),
+            title=title,
+        )
+    except Exception as e:
+        logger.warning(f"[telegram] {label}: chart render failed: {e}")
+        return False
+
+    dcf = mc.get("dcf") or {}
+    p10, p50, p90 = dcf.get("p10"), dcf.get("p50"), dcf.get("p90")
+    if all(v is not None for v in (p10, p50, p90)):
+        caption = (
+            f"📈 <b>{_h(ticker)}</b> · {_h(thesis)}\n"
+            f"Bands: <code>${p10:,.0f}</code> → "
+            f"<code>${p50:,.0f}</code> → <code>${p90:,.0f}</code>"
+        )
+    else:
+        caption = f"📈 {_h(ticker)} · {_h(thesis)} — Monte Carlo distribution"
+
+    last_error: Exception | None = None
+    for attempt, delay in enumerate(_SEND_RETRY_DELAYS_S, start=1):
+        try:
+            # Telegram requires a fresh BytesIO per attempt — `send_photo`
+            # consumes the stream; a retry needs a new pointer.
+            photo = io.BytesIO(png_bytes)
+            await update.message.reply_photo(
+                photo=photo, caption=caption, parse_mode="HTML"
+            )
+            if attempt > 1:
+                logger.info(f"[telegram] {label} delivered on attempt {attempt}")
+            return True
+        except (NetworkError, TimedOut) as e:
+            last_error = e
+            logger.warning(
+                f"[telegram] {label} send attempt {attempt} failed "
+                f"({type(e).__name__}); retrying in {delay}s"
+            )
+            await asyncio.sleep(delay)
+        except Exception as e:
+            logger.error(
+                f"[telegram] {label} permanently failed "
+                f"({type(e).__name__}): {e}"
+            )
+            last_error = e
+            break
+
+    # On final failure, write the PNG to the same fallback dir as text
+    # replies so the user can recover it from disk.
+    try:
+        _SEND_FALLBACK_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+        path = _SEND_FALLBACK_DIR / f"{ts}__{label}.png"
+        path.write_bytes(png_bytes)
+        logger.error(
+            f"[telegram] {label} undeliverable ({type(last_error).__name__ if last_error else 'unknown'}); "
+            f"PNG saved to {path}"
+        )
+    except Exception as e:  # pragma: no cover — disk write should not fail
+        logger.error(f"[telegram] could not write fallback PNG: {e}")
+    return False
+
+
+HandlerFn = Callable[[Update, ContextTypes.DEFAULT_TYPE], Coroutine[None, None, None]]
+
+
+def require_allowlist(handler: HandlerFn) -> HandlerFn:
+    """Decorator: silently drop messages from chat_ids that aren't
+    allowlisted. We log at INFO so a paper trail exists if someone finds
+    the bot's @username; we don't reply (replying would confirm the bot
+    is alive to the stranger).
+    """
+
+    @wraps(handler)
+    async def wrapper(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not _is_allowed(update):
+            chat = update.effective_chat
+            chat_id = chat.id if chat else "?"
+            chat_user = (
+                chat.username or chat.first_name if chat else "?"
+            ) if chat else "?"
+            logger.info(
+                f"[telegram] dropping message from unallowed chat_id={chat_id} "
+                f"({chat_user})"
+            )
+            return
+        await handler(update, context)
+
+    return wrapper
+
+
+# --- Welcome / help handler ------------------------------------------------
+
+_HELP_TEXT = (
+    "👋 <b>FINAQ bot</b> — your equity research assistant\n"
+    "\n"
+    "📈 <b>Drill-ins</b>\n"
+    "/drill TICKER [thesis]   Run a full drill-in (5 min)\n"
+    "  e.g. <code>/drill NVDA</code> or <code>/drill AVGO ai_cake</code>\n"
+    "/analyze TOPIC            Synthesize an ad-hoc thesis &amp; drill-in\n"
+    "  e.g. <code>/analyze defense semis</code>\n"
+    "\n"
+    "📡 <b>Monitoring</b>\n"
+    "/scan                     Surface alerts caught since the last check\n"
+    "/thesis NAME              Show a thesis's tickers + recent activity\n"
+    "/note TICKER text         Drop a note future Triage will weigh\n"
+    "  e.g. <code>/note NVDA trim 20% if Q3 misses $42B</code>\n"
+    "\n"
+    "🔧 <b>System</b>\n"
+    "/status                   Triage last-run, alerts in 24h, recent errors\n"
+    "/help                     This message\n"
+    "\n"
+    "You can also just ask in plain text — \"what's NVDA looking like\" or "
+    "\"analyze data center cooling\" — and I'll route it.\n"
+)
+"""Welcome / /help message rendered with `parse_mode='HTML'`. HTML mode is
+preferred over Markdown because tickers, thesis slugs, and signal strings
+routinely contain `_` characters that the legacy Markdown parser treats
+as italic delimiters and fails when no closing `_` is found."""
+
+
+@require_allowlist
+async def help_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Reply with the welcome message. Bound to both `/help` and `/start`
+    so users see the command list on first contact and can re-summon it
+    any time."""
+    await update.message.reply_text(_HELP_TEXT, parse_mode="HTML")
+
+
+@require_allowlist
+async def echo_placeholder(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Step 10b stub for non-/help commands and free text. Future step files
+    replace this with the real handlers (10f). Returning a friendly
+    "not yet implemented" message during the build keeps the bot usable
+    while the rest of Step 10 lands."""
+    text = update.message.text or ""
+    await update.message.reply_text(
+        f"⏳ Heard you — <code>{_h(text[:120])}</code> — but free-text routing "
+        f"isn't wired up yet. Try /help for what's available today.",
+        parse_mode="HTML",
+    )
+
+
+# --- Thesis resolution ----------------------------------------------------
+
+THESES_DIR = Path("theses")
+
+
+def _list_thesis_slugs() -> list[str]:
+    """Slugs of every JSON file in /theses/ — used to validate /drill args
+    and to autodiscover which thesis a ticker belongs to."""
+    if not THESES_DIR.exists():
+        return []
+    return sorted(p.stem for p in THESES_DIR.glob("*.json"))
+
+
+def _resolve_thesis_slug(ticker: str, requested: str | None = None) -> str | None:
+    """Pick a thesis slug for a `/drill TICKER [thesis]` invocation.
+
+    Resolution order:
+      1. If `requested` is given and is a valid slug, use it. (The user
+         may want to force a thesis even if the ticker isn't in that
+         thesis's universe — the dashboard banner handles that case.)
+      2. If `requested` is given but doesn't match any thesis → return
+         None so the caller can surface "thesis not found".
+      3. If `requested` is None and the ticker is in some thesis's
+         universe → return that thesis.
+      4. If `requested` is None and the ticker is in NO universe →
+         return None so the caller can suggest /analyze.
+
+    Returns the slug, or None for cases (2) and (4) — caller distinguishes
+    via `requested` to choose the right error message.
+    """
+    slugs = _list_thesis_slugs()
+    if not slugs:
+        return None
+    if requested:
+        norm = requested.strip().lower().replace("-", "_").replace(" ", "_")
+        if norm in slugs:
+            return norm
+        # User typo — don't silently use a wrong slug; ask.
+        return None
+    ticker_upper = ticker.strip().upper()
+    for slug in slugs:
+        try:
+            data = json.loads((THESES_DIR / f"{slug}.json").read_text())
+        except Exception:
+            continue
+        universe = [str(t).upper() for t in (data.get("universe") or [])]
+        if ticker_upper in universe:
+            return slug
+    # Ticker isn't in any thesis. Don't pick a random one — that runs an
+    # expensive drill-in against a thesis the user didn't ask for. The
+    # caller should suggest /analyze for ad-hoc topics.
+    return None
+
+
+# --- /drill ---------------------------------------------------------------
+
+
+_DRILL_POLL_INTERVAL_S = 10
+"""How often to check `is_running()` while a drill-in is in flight. 10s
+keeps the load on the runner trivial; the user already saw a "running"
+ack so they know it's working."""
+
+_DRILL_MAX_WAIT_S = 600
+"""Hard cap on the polling loop. Drill-ins target <5min per the spec, so
+600s = 10min is a generous ceiling. If we hit it we still reply with a
+'still running, will not block your chat' note rather than holding the
+handler open indefinitely."""
+
+
+def _build_streamlit_url(ticker: str, thesis_slug: str, run_id: str | None) -> str:
+    """Build the dashboard URL with query params (Step 10g extends app.py
+    to actually consume them). Falls back to localhost when the public
+    URL isn't set in env (Step 12 sets `STREAMLIT_PUBLIC_URL`).
+
+    Args are URL-encoded via urllib.parse.urlencode so a thesis name like
+    "Halo · NVDA" can't sneak a `·` (or any other unsafe character) into
+    the URL — Telegram's HTML parser refuses to make malformed URLs
+    tappable, which the user observed first-hand.
+    """
+    base = os.environ.get("STREAMLIT_PUBLIC_URL", "http://localhost:8501").rstrip("/")
+    params: dict[str, str] = {"ticker": ticker, "thesis": thesis_slug}
+    if run_id:
+        params["run_id"] = run_id
+    return f"{base}/?{urlencode(params)}"
+
+
+def _load_demo_state(ticker: str, thesis_slug: str, run_id: str) -> dict | None:
+    """Read the saved drill-in state from `data_cache/demos/`. The runner
+    writes `{TICKER}__{slug}__{run_id[:8]}.json` after the graph completes.
+    """
+    path = Path("data_cache/demos") / f"{ticker.upper()}__{thesis_slug}__{run_id[:8]}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception as e:
+        logger.warning(f"[telegram] could not read {path}: {e}")
+        return None
+
+
+def _valuation_verdict(p50: float | None, current_price: float | None) -> str:
+    """Single-line classification of current price vs DCF P50. The bands
+    are deliberately wide — the LLM-driven DCF carries enough noise that
+    sub-5% differences are not actionable.
+
+    Returned string already prefixed with ↗/↘/= so the user sees the
+    direction at a glance.
+    """
+    if not p50 or not current_price or p50 <= 0:
+        return "valuation: insufficient data"
+    diff_pct = (current_price - p50) / p50 * 100
+    abs_pct = abs(diff_pct)
+    direction_word = "below" if diff_pct < 0 else "above"
+    arrow = "↘" if diff_pct < 0 else ("↗" if diff_pct > 0 else "=")
+    if abs_pct < 5:
+        verdict = "fair value"
+    elif diff_pct < -15:
+        verdict = "meaningfully undervalued"
+    elif diff_pct < -5:
+        verdict = "moderately undervalued"
+    elif diff_pct < 15:
+        verdict = "moderately overvalued"
+    else:
+        verdict = "meaningfully overvalued"
+    return f"{arrow} {abs_pct:.0f}% {direction_word} DCF P50 — {verdict}"
+
+
+def _extract_action_first_sentence(report_md: str) -> str:
+    """Pull the first sentence of the Action recommendation section so the
+    Telegram summary stays compact. Returns empty string when absent."""
+    if not report_md:
+        return ""
+    lines = report_md.splitlines()
+    try:
+        start = next(
+            i for i, line in enumerate(lines) if line.startswith("## Action")
+        )
+    except StopIteration:
+        return ""
+    body: list[str] = []
+    for line in lines[start + 1 :]:
+        if line.startswith("## "):
+            break
+        if line.strip():
+            body.append(line.strip())
+    if not body:
+        return ""
+    text = " ".join(body)
+    # First sentence — split on period followed by space or end.
+    end = text.find(". ")
+    if end > 0:
+        return text[: end + 1]
+    return text[:200]
+
+
+def _format_drill_summary(state: dict, run_id: str, thesis_slug: str | None = None) -> str:
+    """Build the ~10-line Telegram reply per the spec the user signed off on.
+    Includes valuation verdict (over/under/fair vs DCF P50), one MC line
+    with percentile bands + convergence ratio, top-1 risk, action sentence,
+    and links to Streamlit + Notion. Rendered with `parse_mode='HTML'`.
+
+    `thesis_slug` is the canonical slug from `/theses/{slug}.json` — the
+    caller (drill_command) already resolved it. If absent we fall back to
+    derivation from the thesis dict (legacy path used by the recovery
+    script). Always pass slug explicitly when you have it.
+    """
+    ticker = state.get("ticker") or "?"
+    thesis = state.get("thesis") or {}
+    thesis_name = thesis.get("name") or "?"
+    if not thesis_slug:
+        thesis_slug = (state.get("thesis") or {}).get("slug") or _slug_from_state(state)
+    confidence = state.get("synthesis_confidence") or "?"
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+
+    fund = state.get("fundamentals") or {}
+    kpis = fund.get("kpis") or {}
+    current_price = kpis.get("current_price")
+
+    mc = state.get("monte_carlo") or {}
+    dcf = mc.get("dcf") or {}
+    p10, p50, p90 = dcf.get("p10"), dcf.get("p50"), dcf.get("p90")
+    convergence = mc.get("convergence_ratio")
+
+    risk = state.get("risk") or {}
+    top_risks = risk.get("top_risks") or []
+
+    action = _extract_action_first_sentence(state.get("report") or "")
+
+    streamlit_url = _build_streamlit_url(ticker, thesis_slug, run_id)
+    notion_url = state.get("notion_report_url") or ""
+
+    lines: list[str] = []
+    lines.append(f"<b>{_h(ticker)}</b> · {_h(thesis_name)} · {today}")
+    lines.append(f"Confidence: <b>{_h(confidence)}</b>")
+    lines.append("")
+
+    if p50 and current_price:
+        lines.append(f"📊 Valuation: {_h(_valuation_verdict(p50, current_price))}")
+        lines.append(
+            f"   Current <code>${current_price:,.2f}</code> vs DCF P50 "
+            f"<code>${p50:,.2f}</code>"
+        )
+        lines.append("")
+
+    if p10 and p50 and p90:
+        line = (
+            f"🎲 Monte Carlo: <code>${p10:,.0f}</code> → "
+            f"<code>${p50:,.0f}</code> → <code>${p90:,.0f}</code> (P10–P50–P90)"
+        )
+        lines.append(line)
+        if convergence is not None:
+            agreement = (
+                "DCF/multiple agree" if convergence >= 0.7
+                else "DCF/multiple diverge"
+            )
+            lines.append(
+                f"   Convergence <code>{convergence:.2f}</code> — {agreement}"
+            )
+        lines.append("")
+
+    if top_risks:
+        r = top_risks[0]
+        title = r.get("title") or "(unnamed risk)"
+        sev = r.get("severity") or "?"
+        lines.append(f"⚠️ Top risk: {_h(title)} (sev {_h(str(sev))})")
+
+    if action:
+        lines.append(f"🎯 Action: {_h(action)}")
+
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append(f'🔗 <a href="{_h(streamlit_url)}">Open in Streamlit</a>')
+    if notion_url:
+        lines.append(f'🗒️ <a href="{_h(notion_url)}">View in Notion</a>')
+
+    return "\n".join(lines)
+
+
+def _slug_from_state(state: dict) -> str:
+    """The thesis dict carried in state was loaded from a JSON file; the
+    file's stem is the slug. We don't always have it on the dict, so as a
+    fallback derive from the thesis name."""
+    name = (state.get("thesis") or {}).get("name") or ""
+    return name.lower().replace(" ", "_").replace("-", "_")
+
+
+@require_allowlist
+async def drill_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/drill TICKER [thesis]` — kick off a drill-in via ui/_runner and
+    reply with the structured summary when it completes. Reuses the same
+    daemon-thread runner the dashboard uses, so a Streamlit-side and a
+    Telegram-side drill-in for the same (ticker, thesis) coalesce."""
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/drill TICKER [thesis]</code>\n"
+            "Examples: <code>/drill NVDA</code>, <code>/drill AVGO ai_cake</code>",
+            parse_mode="HTML",
+        )
+        return
+    ticker = args[0].strip().upper()
+    requested_thesis = args[1] if len(args) > 1 else None
+    thesis_slug = _resolve_thesis_slug(ticker, requested_thesis)
+    if not thesis_slug:
+        slugs = _list_thesis_slugs()
+        slug_list = ", ".join(f"<code>{_h(s)}</code>" for s in slugs)
+        if requested_thesis:
+            # User specified a thesis but it didn't match any known slug.
+            body = (
+                f"❓ Thesis <code>{_h(requested_thesis)}</code> not found.\n"
+                f"Known theses: {slug_list}.\n"
+                f"Try <code>/drill {_h(ticker)} {_h(slugs[0]) if slugs else 'ai_cake'}</code>."
+            )
+        else:
+            # Ticker isn't in any thesis universe. Suggest /analyze for
+            # ad-hoc topics so the user knows the right tool exists.
+            body = (
+                f"❓ <code>{_h(ticker)}</code> isn't in any of my pre-defined "
+                f"theses ({slug_list}).\n\n"
+                f"Two options:\n"
+                f"• <b>Force a thesis:</b> "
+                f"<code>/drill {_h(ticker)} ai_cake</code> "
+                f"(drill-in will run but Filings RAG may be empty if the "
+                f"ticker isn't ingested yet — see Mission Control).\n"
+                f"• <b>Synthesize an ad-hoc thesis:</b> "
+                f"<code>/analyze {_h(ticker)}</code> — I'll build a thesis "
+                f"around it on the fly. (Step 10e — coming soon.)"
+            )
+        await update.message.reply_text(body, parse_mode="HTML")
+        return
+
+    # Lazy import to avoid pulling Streamlit-side modules into the bot's
+    # startup path. ui/_runner is the same code the dashboard uses.
+    from ui import _runner
+
+    ran_new = _runner.kick_off_drill(ticker, thesis_slug)
+    if ran_new:
+        ack = (
+            f"🏃 Running drill-in for <b>{_h(ticker)}</b> × "
+            f"<code>{_h(thesis_slug)}</code>. Takes ~5min — "
+            f"I'll send the summary when it's done."
+        )
+    else:
+        ack = (
+            f"⏳ Drill-in already in flight for <b>{_h(ticker)}</b> × "
+            f"<code>{_h(thesis_slug)}</code> — I'll send the summary when "
+            f"it finishes."
+        )
+    await update.message.reply_text(ack, parse_mode="HTML")
+
+    # Poll. asyncio.sleep yields the event loop so other handlers can run.
+    waited = 0.0
+    while _runner.is_running(ticker, thesis_slug):
+        await asyncio.sleep(_DRILL_POLL_INTERVAL_S)
+        waited += _DRILL_POLL_INTERVAL_S
+        if waited > _DRILL_MAX_WAIT_S:
+            await update.message.reply_text(
+                f"⚠️ Still running after {_DRILL_MAX_WAIT_S // 60} min. "
+                f"It'll keep going in the background; check Streamlit for "
+                f"the result when it lands.",
+            )
+            return
+
+    record = _runner.get_run_status(ticker, thesis_slug) or {}
+    if record.get("error"):
+        await update.message.reply_text(
+            f"❌ Drill-in failed: <code>{_h(record['error'])}</code>",
+            parse_mode="HTML",
+        )
+        return
+    run_id = record.get("run_id")
+    if not run_id:
+        await update.message.reply_text(
+            "⚠️ Drill-in completed but no run_id was recorded — check Mission Control."
+        )
+        return
+
+    state = _load_demo_state(ticker, thesis_slug, run_id)
+    if not state:
+        await update.message.reply_text(
+            f"⚠️ Drill-in completed but the saved state at "
+            f"<code>data_cache/demos/{_h(ticker)}__{_h(thesis_slug)}__{_h(run_id[:8])}.json</code> "
+            f"is missing.",
+            parse_mode="HTML",
+        )
+        return
+
+    summary = _format_drill_summary(state, run_id, thesis_slug=thesis_slug)
+    await _send_safe(
+        update,
+        summary,
+        label=f"drill-{ticker}-{thesis_slug}-{run_id[:8]}",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+    # Also send the MC histogram as a photo so the user sees the
+    # distribution shape (not just P10/P50/P90 numbers). Best-effort —
+    # if the chart can't be rendered (e.g. MC was skipped) or the
+    # network fails, the summary text alone is still enough.
+    mc = state.get("monte_carlo") or {}
+    if mc and mc.get("method") not in (None, "skipped"):
+        await _send_mc_chart(
+            update,
+            state,
+            label=f"drill-{ticker}-{thesis_slug}-{run_id[:8]}-chart",
+        )
+
+
+# --- /scan ----------------------------------------------------------------
+
+
+_TRIAGE_FIXTURE_PATH = Path("data_cache/fixtures/triage_alerts.json")
+
+
+def _load_triage_alerts() -> list[dict]:
+    """Until Step 11 lands real Triage, /scan reads the fixture file the
+    Streamlit dashboard's "Run scan" button uses. Same shape, same source
+    of truth — keeps the two surfaces aligned during the build."""
+    if not _TRIAGE_FIXTURE_PATH.exists():
+        return []
+    try:
+        return json.loads(_TRIAGE_FIXTURE_PATH.read_text())
+    except Exception as e:
+        logger.warning(f"[telegram] could not read triage fixture: {e}")
+        return []
+
+
+def _format_alerts(alerts: list[dict]) -> str:
+    """HTML rendering of triage alerts, one block per alert with:
+      - severity + ticker + thesis + signal headline
+      - <i>Why it's an alert:</i> plain-English rationale
+      - <i>Why it matters:</i> what to watch / position implication
+      - 📊 Open in Streamlit (pre-loaded for ticker × thesis)
+      - 🔗 Evidence URL
+
+    Triage in Step 11 will populate `why_alert` and `why_attention`
+    from the LLM. For Phase 0 / fixture-mode the strings are hand-written
+    in `data_cache/fixtures/triage_alerts.json`. Older fixtures without
+    those fields gracefully degrade to the signal line only.
+    """
+    if not alerts:
+        return "✅ No alerts since the last scan."
+    blocks = [f"📡 <b>{len(alerts)} alert(s)</b>"]
+    for a in alerts[:20]:
+        sev = a.get("severity", "?")
+        ticker = a.get("ticker", "?")
+        thesis = a.get("thesis", "?")
+        signal = a.get("signal", "(no signal)")
+        why_alert = (a.get("why_alert") or "").strip()
+        why_attention = (a.get("why_attention") or "").strip()
+        evidence_url = a.get("evidence_url")
+        dashboard_url = _build_streamlit_url(ticker, thesis, run_id=None)
+
+        parts: list[str] = []
+        parts.append(
+            f"<b>sev {_h(str(sev))}</b> <code>{_h(ticker)}</code> "
+            f"({_h(thesis)})\n{_h(signal[:300])}"
+        )
+        if why_alert:
+            parts.append(
+                f"<i>Why it's an alert:</i> {_h(why_alert)}"
+            )
+        if why_attention:
+            parts.append(
+                f"<i>Why it matters:</i> {_h(why_attention)}"
+            )
+        link_row_parts: list[str] = []
+        link_row_parts.append(
+            f'📊 <a href="{_h(dashboard_url)}">Open dashboard</a>'
+        )
+        if evidence_url:
+            link_row_parts.append(
+                f'🔗 <a href="{_h(evidence_url)}">Evidence</a>'
+            )
+        parts.append(" · ".join(link_row_parts))
+        blocks.append("\n".join(parts))
+    if len(alerts) > 20:
+        blocks.append(f"…and {len(alerts) - 20} more (truncated to 20).")
+    # Blank line between blocks for readability — Telegram ignores most
+    # whitespace but a real `\n\n` produces a visible gap.
+    return "\n\n".join(blocks)
+
+
+@require_allowlist
+async def scan_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/scan` — surface the most recent triage alerts. Phase 0/Step 10c
+    serves the fixture file; Step 11 swaps in `agents/triage.run()`."""
+    alerts = _load_triage_alerts()
+    body = _format_alerts(alerts)
+    if alerts and "fixture" in (alerts[0].get("note") or "").lower():
+        body += (
+            "\n\n<i>Note: serving the Phase 0 fixture; real Triage lands in "
+            "Step 11.</i>"
+        )
+    await update.message.reply_text(
+        body, parse_mode="HTML", disable_web_page_preview=True
+    )
+
+
+# --- /status --------------------------------------------------------------
+
+
+def _format_status_body() -> str:
+    """Pull triage / alert / error / drill-in state from data/state.py and
+    format it as a compact HTML status block. No external calls — purely
+    SQLite reads, takes <50ms."""
+    from data import state as _state
+
+    now = datetime.now(UTC)
+    cutoff_24h = (now - timedelta(hours=24)).isoformat()
+
+    # Drill-in runs
+    runs = _state.recent_runs(limit=5)
+    if runs:
+        last = runs[0]
+        when = (last.get("started_at") or "?")[:16].replace("T", " ")
+        last_drill_line = (
+            f"Last drill-in: <code>{_h(last.get('ticker', '?'))}</code> × "
+            f"<code>{_h(last.get('thesis', '?'))}</code> "
+            f"({_h(last.get('status', '?'))}) at {_h(when)} UTC"
+        )
+    else:
+        last_drill_line = "Last drill-in: never"
+
+    # Triage runs
+    triage = _state.recent_triage_runs(limit=1)
+    if triage:
+        t = triage[0]
+        when = (t.get("ts") or "?")[:16].replace("T", " ")
+        triage_line = (
+            f"Last triage: {_h(str(t.get('alerts_emitted', 0)))} alerts / "
+            f"{_h(str(t.get('items_scanned', 0)))} items at {_h(when)} UTC"
+        )
+    else:
+        triage_line = "Last triage: never (Triage agent not yet running — Step 11)"
+
+    # Alerts in 24h
+    alerts = _state.recent_alerts(limit=200)
+    in_24h = [a for a in alerts if (a.get("ts") or "") >= cutoff_24h]
+    alerts_line = f"Alerts in last 24h: <b>{len(in_24h)}</b>"
+
+    # Recent errors
+    errors = _state.recent_errors(limit=10)
+    errors_in_24h = [e for e in errors if (e.get("ts") or "") >= cutoff_24h]
+    errors_line = f"Errors in last 24h: <b>{len(errors_in_24h)}</b>"
+    if errors_in_24h:
+        first_err = errors_in_24h[0]
+        errors_line += (
+            f" (most recent: <code>{_h(first_err.get('agent', '?'))}</code> — "
+            f"{_h((first_err.get('message') or '')[:80])})"
+        )
+
+    return "\n".join([
+        "🔧 <b>FINAQ status</b>",
+        "",
+        last_drill_line,
+        triage_line,
+        alerts_line,
+        errors_line,
+        "",
+        "<i>Cost tracking lands when state.db schema gains the cost_usd column "
+        "— see POSTPONED §1.</i>",
+    ])
+
+
+@require_allowlist
+async def status_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/status` — system health summary read from `data_cache/state.db`."""
+    body = _format_status_body()
+    await update.message.reply_text(body, parse_mode="HTML")
+
+
+# --- Bot bootstrapping ------------------------------------------------------
+
+
+def build_app(*, token: str | None = None, allowlist: str | None = None) -> Application:
+    """Build a configured `Application`. Reads token + allowlist from env
+    by default; the kwargs let tests inject values without monkeypatching
+    `os.environ`.
+
+    Raises `RuntimeError` when token is missing — the bot can't start
+    without it, and a clear error here beats an opaque telegram.error.
+
+    Side effect: populates `_allowed_chat_ids` (module-level) from the
+    parsed allowlist so handlers see the same set across the app lifetime.
+    """
+    token = (token or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
+    allowlist = allowlist if allowlist is not None else os.environ.get(
+        "TELEGRAM_CHAT_ID", ""
+    )
+    if not token:
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN not set — cannot start bot. Paste the token "
+            "BotFather gave you into .env."
+        )
+    parsed = _parse_allowlist(allowlist)
+    if not parsed:
+        raise RuntimeError(
+            "TELEGRAM_CHAT_ID not set or empty — refusing to start. The bot "
+            "must allowlist at least one chat_id; without that anyone who "
+            "guesses the @username can spend OpenRouter credits via /drill. "
+            "Run `python -m scripts.discover_chat_id` to find your chat_id."
+        )
+    # Reset to a fresh set on every build — supports tests that build_app
+    # multiple times with different allowlists, and avoids stale state on
+    # bot restart.
+    _allowed_chat_ids.clear()
+    _allowed_chat_ids.update(parsed)
+
+    app = Application.builder().token(token).build()
+    # /help and /start both show the welcome message — Telegram users hit
+    # /start automatically when they tap "Start" on a fresh chat with the
+    # bot, so binding both keeps the first-contact flow smooth.
+    app.add_handler(CommandHandler(["help", "start"], help_command))
+    # Real slash commands.
+    app.add_handler(CommandHandler("drill", drill_command))
+    app.add_handler(CommandHandler("scan", scan_command))
+    app.add_handler(CommandHandler("status", status_command))
+    # Catch-all for free text / unimplemented commands (e.g. /note, /thesis,
+    # /analyze land in 10d/10e). Free-text routing through the Haiku
+    # classifier lands in 10f.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_placeholder))
+    app.add_handler(MessageHandler(filters.COMMAND, echo_placeholder))
+
+    return app
+
+
+def run() -> None:
+    """Long-poll forever. Becomes a systemd unit in Step 12."""
+    app = build_app()
+    logger.info("[telegram] bot starting in long-poll mode")
+    app.run_polling(drop_pending_updates=True)

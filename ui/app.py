@@ -614,31 +614,10 @@ def _render_ingest_banner(ticker: str) -> bool:
 # --- Main render -----------------------------------------------------------
 
 
-_MC_HISTOGRAM_SEED = 42  # mirrors utils.monte_carlo.simulate's default seed
-
-
-def _resolve_mc_samples(mc: dict) -> list[float]:
-    """Return the MC sample array. If the cache stored only percentiles
-    (no `samples` field), regenerate a visually-similar normal distribution
-    from the P10/P50/P90 spread so the histogram still renders.
-
-    Uses a fixed seed so the regenerated histogram is reproducible across
-    reruns — same cached state → same chart bars. The actual MC simulation
-    in utils.monte_carlo.simulate() also uses a fixed seed; this helper
-    just ensures the *cosmetic regeneration* doesn't introduce visible
-    jitter when the user clicks around or Streamlit reruns the page."""
-    samples = mc.get("samples")
-    if samples is not None and len(samples) > 0:
-        return list(samples)
-    dcf = mc.get("dcf") or {}
-    if dcf:
-        lo = dcf.get("p10") or 0
-        hi = dcf.get("p90") or 0
-        mid = dcf.get("p50") or (lo + hi) / 2
-        std = max((hi - lo) / 2.6, 1.0)
-        rng = np.random.default_rng(_MC_HISTOGRAM_SEED)
-        return list(rng.normal(loc=mid, scale=std, size=8000))
-    return []
+# Sample resolution moved to utils.charts.resolve_mc_samples so the bot's
+# /drill MC-photo path can reuse the same logic as the dashboard. Aliased
+# here for readability — the dashboard call site doesn't change shape.
+from utils.charts import resolve_mc_samples as _resolve_mc_samples
 
 
 def render_dashboard_view(state: dict) -> None:

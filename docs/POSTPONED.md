@@ -114,6 +114,12 @@ revisit. If the trigger never fires, we never build it.
 
 ---
 
+### Telegram NL router calibration
+
+| Item | Trigger | Effort |
+|---|---|---|
+| **Tune `ROUTER_CONFIDENCE_THRESHOLD`** (currently `0.7` in `agents/router.py`) | Two failure modes to watch: (a) ≥10% of NL messages return a clarification prompt when the intent was actually obvious to a human reader → threshold is too high; lower to 0.6 OR strengthen examples in `agents/prompts/router.md`. (b) Bot dispatches the wrong action ≥1% of the time and you correct it manually → threshold is too low; raise to 0.8. The bot logs every decision via `state.db.errors` (intent="router", message="dispatched=True/False conf=X.XX raw=...") so you can grep for both modes. | 5 min: change one line in `agents/router.py`, update `tests/test_router.py::test_threshold_is_zero_point_seven`, re-run. |
+
 ### Notion / API surface lessons learned
 
 | Item | Trigger | Effort |
