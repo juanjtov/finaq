@@ -316,14 +316,46 @@ def test_format_drill_summary_carries_all_required_sections(monkeypatch):
     # Action
     assert "Action:" in out
     assert "Hold existing exposure" in out
-    # Links — HTML anchor tags so users can tap from Telegram
-    assert "<a href=" in out
-    assert "Open in Streamlit</a>" in out
+    # Links — Streamlit gets a `<code>` block in localhost mode (iOS
+    # Telegram won't render http://localhost as a tappable link).
+    # Ticker / thesis / run_id are still in the URL string.
     assert "ticker=NVDA" in out
     assert "thesis=ai_cake" in out
     assert "run_id=abc12345-deadbeef" in out
+    assert "Streamlit (Mac only)" in out
+    # Notion is a real public URL → tappable anchor tag.
+    assert "<a href=" in out
     assert "View in Notion</a>" in out
     assert "https://notion.so/p/abc" in out
+
+
+def test_format_drill_summary_renders_streamlit_as_link_when_public_url_set(
+    monkeypatch,
+):
+    """When STREAMLIT_PUBLIC_URL is configured (Step 12 / droplet), the
+    Streamlit URL should render as a tappable anchor — the localhost
+    fallback was a workaround for iOS clients refusing to tap localhost."""
+    monkeypatch.setenv("STREAMLIT_PUBLIC_URL", "https://finaq.example.com")
+    out = tg._format_drill_summary(_DEMO_STATE_FIXTURE, run_id="abc", thesis_slug="ai_cake")
+    assert "Open in Streamlit</a>" in out
+    assert 'href="https://finaq.example.com/?ticker=NVDA' in out
+    # No "Mac only" hint when the URL is publicly resolvable.
+    assert "Mac only" not in out
+
+
+def test_format_drill_summary_warns_about_localhost_fallback(monkeypatch):
+    """Regression for the bug we observed live: an `http://localhost:...`
+    URL inside an `<a href>` looks tappable to the formatter but iOS
+    Telegram refuses to make it tappable from a phone, so the link
+    appeared 'missing' to the user. The localhost branch now renders the
+    URL as `<code>` text with a 'Mac only' hint instead — honest UX."""
+    monkeypatch.delenv("STREAMLIT_PUBLIC_URL", raising=False)
+    out = tg._format_drill_summary(_DEMO_STATE_FIXTURE, run_id="abc", thesis_slug="ai_cake")
+    # Localhost URL should NOT be inside an <a> tag — the tag is the lie
+    # iOS won't render. It IS inside <code> so the user can copy-paste.
+    assert "<a href=\"http://localhost" not in out
+    assert "<code>http://localhost:8501" in out
+    assert "Mac only" in out
 
 
 def test_format_drill_summary_does_not_emit_legacy_markdown_syntax(monkeypatch):
@@ -357,12 +389,13 @@ def test_format_drill_summary_uses_explicit_slug_not_derived_from_name(monkeypat
     out = tg._format_drill_summary(state, run_id="abc", thesis_slug="nvda_halo")
     assert "thesis=nvda_halo" in out
     assert "halo_·_nvda" not in out
-    # The `·` may appear elsewhere (e.g. as a header separator). What
-    # matters is that it doesn't appear inside the URL — extract the URL
-    # and check it specifically.
+    # Localhost rendering is in `<code>` rather than `<a>` (iOS won't make
+    # localhost tappable anyway). Extract every URL substring and assert
+    # the `·` doesn't leak in.
     import re
-    urls = re.findall(r'href="([^"]+)"', out)
-    streamlit_urls = [u for u in urls if "ticker=" in u]
+    urls = re.findall(r'(?:href="([^"]+)"|<code>([^<]+)</code>)', out)
+    flattened = [u for href, code in urls for u in (href, code) if u]
+    streamlit_urls = [u for u in flattened if "ticker=" in u]
     assert streamlit_urls, "expected at least one streamlit URL with ticker= param"
     for u in streamlit_urls:
         assert "·" not in u, f"malformed URL contains `·`: {u}"
@@ -397,10 +430,12 @@ def test_format_drill_summary_uses_public_url_when_set(monkeypatch):
 def test_format_drill_summary_omits_notion_when_url_missing(monkeypatch):
     monkeypatch.delenv("STREAMLIT_PUBLIC_URL", raising=False)
     state = {**_DEMO_STATE_FIXTURE, "notion_report_url": ""}
-    out = tg._format_drill_summary(state, run_id="abc")
+    out = tg._format_drill_summary(state, run_id="abc", thesis_slug="ai_cake")
     assert "View in Notion" not in out
-    # Streamlit link should still be present.
-    assert "Open in Streamlit" in out
+    # Streamlit URL is still present — just rendered as <code> in the
+    # localhost branch since iOS won't tap localhost links.
+    assert "Streamlit" in out
+    assert "ticker=NVDA" in out
 
 
 def test_format_drill_summary_handles_missing_mc(monkeypatch):

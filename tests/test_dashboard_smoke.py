@@ -330,6 +330,58 @@ def test_mission_control_renders_with_populated_state_db():
 # --- Direct Agent page selectors ------------------------------------------
 
 
+def test_direct_agent_load_demo_finds_run_id_suffixed_files(tmp_path, monkeypatch):
+    """Regression: `_try_load_demo` previously hard-coded the legacy
+    `{TICKER}__{slug}.json` filename, ignoring the run_id-suffixed files
+    the runner started saving in task #47. The Direct Agent UI then fell
+    back to a minimal state and `ask()` returned 'state.X is empty' for
+    every agent — the user reported "no agents are responding".
+
+    This test simulates the runner's output format and asserts the loader
+    finds the most recent file."""
+    import importlib
+
+    da = importlib.import_module("ui.pages.direct_agent")
+    monkeypatch.setattr(da, "DEMO_DIR", tmp_path)
+
+    # Three runs of the same (NVDA, ai_cake) — most recent should win.
+    import time
+
+    (tmp_path / "NVDA__ai_cake__deadbeef.json").write_text('{"ticker":"NVDA","run_id":"old"}')
+    time.sleep(0.05)  # ensure mtime ordering
+    (tmp_path / "NVDA__ai_cake__cafef00d.json").write_text('{"ticker":"NVDA","run_id":"newer"}')
+    time.sleep(0.05)
+    (tmp_path / "NVDA__ai_cake__feedface.json").write_text('{"ticker":"NVDA","run_id":"newest"}')
+
+    state = da._try_load_demo("NVDA", "ai_cake")
+    assert state is not None, "loader must find run_id-suffixed files"
+    assert state["run_id"] == "newest", "loader must pick the most recent file"
+
+
+def test_direct_agent_load_demo_falls_back_to_legacy_filename(tmp_path, monkeypatch):
+    """A subset of demos predate the run_id suffix (e.g. shipped
+    `data_cache/demos/NVDA__ai_cake.json` from the demo seed). The loader
+    must still find these so cached demos keep working."""
+    import importlib
+
+    da = importlib.import_module("ui.pages.direct_agent")
+    monkeypatch.setattr(da, "DEMO_DIR", tmp_path)
+    (tmp_path / "NVDA__ai_cake.json").write_text('{"ticker":"NVDA","run_id":"legacy"}')
+    state = da._try_load_demo("NVDA", "ai_cake")
+    assert state is not None
+    assert state["run_id"] == "legacy"
+
+
+def test_direct_agent_load_demo_returns_none_when_no_match(tmp_path, monkeypatch):
+    """No demo for that ticker × thesis → return None so the caller
+    falls back to a minimal state (and the user gets a clear soft-error)."""
+    import importlib
+
+    da = importlib.import_module("ui.pages.direct_agent")
+    monkeypatch.setattr(da, "DEMO_DIR", tmp_path)
+    assert da._try_load_demo("XYZ", "fake_thesis") is None
+
+
 def test_direct_agent_page_renders_agent_dropdown():
     """The Agent selectbox must:
       - Exist on the page

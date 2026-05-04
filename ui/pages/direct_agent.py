@@ -79,10 +79,27 @@ def _list_thesis_slugs() -> list[str]:
 
 
 def _try_load_demo(ticker: str, thesis_slug: str) -> dict | None:
-    path = DEMO_DIR / f"{ticker.upper()}__{thesis_slug}.json"
-    if path.exists():
-        return json.loads(path.read_text())
-    return None
+    """Find the most recent saved drill-in state for `ticker × thesis_slug`.
+
+    The runner saves files with a run_id suffix (`NVDA__ai_cake__d7996463.json`)
+    since task #47, but legacy demo files without a suffix
+    (`NVDA__ai_cake.json`) may also exist on disk. We try both and pick
+    the most recently modified — that's the file the user most likely
+    expects to be querying against.
+
+    Returns None when neither file exists, in which case the caller falls
+    back to a minimal state and the user gets the "state.{agent} is empty"
+    soft-error from `ask()`.
+    """
+    prefix = f"{ticker.upper()}__{thesis_slug}"
+    candidates = [
+        p for p in DEMO_DIR.glob(f"{prefix}*.json")
+        if p.stem == prefix or p.stem.startswith(f"{prefix}__")
+    ]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    return json.loads(latest.read_text())
 
 
 @st.cache_data(show_spinner=False)

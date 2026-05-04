@@ -596,7 +596,20 @@ def _format_drill_summary(state: dict, run_id: str, thesis_slug: str | None = No
 
     if lines and lines[-1] != "":
         lines.append("")
-    lines.append(f'🔗 <a href="{_h(streamlit_url)}">Open in Streamlit</a>')
+    # Telegram (especially the iOS client) refuses to render
+    # `http://localhost:...` as a tappable link because the host doesn't
+    # resolve from the phone. When STREAMLIT_PUBLIC_URL isn't configured,
+    # surface that explicitly so the user knows to open it from their Mac
+    # rather than wondering why the "link" doesn't open. Step 12 sets
+    # STREAMLIT_PUBLIC_URL on the droplet and this branch goes away.
+    if "localhost" in streamlit_url or "127.0.0.1" in streamlit_url:
+        lines.append(
+            f'🔗 Streamlit (Mac only): <code>{_h(streamlit_url)}</code>'
+        )
+    else:
+        lines.append(
+            f'🔗 <a href="{_h(streamlit_url)}">Open in Streamlit</a>'
+        )
     if notion_url:
         lines.append(f'🗒️ <a href="{_h(notion_url)}">View in Notion</a>')
 
