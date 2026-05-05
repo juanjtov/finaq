@@ -102,20 +102,10 @@ def load_thesis(slug: str) -> dict:
     return json.loads((THESES_DIR / f"{slug}.json").read_text())
 
 
-_DOLLAR_BEFORE_DIGIT = re.compile(r"\$(?=\d)")
-
-
-def _md_safe(text: str) -> str:
-    """Escape `$` followed by a digit so Streamlit's KaTeX doesn't grab a
-    pair of dollar amounts and render the span between them as inline math
-    (italic, no spaces). Stored markdown stays untouched — only render-side.
-
-    Example: ``"$205.66 is below $250"`` → ``"\\$205.66 is below \\$250"``.
-    KaTeX no longer matches the pair, the literal `$` survives the escape.
-    """
-    if not text:
-        return text
-    return _DOLLAR_BEFORE_DIGIT.sub(r"\\$", text)
+# `_md_safe` moved to `ui/components.py` (now `md_safe`) so the Direct Agent
+# page can use the same escape. Aliased here so existing call sites stay
+# unchanged.
+from ui.components import md_safe as _md_safe  # noqa: E402
 
 
 def _section(md: str, header: str) -> str:

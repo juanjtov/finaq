@@ -520,19 +520,20 @@ def _list_thesis_slugs() -> list[str]:
 def _resolve_thesis_slug(ticker: str, requested: str | None = None) -> str | None:
     """Pick a thesis slug for a `/drill TICKER [thesis]` invocation.
 
-    Resolution order:
-      1. If `requested` is given and is a valid slug, use it. (The user
-         may want to force a thesis even if the ticker isn't in that
-         thesis's universe — the dashboard banner handles that case.)
-      2. If `requested` is given but doesn't match any thesis → return
-         None so the caller can surface "thesis not found".
-      3. If `requested` is None and the ticker is in some thesis's
-         universe → return that thesis.
-      4. If `requested` is None and the ticker is in NO universe →
-         return None so the caller can suggest /analyze.
+    Returns the FIRST matching thesis when `requested` is None and the
+    ticker is in any universe. When the ticker is in MULTIPLE universes
+    (e.g. CEG ∈ ai_cake + nvda_halo), this still returns just one — the
+    caller is expected to use `_list_matching_theses(ticker)` first if it
+    wants to surface the ambiguity to the user (Telegram does, since
+    silently picking the wrong thematic framing wastes a 5-min drill).
 
-    Returns the slug, or None for cases (2) and (4) — caller distinguishes
-    via `requested` to choose the right error message.
+    See `_list_matching_theses` for the multi-match enumeration.
+
+    Returns None when:
+      - `/theses/` is empty
+      - `requested` is given but doesn't match any slug (typo)
+      - `requested` is None and the ticker is in NO universe (caller
+        should prompt for general / analyze)
     """
     slugs = _list_thesis_slugs()
     if not slugs:
@@ -543,19 +544,39 @@ def _resolve_thesis_slug(ticker: str, requested: str | None = None) -> str | Non
             return norm
         # User typo — don't silently use a wrong slug; ask.
         return None
+    matches = _list_matching_theses(ticker)
+    if matches:
+        return matches[0]
+    # Ticker isn't in any thesis. Don't pick a random one — caller
+    # should send the keyboard prompt that offers general / /analyze.
+    return None
+
+
+def _list_matching_theses(ticker: str) -> list[str]:
+    """Return every thesis slug whose `universe` contains `ticker`,
+    excluding `general` (which has empty universe — it's the catch-all,
+    not a thematic frame).
+
+    Used by `drill_command` to detect when a ticker is genuinely
+    ambiguous between multiple thematic theses (e.g. CEG ∈ ai_cake +
+    nvda_halo) and needs a user choice rather than silent first-match.
+    """
+    slugs = _list_thesis_slugs()
+    if not slugs:
+        return []
     ticker_upper = ticker.strip().upper()
+    matches: list[str] = []
     for slug in slugs:
+        if slug == "general":  # general is the catch-all, not thematic
+            continue
         try:
             data = json.loads((THESES_DIR / f"{slug}.json").read_text())
         except Exception:
             continue
         universe = [str(t).upper() for t in (data.get("universe") or [])]
         if ticker_upper in universe:
-            return slug
-    # Ticker isn't in any thesis. Don't pick a random one — that runs an
-    # expensive drill-in against a thesis the user didn't ask for. The
-    # caller should suggest /analyze for ad-hoc topics.
-    return None
+            matches.append(slug)
+    return matches
 
 
 # --- /drill ---------------------------------------------------------------
@@ -797,28 +818,40 @@ async def drill_command(
         return
     ticker = args[0].strip().upper()
     requested_thesis = args[1] if len(args) > 1 else None
-    thesis_slug = _resolve_thesis_slug(ticker, requested_thesis)
 
-    if not thesis_slug and requested_thesis:
-        # User specified a thesis but it didn't match any known slug.
-        slugs = _list_thesis_slugs()
-        slug_list = ", ".join(f"<code>{_h(s)}</code>" for s in slugs)
-        body = (
-            f"❓ Thesis <code>{_h(requested_thesis)}</code> not found.\n"
-            f"Known theses: {slug_list}.\n"
-            f"Try <code>/drill {_h(ticker)} {_h(slugs[0]) if slugs else 'ai_cake'}</code>."
-        )
-        await update.message.reply_text(body, parse_mode="HTML")
+    if requested_thesis:
+        # User explicitly named a thesis — honour it (or surface typo).
+        thesis_slug = _resolve_thesis_slug(ticker, requested_thesis)
+        if not thesis_slug:
+            slugs = _list_thesis_slugs()
+            slug_list = ", ".join(f"<code>{_h(s)}</code>" for s in slugs)
+            body = (
+                f"❓ Thesis <code>{_h(requested_thesis)}</code> not found.\n"
+                f"Known theses: {slug_list}.\n"
+                f"Try <code>/drill {_h(ticker)} {_h(slugs[0]) if slugs else 'ai_cake'}</code>."
+            )
+            await update.message.reply_text(body, parse_mode="HTML")
+            return
+        await _run_drill_and_reply(update.message, ticker, thesis_slug)
         return
 
-    if not thesis_slug:
-        # Ticker isn't in any thematic thesis universe. Don't pick silently
-        # — ask the user via inline keyboard whether to use the generic
-        # Buffett-framework thesis or synthesize a custom thesis first.
+    # No explicit thesis — figure out the thematic matches.
+    matches = _list_matching_theses(ticker)
+    if len(matches) == 0:
+        # Ticker isn't in any thematic thesis universe. Ask via keyboard
+        # whether to use the generic Buffett-framework thesis or synthesize
+        # a custom thesis first.
         await _send_drill_choice_prompt(update, ticker)
         return
-
-    await _run_drill_and_reply(update.message, ticker, thesis_slug)
+    if len(matches) >= 2:
+        # Ticker is genuinely ambiguous (e.g. CEG ∈ ai_cake + nvda_halo).
+        # Don't silently pick the alphabetically-first one — ask which
+        # thematic framing the user wants. A wrong-thesis 5-min drill is
+        # the worst-case UX.
+        await _send_thesis_choice_prompt(update, ticker, matches)
+        return
+    # Single thematic match — dispatch.
+    await _run_drill_and_reply(update.message, ticker, matches[0])
 
 
 async def _run_drill_and_reply(
@@ -931,6 +964,9 @@ _COST_ANALYZE = "~$0.60"
 _CALLBACK_PREFIX_GENERIC = "drill_generic"
 _CALLBACK_PREFIX_ANALYZE = "drill_analyze"
 _CALLBACK_PREFIX_CANCEL = "drill_cancel"
+# `drill_thesis:{slug}:{TICKER}` — fired when the user picks one of the
+# matching thematic theses from the ambiguous-ticker keyboard.
+_CALLBACK_PREFIX_THESIS = "drill_thesis"
 
 
 async def _send_drill_choice_prompt(update: Update, ticker: str) -> None:
@@ -974,6 +1010,51 @@ async def _send_drill_choice_prompt(update: Update, ticker: str) -> None:
     )
 
 
+async def _send_thesis_choice_prompt(
+    update: Update, ticker: str, matching_slugs: list[str]
+) -> None:
+    """Ticker is in MULTIPLE thematic universes — ask the user which
+    framing they want before kicking off a 5-min drill.
+
+    Each matching thesis gets its own button with the slug + universe-size
+    hint. We also offer `general` (Buffett framework) and `Cancel`.
+    """
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for slug in matching_slugs:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"Drill against {slug}",
+                callback_data=f"{_CALLBACK_PREFIX_THESIS}:{slug}:{ticker}",
+            )
+        ])
+    # Generic fallback — same Buffett framework that ad-hoc tickers use.
+    keyboard.append([
+        InlineKeyboardButton(
+            f"Use generic thesis · {_COST_GENERIC}",
+            callback_data=f"{_CALLBACK_PREFIX_GENERIC}:{ticker}",
+        )
+    ])
+    keyboard.append([
+        InlineKeyboardButton(
+            "Cancel",
+            callback_data=f"{_CALLBACK_PREFIX_CANCEL}:{ticker}",
+        )
+    ])
+    slug_list = ", ".join(f"<code>{_h(s)}</code>" for s in matching_slugs)
+    body = (
+        f"❓ <b>{_h(ticker)}</b> is in <b>{len(matching_slugs)}</b> theses "
+        f"({slug_list}).\n\n"
+        f"Which thematic framing do you want? Same drill-in graph either "
+        f"way; the thesis only changes how the report frames bull/bear "
+        f"and which material thresholds Risk weighs."
+    )
+    await update.message.reply_text(
+        body,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
 async def drill_choice_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1003,6 +1084,25 @@ async def drill_choice_callback(
     data = query.data or ""
     if ":" not in data:
         return
+
+    # The thematic-thesis callback is `drill_thesis:{slug}:{TICKER}` — three
+    # colon-separated parts. Detect it before the general two-part split.
+    if data.startswith(f"{_CALLBACK_PREFIX_THESIS}:"):
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            logger.warning(f"[telegram] malformed drill_thesis callback: {data!r}")
+            return
+        _, thesis_slug, ticker = parts
+        ticker = ticker.strip().upper()
+        thesis_slug = thesis_slug.strip()
+        await query.edit_message_text(
+            f"✓ Running drill on <b>{_h(ticker)}</b> with the "
+            f"<code>{_h(thesis_slug)}</code> thesis…",
+            parse_mode="HTML",
+        )
+        await _run_drill_and_reply(query.message, ticker, thesis_slug)
+        return
+
     prefix, ticker = data.split(":", 1)
     ticker = ticker.strip().upper()
 
@@ -1512,7 +1612,8 @@ def build_app(*, token: str | None = None, allowlist: str | None = None) -> Appl
             pattern=(
                 f"^({_CALLBACK_PREFIX_GENERIC}|"
                 f"{_CALLBACK_PREFIX_ANALYZE}|"
-                f"{_CALLBACK_PREFIX_CANCEL}):"
+                f"{_CALLBACK_PREFIX_CANCEL}|"
+                f"{_CALLBACK_PREFIX_THESIS}):"
             ),
         )
     )

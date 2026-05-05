@@ -382,6 +382,40 @@ def test_direct_agent_load_demo_returns_none_when_no_match(tmp_path, monkeypatch
     assert da._try_load_demo("XYZ", "fake_thesis") is None
 
 
+def test_direct_agent_list_other_thesis_demos_finds_alt_theses(tmp_path, monkeypatch):
+    """When CEG was drilled under ai_cake but the user opens Direct Agent
+    under nvda_halo, the loader must surface ai_cake as an existing
+    drill-in available for CEG."""
+    import importlib
+
+    da = importlib.import_module("ui.pages.direct_agent")
+    monkeypatch.setattr(da, "DEMO_DIR", tmp_path)
+    (tmp_path / "CEG__ai_cake__abcdef12.json").write_text("{}")
+    (tmp_path / "CEG__construction.json").write_text("{}")
+    # Same ticker different thesis — both should appear.
+    other = da._list_other_thesis_demos("CEG", exclude_slug="nvda_halo")
+    assert "ai_cake" in other
+    assert "construction" in other
+    # The excluded slug must not appear even if a matching file exists.
+    (tmp_path / "CEG__nvda_halo__deadbeef.json").write_text("{}")
+    other2 = da._list_other_thesis_demos("CEG", exclude_slug="nvda_halo")
+    assert "nvda_halo" not in other2
+
+
+def test_direct_agent_list_other_thesis_demos_returns_empty_when_no_alts(
+    tmp_path, monkeypatch
+):
+    import importlib
+
+    da = importlib.import_module("ui.pages.direct_agent")
+    monkeypatch.setattr(da, "DEMO_DIR", tmp_path)
+    # No demos at all → nothing to suggest.
+    assert da._list_other_thesis_demos("CEG", exclude_slug="ai_cake") == []
+    # A demo for the SELECTED thesis is not surfaced as an alt.
+    (tmp_path / "CEG__ai_cake__abcdef12.json").write_text("{}")
+    assert da._list_other_thesis_demos("CEG", exclude_slug="ai_cake") == []
+
+
 def test_direct_agent_page_renders_agent_dropdown():
     """The Agent selectbox must:
       - Exist on the page
@@ -437,6 +471,27 @@ def test_md_safe_escapes_dollar_before_digit():
     assert _md_safe(
         "current price of $205.66 is below $250 target"
     ) == "current price of \\$205.66 is below \\$250 target"
+
+
+def test_md_safe_lives_in_shared_components_module():
+    """Both ui/app.py AND ui/pages/direct_agent.py need the KaTeX dollar
+    escape — Direct Agent's synthesis-Q&A answers also contain dollar
+    amounts. The helper lives in ui/components.py as the shared home;
+    ui/app.py aliases it for backwards compat."""
+    from ui import components, app as app_mod
+
+    assert components.md_safe is not None
+    # ui/app.py keeps `_md_safe` as an alias to the shared function so
+    # existing call sites don't break.
+    assert app_mod._md_safe is components.md_safe
+
+
+def test_md_safe_handles_none_input():
+    """Defensive: callers might pass None when an answer string is missing."""
+    from ui.components import md_safe
+
+    assert md_safe(None) == ""
+    assert md_safe("") == ""
 
 
 def test_md_safe_leaves_lone_dollar_alone():

@@ -34,7 +34,7 @@ import time
 import streamlit as st
 
 from agents.qa import AGENT_NAMES, ask
-from ui.components import evidence_list, page_header, section_divider
+from ui.components import evidence_list, md_safe, page_header, section_divider
 
 st.set_page_config(page_title="FINAQ — Direct Agent", page_icon="🎯", layout="wide")
 
@@ -102,6 +102,25 @@ def _try_load_demo(ticker: str, thesis_slug: str) -> dict | None:
     return json.loads(latest.read_text())
 
 
+def _list_other_thesis_demos(ticker: str, exclude_slug: str) -> list[str]:
+    """Return thesis slugs (other than `exclude_slug`) that have at least
+    one cached demo for `ticker`. Used to point the user at an existing
+    drill they might have run under a different thesis — common when a
+    ticker is in multiple thesis universes (e.g. CEG ∈ ai_cake ∩ nvda_halo).
+    """
+    if not DEMO_DIR.exists():
+        return []
+    prefix = f"{ticker.upper()}__"
+    other_slugs: set[str] = set()
+    for p in DEMO_DIR.glob(f"{prefix}*.json"):
+        stem = p.stem  # `TICKER__slug` or `TICKER__slug__runid8`
+        rest = stem[len(prefix):]
+        slug = rest.split("__", 1)[0] if rest else ""
+        if slug and slug != exclude_slug:
+            other_slugs.add(slug)
+    return sorted(other_slugs)
+
+
 @st.cache_data(show_spinner=False)
 def _load_thesis(slug: str) -> dict:
     return json.loads((THESES_DIR / f"{slug}.json").read_text())
@@ -116,6 +135,46 @@ def _build_state_for(ticker: str, thesis_slug: str) -> dict:
     # No cached demo — return a minimal state. Filings ask() can still RAG
     # without it; the other agents will say "no data".
     return {"ticker": ticker.upper(), "thesis": _load_thesis(thesis_slug)}
+
+
+def _render_demo_lookup_hint(ticker: str, thesis_slug: str) -> None:
+    """When no demo exists for the current (ticker, thesis) selection but
+    one DOES exist for the same ticker under another thesis, render a
+    sage-bordered hint banner pointing the user there.
+
+    Common case: ticker is in multiple thesis universes (CEG ∈ ai_cake +
+    nvda_halo), the Telegram /drill auto-resolved one path, the user
+    opens Direct Agent under a different thesis, and gets a confusing
+    'state.report is empty' — the banner explains why and points at the
+    fix (switch the dropdown).
+    """
+    if _try_load_demo(ticker, thesis_slug):
+        return  # demo exists for the current selection — no hint needed
+    other = _list_other_thesis_demos(ticker, exclude_slug=thesis_slug)
+    if not other:
+        return
+    formatted = ", ".join(f"<code>{s}</code>" for s in other)
+    st.markdown(
+        f"""
+        <div style="background:#FBF5E8; border:1px solid #2D4F3A;
+            border-left:6px solid #2D4F3A; border-radius:6px;
+            padding:0.85rem 1.1rem; margin-bottom:1rem;">
+            <div style="color:#2D4F3A; font-weight:700; font-size:0.95rem;
+                letter-spacing:0.04em;">ℹ️ DRILL-IN UNDER ANOTHER THESIS</div>
+            <div style="color:#1A1611; margin-top:0.4rem; line-height:1.45;">
+                No drill-in for <b>{ticker}</b> × <code>{thesis_slug}</code> yet.
+                There IS one for <b>{ticker}</b> × {formatted}.
+            </div>
+            <div style="color:#1A1611; opacity:0.75; font-size:0.85rem;
+                margin-top:0.5rem;">
+                Switch the thesis dropdown above to use the existing drill,
+                or run a fresh drill from the main dashboard for
+                <code>{thesis_slug}</code> specifically.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _track_call(agent: str) -> int:
@@ -217,7 +276,9 @@ def _render_ask_form(thesis_slug: str, ticker: str, agent: str) -> None:
             )
 
         st.markdown(f"### {agent.capitalize()} says")
-        st.markdown(answer.answer)
+        # Escape `$<digit>` so KaTeX doesn't render dollar amounts as
+        # inline math. Same fix we apply to the main report in ui/app.py.
+        st.markdown(md_safe(answer.answer))
         if answer.citations:
             st.markdown("#### Citations")
             evidence_list([c.model_dump() for c in answer.citations])
@@ -276,6 +337,12 @@ def main() -> None:
                 "synthesis: explain the report"
             ),
         )
+
+    # Pre-flight hint: if there's no cached demo for the current
+    # (ticker, thesis) but ONE EXISTS for this ticker under another
+    # thesis, point the user there before they spend an LLM call only
+    # to get "state.X is empty". Common with CEG (∈ ai_cake ∩ nvda_halo).
+    _render_demo_lookup_hint(ticker, thesis_slug)
 
     section_divider()
 

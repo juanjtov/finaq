@@ -1410,6 +1410,108 @@ async def test_drill_choice_callback_unknown_prefix_logged(monkeypatch):
     edit.assert_not_called()
 
 
+# --- ambiguous-ticker keyboard --------------------------------------------
+
+
+def test_list_matching_theses_returns_all_universes_excluding_general():
+    """CEG is in BOTH ai_cake and nvda_halo — must return both. `general`
+    is the catch-all (empty universe) and is excluded — it doesn't count
+    as a thematic match for an ambiguous ticker."""
+    matches = tg._list_matching_theses("CEG")
+    assert "ai_cake" in matches
+    assert "nvda_halo" in matches
+    assert "general" not in matches
+
+
+def test_list_matching_theses_returns_empty_for_non_universe_ticker():
+    matches = tg._list_matching_theses("AAPL")
+    assert matches == [], "AAPL isn't in any thematic universe"
+
+
+@pytest.mark.asyncio
+async def test_drill_command_ambiguous_ticker_sends_thesis_choice_keyboard(monkeypatch):
+    """User typed `/drill CEG` (no thesis) — CEG is in 2+ universes.
+    Must send an inline keyboard letting the user pick the thematic
+    framing rather than silently picking the first match."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(
+        tg, "_list_matching_theses", lambda t: ["ai_cake", "nvda_halo"]
+    )
+    update = _make_update(chat_id=111, text="/drill CEG")
+    context = SimpleNamespace(args=["CEG"])
+    await tg.drill_command(update, context)
+    args, kwargs = update.message.reply_text.call_args
+    body = args[0]
+    assert "CEG" in body
+    assert "2" in body  # mentions the count
+    assert "ai_cake" in body and "nvda_halo" in body
+    markup = kwargs.get("reply_markup")
+    assert markup is not None
+    button_data = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+    # Two thematic-pick buttons + general fallback + cancel.
+    assert any(d == "drill_thesis:ai_cake:CEG" for d in button_data)
+    assert any(d == "drill_thesis:nvda_halo:CEG" for d in button_data)
+    assert any(d.startswith("drill_generic:") for d in button_data)
+    assert any(d.startswith("drill_cancel:") for d in button_data)
+
+
+@pytest.mark.asyncio
+async def test_drill_command_single_match_dispatches_silently(monkeypatch):
+    """When a ticker matches exactly one thematic thesis (NVDA → ai_cake
+    only IF we pretend NVDA isn't in nvda_halo for this test), no
+    keyboard is sent — silent dispatch is fine."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(tg, "_list_matching_theses", lambda t: ["ai_cake"])
+
+    captured: dict = {}
+
+    async def _stub(reply_target, ticker, thesis_slug):
+        captured["ticker"] = ticker
+        captured["thesis_slug"] = thesis_slug
+
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub)
+    update = _make_update(chat_id=111, text="/drill NVDA")
+    context = SimpleNamespace(args=["NVDA"])
+    await tg.drill_command(update, context)
+    assert captured.get("thesis_slug") == "ai_cake"
+    assert captured.get("ticker") == "NVDA"
+
+
+@pytest.mark.asyncio
+async def test_drill_thesis_callback_routes_to_picked_slug(monkeypatch):
+    """Tap on a `drill_thesis:nvda_halo:CEG` button must run the drill
+    against nvda_halo, not the alphabetically-first matching slug."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="drill_thesis:nvda_halo:CEG"
+    )
+
+    captured: dict = {}
+
+    async def _stub(reply_target, ticker, thesis_slug):
+        captured["ticker"] = ticker
+        captured["thesis_slug"] = thesis_slug
+
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub)
+    await tg.drill_choice_callback(update, SimpleNamespace())
+    answer.assert_called_once()
+    edit.assert_called_once()
+    assert captured["ticker"] == "CEG"
+    assert captured["thesis_slug"] == "nvda_halo"
+
+
+@pytest.mark.asyncio
+async def test_drill_thesis_callback_malformed_does_not_crash(monkeypatch):
+    """A malformed `drill_thesis:` callback (missing pieces) must log
+    + bail rather than crash the bot."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="drill_thesis:onlyone"
+    )
+    await tg.drill_choice_callback(update, SimpleNamespace())
+    edit.assert_not_called()
+
+
 # --- general thesis recognition -------------------------------------------
 
 

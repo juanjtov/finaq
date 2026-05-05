@@ -12,12 +12,40 @@ uses Streamlit's native primitives (`st.metric`, `st.columns`,
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 import streamlit as st
 
 from utils import humanize_amount
 from utils.charts import mc_histogram
+
+
+# --- Streamlit/KaTeX safety -----------------------------------------------
+#
+# Streamlit renders markdown with KaTeX active. When LLM-generated text
+# contains two `$` characters (typical for dollar amounts: "$205 vs $250"),
+# KaTeX matches them as inline math delimiters and renders the span
+# between them as italic math (no spaces, garbled output). The fix is to
+# escape `$` followed by a digit so KaTeX leaves dollar amounts alone.
+#
+# Applied at every Streamlit render site that takes LLM-generated text:
+# ui/app.py (full report, action recommendation, what-this-means, etc.)
+# AND ui/pages/direct_agent.py (synthesis Q&A answer body).
+
+_DOLLAR_BEFORE_DIGIT = re.compile(r"\$(?=\d)")
+
+
+def md_safe(text: str | None) -> str:
+    """Escape `$` followed by a digit so Streamlit's KaTeX doesn't interpret
+    a pair of dollar amounts as inline math. Stored markdown stays untouched
+    — only render-side. Empty / None input passes through unchanged.
+
+    Example: ``"$205.66 is below $250"`` → ``"\\$205.66 is below \\$250"``.
+    """
+    if not text:
+        return text or ""
+    return _DOLLAR_BEFORE_DIGIT.sub(r"\\$", text)
 
 # --- Palette (mirrored from utils/charts.py / utils/pdf_export.py) ----------
 
