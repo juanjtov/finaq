@@ -8,6 +8,8 @@ call the handler and check what `reply_text` saw.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -679,14 +681,80 @@ def test_status_body_reflects_recent_runs(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_drill_command_no_args_replies_with_usage(monkeypatch):
+async def test_drill_command_no_args_replies_with_usage_and_thesis_list(monkeypatch):
+    """User typed /drill alone — show usage AND list all known thesis
+    slugs so they don't have to remember them. Without this the user has
+    to bail out and run /theses or /help."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(
+        tg, "_list_thesis_slugs", lambda: ["ai_cake", "construction", "general", "nvda_halo"]
+    )
     update = _make_update(chat_id=111, text="/drill")
     context = SimpleNamespace(args=[])
     await tg.drill_command(update, context)
     update.message.reply_text.assert_called_once()
     args, _ = update.message.reply_text.call_args
-    assert "Usage" in args[0] and "/drill" in args[0]
+    body = args[0]
+    assert "Usage" in body and "/drill" in body
+    # Available theses must be listed so the user can pick one.
+    assert "Available theses" in body
+    assert "ai_cake" in body
+    assert "construction" in body
+    assert "general" in body
+    assert "nvda_halo" in body
+
+
+# --- /theses --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_theses_command_lists_all_with_universe_size(monkeypatch):
+    """`/theses` must list every thesis with display name + universe size.
+    Empty-universe theses (e.g. general) are flagged as 'any ticker'."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/theses")
+    await tg.theses_command(update, SimpleNamespace())
+    update.message.reply_text.assert_called_once()
+    args, kwargs = update.message.reply_text.call_args
+    body = args[0]
+    # Display names + slugs
+    assert "Available theses" in body
+    assert "ai_cake" in body
+    assert "construction" in body
+    assert "general" in body
+    assert "nvda_halo" in body
+    # General has empty universe → must be labeled clearly so the user
+    # knows it works for any ticker.
+    assert "any ticker" in body
+    # Thematic theses have non-empty universe → ticker count shows up.
+    assert "ticker(s)" in body
+    assert kwargs.get("parse_mode") == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_theses_command_dropped_for_unallowed(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=999, text="/theses")
+    await tg.theses_command(update, SimpleNamespace())
+    update.message.reply_text.assert_not_called()
+
+
+# --- general thesis MC inputs (regression) --------------------------------
+
+
+def test_general_thesis_has_valuation_block_for_mc():
+    """The MC engine refuses to run without a `valuation` block on the
+    thesis — we observed this live when /drill WEN against general silently
+    skipped MC. Pin that the general thesis carries the required fields."""
+    raw = json.loads(Path("theses/general.json").read_text())
+    val = raw.get("valuation") or {}
+    assert "equity_risk_premium" in val
+    assert "terminal_growth_rate" in val
+    assert "discount_rate_floor" in val
+    assert "discount_rate_cap" in val
+    # Sanity bounds — Buffett-conservative defaults
+    assert 0.04 <= val["equity_risk_premium"] <= 0.10
+    assert 0.015 <= val["terminal_growth_rate"] <= 0.04
 
 
 @pytest.mark.asyncio
@@ -708,9 +776,10 @@ async def test_drill_command_unknown_thesis_explains(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_drill_command_ticker_in_no_universe_suggests_analyze(monkeypatch):
+async def test_drill_command_ticker_in_no_universe_sends_choice_keyboard(monkeypatch):
     """User typed /drill AAPL (no thesis specified, ticker in no universe).
-    Reply must distinguish from the typo case and point to /analyze."""
+    Bot must reply with an inline keyboard (3 buttons) so the user
+    explicitly picks generic vs analyze vs cancel — not silent fallback."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
     # Force resolver to return None — simulates ticker-in-no-universe.
     monkeypatch.setattr(tg, "_resolve_thesis_slug", lambda t, r: None)
@@ -720,12 +789,25 @@ async def test_drill_command_ticker_in_no_universe_suggests_analyze(monkeypatch)
     await tg.drill_command(update, context)
     args, kwargs = update.message.reply_text.call_args
     body = args[0]
-    # Should mention the ticker, NOT mention "not found" (different wording),
-    # and explicitly suggest /analyze as the right tool.
+    # Body must mention the ticker and be HTML-mode.
     assert "AAPL" in body
-    assert "/analyze" in body
     assert "isn't in any" in body or "not in any" in body
     assert kwargs.get("parse_mode") == "HTML"
+    # Inline keyboard with all three buttons must be attached.
+    markup = kwargs.get("reply_markup")
+    assert markup is not None, "expected an InlineKeyboardMarkup attached"
+    button_data = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+    assert any(d.startswith("drill_generic:") for d in button_data)
+    assert any(d.startswith("drill_analyze:") for d in button_data)
+    assert any(d.startswith("drill_cancel:") for d in button_data)
+    # Each callback must carry the ticker so the handler doesn't need to
+    # remember per-chat state across messages.
+    assert all(d.endswith(":AAPL") for d in button_data)
+    # Button labels must show cost estimates per Q1 sign-off (Option A).
+    button_labels = [btn.text for row in markup.inline_keyboard for btn in row]
+    assert any("$0.50" in lbl or "0.50" in lbl for lbl in button_labels)
+    assert any("$0.60" in lbl or "0.60" in lbl for lbl in button_labels)
+    assert any(lbl == "Cancel" for lbl in button_labels)
 
 
 @pytest.mark.asyncio
@@ -735,6 +817,156 @@ async def test_drill_command_dropped_for_unallowed(monkeypatch):
     context = SimpleNamespace(args=["NVDA"])
     await tg.drill_command(update, context)
     update.message.reply_text.assert_not_called()
+
+
+# --- drill_choice_callback (inline-keyboard taps) -------------------------
+
+
+def _make_callback_query(chat_id: int | None, data: str):
+    """Minimal CallbackQuery-shaped mock. Has .data, .message.chat.id,
+    .message.reply_text/edit_message_text, and .answer() (acks the tap)."""
+    edit_mock = AsyncMock()
+    answer_mock = AsyncMock()
+    reply_mock = AsyncMock()
+    chat = SimpleNamespace(id=chat_id) if chat_id is not None else None
+    message = SimpleNamespace(
+        chat=chat, reply_text=reply_mock, edit_message_text=edit_mock
+    )
+    query = SimpleNamespace(
+        data=data,
+        message=message,
+        answer=answer_mock,
+        edit_message_text=edit_mock,
+    )
+    update = SimpleNamespace(callback_query=query, effective_chat=chat)
+    return update, edit_mock, answer_mock, reply_mock
+
+
+@pytest.mark.asyncio
+async def test_drill_choice_callback_dropped_for_unallowed(monkeypatch):
+    """Tap from a non-allowlisted chat must not trigger any work — the
+    decorator skips because callback_query has no .message in the
+    @require_allowlist sense, so we enforce manually inside the handler."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=999, data="drill_generic:AAPL"
+    )
+    await tg.drill_choice_callback(update, SimpleNamespace())
+    edit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_drill_choice_callback_cancel_edits_message(monkeypatch):
+    """Cancel button → edit the prompt message in place to show 'Cancelled'.
+    No drill kicked off."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="drill_cancel:AAPL"
+    )
+    await tg.drill_choice_callback(update, SimpleNamespace())
+    answer.assert_called_once()  # spinner cleared
+    edit.assert_called_once()
+    args, kwargs = edit.call_args
+    body = args[0] if args else kwargs.get("text", "")
+    assert "Cancel" in body or "cancel" in body.lower()
+    assert "AAPL" in body
+    assert kwargs.get("parse_mode") == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_drill_choice_callback_analyze_explains_step_10e(monkeypatch):
+    """Analyze button → /analyze isn't built yet (Step 10e). Reply must
+    say so honestly and point at workable paths (run /drill TICKER general
+    or force a thematic thesis) instead of pretending to dispatch."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="drill_analyze:AAPL"
+    )
+    await tg.drill_choice_callback(update, SimpleNamespace())
+    answer.assert_called_once()
+    edit.assert_called_once()
+    args, kwargs = edit.call_args
+    body = args[0] if args else kwargs.get("text", "")
+    assert "10e" in body or "not built" in body.lower()
+    assert "AAPL" in body
+    # Must point at the workable alternative (drill with general)
+    assert "general" in body
+    assert kwargs.get("parse_mode") == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_drill_choice_callback_generic_routes_to_runner(monkeypatch):
+    """Generic button → edits the prompt to ack the choice, then calls
+    `_run_drill_and_reply` with thesis_slug='general'. We mock the runner
+    helper so the test doesn't actually drill — we just assert the dispatch."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="drill_generic:AAPL"
+    )
+
+    captured: dict = {}
+
+    async def _fake_run(reply_target, ticker, thesis_slug):
+        captured["ticker"] = ticker
+        captured["thesis_slug"] = thesis_slug
+
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _fake_run)
+    await tg.drill_choice_callback(update, SimpleNamespace())
+    answer.assert_called_once()
+    edit.assert_called_once()
+    # Must have routed through the shared runner helper with the general slug.
+    assert captured["ticker"] == "AAPL"
+    assert captured["thesis_slug"] == "general"
+
+
+@pytest.mark.asyncio
+async def test_drill_choice_callback_unknown_prefix_logged(monkeypatch):
+    """Defensive: a malformed callback_data (different prefix) must not
+    crash — log a warning and bail."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="drill_made_up:AAPL"
+    )
+    # Should not raise.
+    await tg.drill_choice_callback(update, SimpleNamespace())
+    answer.assert_called_once()
+    edit.assert_not_called()
+
+
+# --- general thesis recognition -------------------------------------------
+
+
+def test_resolve_thesis_slug_recognises_general_when_explicit():
+    """User types `/drill AAPL general` — must use the Buffett-framework
+    thesis even though AAPL isn't in any universe. Empty universe on the
+    general thesis means it can't be auto-picked, but explicit force works."""
+    assert tg._resolve_thesis_slug("AAPL", "general") == "general"
+
+
+def test_general_thesis_loaded_with_buffett_thresholds():
+    """Sanity: the general thesis on disk has Buffett-framework material
+    thresholds — moats, leverage, accounting red flags. Pin a few so a
+    future edit can't accidentally swap in a thematic set."""
+    from utils.schemas import Thesis
+
+    raw = json.loads(Path("theses/general.json").read_text())
+    thesis = Thesis.model_validate(raw)
+    signals = {t.signal for t in thesis.material_thresholds}
+    # Buffett-classic moat / fortress signals must be present.
+    assert "roe_ttm" in signals
+    assert "roic_ttm" in signals
+    assert "debt_to_equity" in signals
+    assert "interest_coverage" in signals
+    # Accounting red flags
+    accounting_phrases = [
+        t.value for t in thesis.material_thresholds
+        if t.signal == "filing_mentions" and t.operator == "contains"
+    ]
+    assert "going concern" in accounting_phrases
+    assert "material weakness" in accounting_phrases
+    # Empty universe is intentional — it's a fall-through thesis.
+    assert thesis.universe == []
+    assert thesis.anchor_tickers == []
 
 
 # --- _send_safe (retry + disk fallback) -----------------------------------

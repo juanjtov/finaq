@@ -1,0 +1,33 @@
+{
+  "name": "General equity research (Buffett framework)",
+  "summary": "Generic equity-research framework grounded in Warren Buffett's four pillars: (1) durable business quality — consistent ROE > 15% and pricing power; (2) capital-allocation discipline — declining or stable share count, high reinvestment ROI; (3) fortress balance sheet — debt/equity < 0.5, interest coverage > 5x, growing free cash flow; (4) valuation with margin of safety — owner earnings yield (FCF / market cap) attractive vs the 10-year Treasury, P/E reasonable for the growth profile. Used for ad-hoc drill-ins on tickers that don't fit a pre-built thematic thesis. The Synthesis agent reads this thesis and defaults bull/bear framing to the four pillars rather than a thesis-level bet.",
+  "anchor_tickers": [],
+  "universe": [],
+  "relationships": [],
+  "valuation": {
+    "equity_risk_premium": 0.05,
+    "erp_basis": "Long-run S&P 500 ERP ~4.5%, rounded to 5% for the universal default. No thesis-specific tilt — ad-hoc tickers span sectors and risk profiles.",
+    "terminal_growth_rate": 0.025,
+    "terminal_growth_basis": "US real long-run GDP trend; slightly conservative (closer to Buffett's preferred 2-3% range) since this is a universal default, not a high-growth thesis.",
+    "discount_rate_floor": 0.070,
+    "discount_rate_cap": 0.120
+  },
+  "material_thresholds": [
+    { "signal": "roe_ttm",                       "operator": "<",        "value": 12,    "unit": "percent" },
+    { "signal": "roic_ttm",                      "operator": "<",        "value": 10,    "unit": "percent" },
+    { "signal": "gross_margin_change_yoy",       "operator": "abs >",    "value": 200,   "unit": "bps" },
+    { "signal": "operating_margin_change_yoy",   "operator": "abs >",    "value": 300,   "unit": "bps" },
+
+    { "signal": "shares_outstanding_change_yoy", "operator": ">",        "value": 5,     "unit": "percent" },
+    { "signal": "fcf_yoy_growth",                "operator": "<",        "value": -10,   "unit": "percent" },
+
+    { "signal": "debt_to_equity",                "operator": ">",        "value": 0.5,   "unit": "ratio" },
+    { "signal": "interest_coverage",             "operator": "<",        "value": 5,     "unit": "x" },
+
+    { "signal": "owner_earnings_yield",          "operator": "<",        "value": 4,     "unit": "percent" },
+
+    { "signal": "filing_mentions",               "operator": "contains", "value": "going concern",     "unit": "text" },
+    { "signal": "filing_mentions",               "operator": "contains", "value": "material weakness", "unit": "text" },
+    { "signal": "filing_mentions",               "operator": "contains", "value": "restatement",       "unit": "text" }
+  ]
+}

@@ -33,9 +33,10 @@ from pathlib import Path
 from typing import Callable, Coroutine
 from urllib.parse import urlencode
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -322,6 +323,7 @@ _HELP_TEXT = (
     "\n"
     "📡 <b>Monitoring</b>\n"
     "/scan                     Surface alerts caught since the last check\n"
+    "/theses                   List all available theses (slugs + universe)\n"
     "/thesis NAME              Show a thesis's tickers + recent activity\n"
     "/note TICKER text         Drop a note future Triage will weigh\n"
     "  e.g. <code>/note NVDA trim 20% if Q3 misses $42B</code>\n"
@@ -631,46 +633,71 @@ async def drill_command(
     """`/drill TICKER [thesis]` — kick off a drill-in via ui/_runner and
     reply with the structured summary when it completes. Reuses the same
     daemon-thread runner the dashboard uses, so a Streamlit-side and a
-    Telegram-side drill-in for the same (ticker, thesis) coalesce."""
+    Telegram-side drill-in for the same (ticker, thesis) coalesce.
+
+    When the ticker isn't in any pre-defined thesis universe AND no thesis
+    was specified, we don't pick silently — we send an inline keyboard so
+    the user explicitly chooses between the generic Buffett-framework
+    thesis (cheap, fast) or synthesizing a custom thesis first
+    (`/analyze`, ~$0.05 + 30s extra). See `_send_drill_choice_prompt` and
+    `drill_choice_callback` for the keyboard plumbing.
+    """
     args = context.args or []
     if not args:
+        slugs = _list_thesis_slugs()
+        thesis_list = "\n".join(
+            f"  • <code>{_h(s)}</code>" for s in slugs
+        ) if slugs else "  (none — populate /theses first)"
         await update.message.reply_text(
             "Usage: <code>/drill TICKER [thesis]</code>\n"
-            "Examples: <code>/drill NVDA</code>, <code>/drill AVGO ai_cake</code>",
+            "Examples: <code>/drill NVDA</code>, <code>/drill AVGO ai_cake</code>\n\n"
+            "<b>Available theses:</b>\n"
+            f"{thesis_list}\n\n"
+            "Tip: omit the thesis arg and I'll auto-pick if the ticker is in "
+            "any thesis universe — otherwise I'll ask you to choose.",
             parse_mode="HTML",
         )
         return
     ticker = args[0].strip().upper()
     requested_thesis = args[1] if len(args) > 1 else None
     thesis_slug = _resolve_thesis_slug(ticker, requested_thesis)
-    if not thesis_slug:
+
+    if not thesis_slug and requested_thesis:
+        # User specified a thesis but it didn't match any known slug.
         slugs = _list_thesis_slugs()
         slug_list = ", ".join(f"<code>{_h(s)}</code>" for s in slugs)
-        if requested_thesis:
-            # User specified a thesis but it didn't match any known slug.
-            body = (
-                f"❓ Thesis <code>{_h(requested_thesis)}</code> not found.\n"
-                f"Known theses: {slug_list}.\n"
-                f"Try <code>/drill {_h(ticker)} {_h(slugs[0]) if slugs else 'ai_cake'}</code>."
-            )
-        else:
-            # Ticker isn't in any thesis universe. Suggest /analyze for
-            # ad-hoc topics so the user knows the right tool exists.
-            body = (
-                f"❓ <code>{_h(ticker)}</code> isn't in any of my pre-defined "
-                f"theses ({slug_list}).\n\n"
-                f"Two options:\n"
-                f"• <b>Force a thesis:</b> "
-                f"<code>/drill {_h(ticker)} ai_cake</code> "
-                f"(drill-in will run but Filings RAG may be empty if the "
-                f"ticker isn't ingested yet — see Mission Control).\n"
-                f"• <b>Synthesize an ad-hoc thesis:</b> "
-                f"<code>/analyze {_h(ticker)}</code> — I'll build a thesis "
-                f"around it on the fly. (Step 10e — coming soon.)"
-            )
+        body = (
+            f"❓ Thesis <code>{_h(requested_thesis)}</code> not found.\n"
+            f"Known theses: {slug_list}.\n"
+            f"Try <code>/drill {_h(ticker)} {_h(slugs[0]) if slugs else 'ai_cake'}</code>."
+        )
         await update.message.reply_text(body, parse_mode="HTML")
         return
 
+    if not thesis_slug:
+        # Ticker isn't in any thematic thesis universe. Don't pick silently
+        # — ask the user via inline keyboard whether to use the generic
+        # Buffett-framework thesis or synthesize a custom thesis first.
+        await _send_drill_choice_prompt(update, ticker)
+        return
+
+    await _run_drill_and_reply(update.message, ticker, thesis_slug)
+
+
+async def _run_drill_and_reply(
+    reply_target,
+    ticker: str,
+    thesis_slug: str,
+) -> None:
+    """Kick off the drill, poll until completion, then send summary + chart.
+    Used by both `drill_command` (slash path) and `drill_choice_callback`
+    (inline-keyboard path).
+
+    `reply_target` is a `telegram.Message` — both `update.message` (slash
+    command) and `query.message` (callback query) satisfy this. We use
+    `reply_target.reply_text(...)` for follow-ups so each message is
+    threaded under the original `/drill`.
+    """
     # Lazy import to avoid pulling Streamlit-side modules into the bot's
     # startup path. ui/_runner is the same code the dashboard uses.
     from ui import _runner
@@ -688,7 +715,7 @@ async def drill_command(
             f"<code>{_h(thesis_slug)}</code> — I'll send the summary when "
             f"it finishes."
         )
-    await update.message.reply_text(ack, parse_mode="HTML")
+    await reply_target.reply_text(ack, parse_mode="HTML")
 
     # Poll. asyncio.sleep yields the event loop so other handlers can run.
     waited = 0.0
@@ -696,7 +723,7 @@ async def drill_command(
         await asyncio.sleep(_DRILL_POLL_INTERVAL_S)
         waited += _DRILL_POLL_INTERVAL_S
         if waited > _DRILL_MAX_WAIT_S:
-            await update.message.reply_text(
+            await reply_target.reply_text(
                 f"⚠️ Still running after {_DRILL_MAX_WAIT_S // 60} min. "
                 f"It'll keep going in the background; check Streamlit for "
                 f"the result when it lands.",
@@ -705,21 +732,21 @@ async def drill_command(
 
     record = _runner.get_run_status(ticker, thesis_slug) or {}
     if record.get("error"):
-        await update.message.reply_text(
+        await reply_target.reply_text(
             f"❌ Drill-in failed: <code>{_h(record['error'])}</code>",
             parse_mode="HTML",
         )
         return
     run_id = record.get("run_id")
     if not run_id:
-        await update.message.reply_text(
+        await reply_target.reply_text(
             "⚠️ Drill-in completed but no run_id was recorded — check Mission Control."
         )
         return
 
     state = _load_demo_state(ticker, thesis_slug, run_id)
     if not state:
-        await update.message.reply_text(
+        await reply_target.reply_text(
             f"⚠️ Drill-in completed but the saved state at "
             f"<code>data_cache/demos/{_h(ticker)}__{_h(thesis_slug)}__{_h(run_id[:8])}.json</code> "
             f"is missing.",
@@ -727,9 +754,17 @@ async def drill_command(
         )
         return
 
+    # Wrap reply_target into an Update-shaped object so the existing
+    # `_send_safe(update, ...)` and `_send_mc_chart(update, ...)` paths
+    # work without changing their signatures. Both helpers only access
+    # `update.message.reply_text` / `update.message.reply_photo` — a
+    # SimpleNamespace with `message=reply_target` satisfies that.
+    from types import SimpleNamespace
+    pseudo_update = SimpleNamespace(message=reply_target, effective_chat=None)
+
     summary = _format_drill_summary(state, run_id, thesis_slug=thesis_slug)
     await _send_safe(
-        update,
+        pseudo_update,
         summary,
         label=f"drill-{ticker}-{thesis_slug}-{run_id[:8]}",
         parse_mode="HTML",
@@ -743,10 +778,127 @@ async def drill_command(
     mc = state.get("monte_carlo") or {}
     if mc and mc.get("method") not in (None, "skipped"):
         await _send_mc_chart(
-            update,
+            pseudo_update,
             state,
             label=f"drill-{ticker}-{thesis_slug}-{run_id[:8]}-chart",
         )
+
+
+# --- Inline-keyboard prompt for "ticker not in any thesis" ----------------
+
+# Cost estimates printed on the buttons. Approximate based on Phase 0
+# observed spend per drill-in (see Mission Control). Update if prices drift.
+_COST_GENERIC = "~$0.50"
+_COST_ANALYZE = "~$0.60"
+
+_CALLBACK_PREFIX_GENERIC = "drill_generic"
+_CALLBACK_PREFIX_ANALYZE = "drill_analyze"
+_CALLBACK_PREFIX_CANCEL = "drill_cancel"
+
+
+async def _send_drill_choice_prompt(update: Update, ticker: str) -> None:
+    """Send the 3-button inline keyboard that lets the user choose how to
+    drill on a ticker that isn't in any pre-built thesis."""
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"Use generic thesis · {_COST_GENERIC}",
+                callback_data=f"{_CALLBACK_PREFIX_GENERIC}:{ticker}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"Synthesize custom · {_COST_ANALYZE}",
+                callback_data=f"{_CALLBACK_PREFIX_ANALYZE}:{ticker}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "Cancel",
+                callback_data=f"{_CALLBACK_PREFIX_CANCEL}:{ticker}",
+            )
+        ],
+    ]
+    body = (
+        f"❓ <b>{_h(ticker)}</b> isn't in any pre-defined thesis "
+        f"(<code>ai_cake</code>, <code>nvda_halo</code>, <code>construction</code>).\n\n"
+        f"How do you want to proceed?\n"
+        f"• <b>Use generic thesis</b> — runs against the Buffett-framework "
+        f"<code>general</code> thesis (universal red flags: ROE, ROIC, debt/equity, "
+        f"margin compression, accounting red flags).\n"
+        f"• <b>Synthesize custom</b> — Sonnet builds a tailored thesis around "
+        f"<code>{_h(ticker)}</code> first, then drills (Step 10e).\n"
+        f"• <b>Cancel</b> — dismiss this prompt without drilling."
+    )
+    await update.message.reply_text(
+        body,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def drill_choice_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle taps on the /drill choice keyboard.
+
+    The CallbackQueryHandler delivers `update.callback_query` rather than
+    `update.message`, so we read the tap data, ack the spinner, and edit
+    the original message in place to show what the bot is doing now.
+    Allowlist enforced manually because the `@require_allowlist` decorator
+    checks `update.message` which is None on callback queries.
+    """
+    query = update.callback_query
+    if query is None:
+        return
+    chat = query.message.chat if query.message else None
+    chat_id = chat.id if chat else None
+    if chat_id is None or chat_id not in _allowed_chat_ids:
+        # Drop silently — same posture as the message handler.
+        if query:
+            await query.answer()
+        return
+
+    # Always acknowledge the tap first (removes Telegram's "loading" spinner
+    # on the button). Without this, the button shows a spinner indefinitely.
+    await query.answer()
+
+    data = query.data or ""
+    if ":" not in data:
+        return
+    prefix, ticker = data.split(":", 1)
+    ticker = ticker.strip().upper()
+
+    if prefix == _CALLBACK_PREFIX_GENERIC:
+        # User chose the generic thesis. Edit the prompt to reflect
+        # the choice, then run the drill against the `general` slug.
+        await query.edit_message_text(
+            f"✓ Running drill on <b>{_h(ticker)}</b> with the "
+            f"<code>general</code> Buffett-framework thesis…",
+            parse_mode="HTML",
+        )
+        await _run_drill_and_reply(query.message, ticker, "general")
+    elif prefix == _CALLBACK_PREFIX_ANALYZE:
+        # /analyze isn't built yet (Step 10e). Be honest and point the
+        # user at workable paths until then.
+        await query.edit_message_text(
+            f"⏳ Custom-thesis synthesis (<code>/analyze</code>) lands in "
+            f"<b>Step 10e</b> — not built yet.\n\n"
+            f"For now you can:\n"
+            f"• Run <code>/drill {_h(ticker)} general</code> to use the "
+            f"Buffett-framework thesis directly.\n"
+            f"• Force a thematic thesis: "
+            f"<code>/drill {_h(ticker)} ai_cake</code> "
+            f"(or <code>nvda_halo</code> / <code>construction</code>).",
+            parse_mode="HTML",
+        )
+    elif prefix == _CALLBACK_PREFIX_CANCEL:
+        await query.edit_message_text(
+            f"❌ Cancelled — no drill-in run for <code>{_h(ticker)}</code>.",
+            parse_mode="HTML",
+        )
+    else:
+        logger.warning(f"[telegram] unknown drill-choice callback: {data!r}")
 
 
 # --- /scan ----------------------------------------------------------------
@@ -917,6 +1069,63 @@ async def status_command(
     await update.message.reply_text(body, parse_mode="HTML")
 
 
+# --- /theses --------------------------------------------------------------
+
+
+@require_allowlist
+async def theses_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/theses` — list the thesis slugs available for `/drill TICKER thesis`.
+
+    Shows each thesis's display name + universe size + anchor count so the
+    user can pick the right one without leaving Telegram. Step 10d will
+    add the deeper `/thesis NAME` command (universe + recent activity);
+    this is the lightweight discovery surface for slug names only.
+    """
+    slugs = _list_thesis_slugs()
+    if not slugs:
+        await update.message.reply_text(
+            "No theses found in <code>/theses</code>. Add a JSON file there "
+            "to get started.",
+            parse_mode="HTML",
+        )
+        return
+    lines: list[str] = ["📚 <b>Available theses</b>", ""]
+    for slug in slugs:
+        try:
+            data = json.loads((THESES_DIR / f"{slug}.json").read_text())
+        except Exception as e:
+            logger.warning(f"[telegram] could not read theses/{slug}.json: {e}")
+            continue
+        name = data.get("name", slug)
+        universe = data.get("universe") or []
+        anchors = data.get("anchor_tickers") or []
+        if universe:
+            usize = f"{len(universe)} ticker(s)"
+            anchor_str = (
+                f", anchors: {', '.join(anchors[:3])}"
+                + ("…" if len(anchors) > 3 else "")
+                if anchors
+                else ""
+            )
+        else:
+            usize = "any ticker (no universe)"
+            anchor_str = ""
+        lines.append(
+            f"• <code>{_h(slug)}</code> — {_h(name)}\n"
+            f"  <i>{usize}{anchor_str}</i>"
+        )
+    lines.append("")
+    lines.append(
+        "Run <code>/drill TICKER [thesis]</code> to use one. "
+        "Without a thesis arg I'll auto-pick or ask."
+    )
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
+    )
+
+
 # --- Bot bootstrapping ------------------------------------------------------
 
 
@@ -963,6 +1172,20 @@ def build_app(*, token: str | None = None, allowlist: str | None = None) -> Appl
     app.add_handler(CommandHandler("drill", drill_command))
     app.add_handler(CommandHandler("scan", scan_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("theses", theses_command))
+    # Inline-keyboard callbacks for /drill's "ticker not in any thesis"
+    # choice prompt. Must be registered before the catch-all handlers so
+    # button taps reach this handler instead of the placeholder.
+    app.add_handler(
+        CallbackQueryHandler(
+            drill_choice_callback,
+            pattern=(
+                f"^({_CALLBACK_PREFIX_GENERIC}|"
+                f"{_CALLBACK_PREFIX_ANALYZE}|"
+                f"{_CALLBACK_PREFIX_CANCEL}):"
+            ),
+        )
+    )
     # Catch-all for free text / unimplemented commands (e.g. /note, /thesis,
     # /analyze land in 10d/10e). Free-text routing through the Haiku
     # classifier lands in 10f.

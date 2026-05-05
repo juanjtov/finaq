@@ -28,6 +28,7 @@ Three categories:
 | 10 | **Telegram bot (bidirectional)** | Slash commands + Haiku NL routing. `/drill`, `/analyze` (ad-hoc thesis Discovery-lite), `/scan`, `/note`, `/thesis`, `/status`, `/help`. Allowlist enforced. |
 | 11 | **Triage agent + scheduling** | Real Haiku-backed continuous Triage. `launchd` first, droplet `systemd timer` after Step 12. Healthchecks.io ping after each run. |
 | 12 | **Droplet deployment** | DigitalOcean $6/mo droplet, Caddy HTTPS, three systemd units, `deploy/install.sh`. Supersedes the Cloudflare Tunnel option. |
+| 13 | **Backtest harness** | Plumb `as_of_date` through `data/{edgar,yfin,chroma,news}.py` + all 5 agents so a drill-in can be run "as of" a historical date. Pick 4–6 dates × 5–10 tickers (e.g. Sept 1 2024, Dec 1 2024, Mar 1 2025, Jun 1 2025, Sept 1 2025), drill at each, compare predicted P10/P50/P90 vs today's actual price. Surface metrics: hit rate (band coverage), bias (P50 − actual), calibration. **Critical:** switch backtest model strings to one whose training cutoff predates `as_of_date` (otherwise the LLM has forward-leaked knowledge — the user explicitly plans for this by picking 2025-09-01 and routing those runs through earlier models). Lands as `python -m scripts.backtest --as-of 2025-09-01 --tickers NVDA,DELL,…` + a JSON report + Mission Control panel. |
 
 ### Mission-control surfaces (each unlocked by an existing build step)
 
