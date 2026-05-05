@@ -355,15 +355,152 @@ async def help_command(
 async def echo_placeholder(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Step 10b stub for non-/help commands and free text. Future step files
-    replace this with the real handlers (10f). Returning a friendly
-    "not yet implemented" message during the build keeps the bot usable
-    while the rest of Step 10 lands."""
+    """Catch-all for unknown slash commands like `/foo`. Free text is now
+    routed through `nl_fallback` (Step 10f) — this handler only fires
+    when the user types a command we don't recognise."""
     text = update.message.text or ""
     await update.message.reply_text(
-        f"⏳ Heard you — <code>{_h(text[:120])}</code> — but free-text routing "
-        f"isn't wired up yet. Try /help for what's available today.",
+        f"❓ Unknown command: <code>{_h(text[:80])}</code>\n"
+        f"Try /help for what's available, or just type plain text and "
+        f"I'll route it.",
         parse_mode="HTML",
+    )
+
+
+# --- Natural-language fallback (Step 10f) ---------------------------------
+
+
+@require_allowlist
+async def nl_fallback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Route free-text messages through the Haiku intent classifier
+    (`agents.router.classify`) and dispatch to the matching slash-command
+    handler. When confidence < 0.7 OR intent is `unknown`, reply with a
+    clarification prompt instead of guessing.
+
+    Logs every decision so we can monitor whether the 0.7 threshold needs
+    tuning (see `docs/POSTPONED.md §2 — Telegram NL router calibration`).
+    """
+    from types import SimpleNamespace as _SN
+
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+
+    # Lazy import keeps bot startup snappy and avoids importing OpenRouter
+    # client when the message handler is never called.
+    from agents.router import classify, should_dispatch
+
+    decision = await classify(text)
+    dispatched = should_dispatch(decision)
+    logger.info(
+        f"[telegram-nl] intent={decision.intent} "
+        f"args={decision.args} confidence={decision.confidence:.2f} "
+        f"dispatched={dispatched} text={text[:120]!r}"
+    )
+
+    if not dispatched:
+        # Either unknown intent or low confidence. Don't burn LLM credits
+        # on the wrong action — ask for clarification instead. The exit
+        # also fires for genuinely confused inputs ("hmm", "thanks").
+        await update.message.reply_text(
+            "❓ Not sure what you meant. Try one of:\n"
+            "• <code>/drill TICKER</code> — full drill-in (5 min)\n"
+            "• <code>/scan</code> — recent alerts\n"
+            "• <code>/status</code> — system health\n"
+            "• <code>/note TICKER text</code> — drop a note for Triage\n"
+            "• <code>/thesis NAME</code> — a thesis's universe + activity\n"
+            "• <code>/help</code> — full command list",
+            parse_mode="HTML",
+        )
+        return
+
+    intent = decision.intent
+    args_dict = decision.args or {}
+
+    if intent == "drill":
+        ticker = (args_dict.get("ticker") or "").strip().upper()
+        if not ticker:
+            await update.message.reply_text(
+                "I detected a drill request but couldn't pick out the ticker. "
+                "Try <code>/drill TICKER</code>.",
+                parse_mode="HTML",
+            )
+            return
+        thesis = (args_dict.get("thesis") or "").strip()
+        nl_args: list[str] = [ticker]
+        if thesis:
+            nl_args.append(thesis)
+        await drill_command(update, _SN(args=nl_args))
+        return
+
+    if intent == "scan":
+        await scan_command(update, _SN(args=[]))
+        return
+
+    if intent == "status":
+        await status_command(update, _SN(args=[]))
+        return
+
+    if intent == "help":
+        await help_command(update, _SN(args=[]))
+        return
+
+    if intent == "thesis":
+        name = (args_dict.get("name") or "").strip()
+        if not name:
+            await update.message.reply_text(
+                "I detected a thesis lookup but couldn't pick out the name. "
+                "Try <code>/thesis NAME</code> or <code>/theses</code> to list.",
+                parse_mode="HTML",
+            )
+            return
+        await thesis_command(update, _SN(args=[name]))
+        return
+
+    if intent == "note":
+        ticker = (args_dict.get("ticker") or "").strip().upper()
+        note_text = (args_dict.get("text") or "").strip()
+        if not ticker or not note_text:
+            await update.message.reply_text(
+                "I detected a note but couldn't extract both the ticker and "
+                "the text. Try <code>/note TICKER your text here</code>.",
+                parse_mode="HTML",
+            )
+            return
+        # /note expects positional args: [ticker, *text_words]. Split the
+        # text on whitespace so the existing handler reassembles it via
+        # `' '.join(args[1:])`.
+        await note_command(update, _SN(args=[ticker, *note_text.split()]))
+        return
+
+    if intent == "analyze":
+        # Step 10e isn't built yet — same honest UX as the /drill inline
+        # keyboard's "Synthesize custom" button.
+        topic = (args_dict.get("topic") or "").strip()
+        await update.message.reply_text(
+            f"⏳ Custom-thesis synthesis (<code>/analyze</code>) lands in "
+            f"<b>Step 10e</b> — not built yet.\n\n"
+            f"For ad-hoc topics like <i>{_h(topic) or 'this'}</i>, two paths "
+            f"available today:\n"
+            f"• Drill against the Buffett-framework thesis: "
+            f"<code>/drill TICKER general</code>\n"
+            f"• Force a thematic thesis: "
+            f"<code>/drill TICKER ai_cake</code> "
+            f"(or <code>nvda_halo</code> / <code>construction</code>).",
+            parse_mode="HTML",
+        )
+        return
+
+    # Defensive fallback — should never hit unless the schema and handler
+    # drift. Log loudly so we notice.
+    logger.warning(
+        f"[telegram-nl] unhandled intent {intent!r} after should_dispatch=True"
+    )
+    await update.message.reply_text(
+        "❓ I understood your intent but don't have a handler for it yet. "
+        "Try /help."
     )
 
 
@@ -1069,6 +1206,197 @@ async def status_command(
     await update.message.reply_text(body, parse_mode="HTML")
 
 
+# --- /note ----------------------------------------------------------------
+
+
+@require_allowlist
+async def note_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/note TICKER text` — append a free-text note to a thesis's Notion
+    page. The note is timestamped + prefixed with the ticker so Triage
+    (Step 11) can read the corpus and weight ongoing user concerns.
+
+    Usage:
+        /note NVDA trim 20% if Q3 misses $42B
+        /note AAPL margin compression at risk on tariffs
+
+    The thesis is auto-resolved from the ticker (same logic as /drill).
+    Tickers not in any thesis attach to `general` so notes are never lost.
+    """
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: <code>/note TICKER text</code>\n"
+            "Example: <code>/note NVDA trim 20% if Q3 misses $42B</code>\n\n"
+            "Notes attach to the ticker's resolved thesis page in Notion. "
+            "Triage reads them next run.",
+            parse_mode="HTML",
+        )
+        return
+
+    ticker = args[0].strip().upper()
+    text = " ".join(args[1:]).strip()
+    if not text:
+        await update.message.reply_text(
+            "Note text is empty. Try again with content after the ticker.",
+            parse_mode="HTML",
+        )
+        return
+
+    # Resolve thesis. If ticker isn't in any thematic universe, attach to
+    # `general` so the note is never silently dropped — same fallback the
+    # interactive /drill prompt uses.
+    thesis_slug = _resolve_thesis_slug(ticker, None)
+    if not thesis_slug:
+        slugs = _list_thesis_slugs()
+        thesis_slug = "general" if "general" in slugs else (
+            slugs[0] if slugs else None
+        )
+    if not thesis_slug:
+        await update.message.reply_text(
+            "❌ No theses configured. Add one to <code>/theses</code> first.",
+            parse_mode="HTML",
+        )
+        return
+
+    # Lazy-import notion to keep startup snappy and avoid a hard dep when
+    # NOTION_API_KEY is absent.
+    try:
+        from data import notion as _notion
+    except ImportError:
+        await update.message.reply_text(
+            "⚠️ Notion module not available. Note not saved.",
+            parse_mode="HTML",
+        )
+        return
+
+    if not _notion.is_configured():
+        await update.message.reply_text(
+            "⚠️ Notion isn't configured (NOTION_API_KEY missing). Note not saved.",
+            parse_mode="HTML",
+        )
+        return
+
+    ok = _notion.append_thesis_note(
+        thesis_slug=thesis_slug, text=text, ticker=ticker
+    )
+    if ok:
+        await update.message.reply_text(
+            f"📝 Note attached to <code>{_h(thesis_slug)}</code> for "
+            f"<b>{_h(ticker)}</b>:\n\n<i>{_h(text[:300])}</i>"
+            + ("…" if len(text) > 300 else "")
+            + "\n\nFuture <code>/scan</code> + Triage runs will weight this.",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ Couldn't attach note to <code>{_h(thesis_slug)}</code> — "
+            f"check Notion connectivity or the bot logs.",
+            parse_mode="HTML",
+        )
+
+
+# --- /thesis NAME ---------------------------------------------------------
+
+
+@require_allowlist
+async def thesis_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/thesis NAME` — show a thesis's universe + recent activity.
+
+    Goes deeper than `/theses` (which lists slug + universe size for
+    every thesis): for one thesis, also surfaces alerts in the last 7
+    days (from state.db) and the most recent drill-in. Useful for
+    "remind me what's in nvda_halo and what's been happening".
+    """
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/thesis NAME</code>\n"
+            "Example: <code>/thesis ai_cake</code>\n\n"
+            "Run <code>/theses</code> to list all available.",
+            parse_mode="HTML",
+        )
+        return
+
+    raw_name = " ".join(args).strip().lower().replace(" ", "_").replace("-", "_")
+    slugs = _list_thesis_slugs()
+    if raw_name not in slugs:
+        slug_list = ", ".join(f"<code>{_h(s)}</code>" for s in slugs)
+        await update.message.reply_text(
+            f"❓ Thesis <code>{_h(raw_name)}</code> not found.\n"
+            f"Known theses: {slug_list}.",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        thesis = json.loads((THESES_DIR / f"{raw_name}.json").read_text())
+    except Exception as e:
+        logger.warning(f"[telegram] /thesis {raw_name}: read failed: {e}")
+        await update.message.reply_text(
+            f"⚠️ Couldn't load <code>{_h(raw_name)}</code>: <code>{_h(str(e))}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    name = thesis.get("name", raw_name)
+    summary = thesis.get("summary") or ""
+    universe = thesis.get("universe") or []
+    anchors = thesis.get("anchor_tickers") or []
+
+    # Recent activity from state.db. Done lazily so a missing state.db
+    # doesn't break the read-only paths.
+    from data import state as _state
+
+    cutoff_7d = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    alerts = [
+        a for a in _state.recent_alerts(limit=200)
+        if a.get("thesis") == raw_name and (a.get("ts") or "") >= cutoff_7d
+    ]
+    runs = [r for r in _state.recent_runs(limit=20) if r.get("thesis") == raw_name]
+    if runs:
+        last = runs[0]
+        last_when = (last.get("started_at") or "?")[:16].replace("T", " ")
+        last_run_str = (
+            f"<code>{_h(last.get('ticker', '?'))}</code> at "
+            f"{_h(last_when)} UTC ({_h(last.get('status', '?'))})"
+        )
+    else:
+        last_run_str = "<i>(no drill-ins yet)</i>"
+
+    # Universe display: ⭐-prefix anchors so they're visually distinct.
+    if universe:
+        chip_lines = ", ".join(
+            f"⭐ <code>{_h(t)}</code>" if t in anchors else f"<code>{_h(t)}</code>"
+            for t in universe[:30]
+        )
+        if len(universe) > 30:
+            chip_lines += f" …and {len(universe) - 30} more"
+        universe_block = f"<b>Universe</b> ({len(universe)} tickers):\n{chip_lines}"
+    else:
+        universe_block = "<b>Universe:</b> <i>(empty — works for any ticker)</i>"
+
+    # Trim summary so the reply fits Telegram's 4096-char limit comfortably
+    # even when universe is large.
+    summary_short = summary[:400] + ("…" if len(summary) > 400 else "")
+
+    body = (
+        f"📚 <b>{_h(name)}</b>\n"
+        f"slug: <code>{_h(raw_name)}</code>\n\n"
+        f"<i>{_h(summary_short)}</i>\n\n"
+        f"{universe_block}\n\n"
+        f"📡 Alerts (last 7d): <b>{len(alerts)}</b>\n"
+        f"🏃 Last drill-in: {last_run_str}\n\n"
+        f"Try: <code>/drill {anchors[0] if anchors else 'TICKER'} {raw_name}</code>"
+    )
+    await update.message.reply_text(
+        body, parse_mode="HTML", disable_web_page_preview=True
+    )
+
+
 # --- /theses --------------------------------------------------------------
 
 
@@ -1173,6 +1501,8 @@ def build_app(*, token: str | None = None, allowlist: str | None = None) -> Appl
     app.add_handler(CommandHandler("scan", scan_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("theses", theses_command))
+    app.add_handler(CommandHandler("thesis", thesis_command))
+    app.add_handler(CommandHandler("note", note_command))
     # Inline-keyboard callbacks for /drill's "ticker not in any thesis"
     # choice prompt. Must be registered before the catch-all handlers so
     # button taps reach this handler instead of the placeholder.
@@ -1186,10 +1516,9 @@ def build_app(*, token: str | None = None, allowlist: str | None = None) -> Appl
             ),
         )
     )
-    # Catch-all for free text / unimplemented commands (e.g. /note, /thesis,
-    # /analyze land in 10d/10e). Free-text routing through the Haiku
-    # classifier lands in 10f.
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_placeholder))
+    # Free text → Haiku-driven NL router → dispatch (Step 10f).
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, nl_fallback))
+    # Unknown slash commands (e.g. `/foo`) → friendly error.
     app.add_handler(MessageHandler(filters.COMMAND, echo_placeholder))
 
     return app

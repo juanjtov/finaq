@@ -507,6 +507,113 @@ def test_read_recent_reports_extracts_fields_from_pages(monkeypatch):
 # --- 2025-09-03 API regression guard ----------------------------------------
 
 
+# --- append_thesis_note ----------------------------------------------------
+
+
+def test_append_thesis_note_returns_false_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("NOTION_API_KEY", raising=False)
+    monkeypatch.setattr(nm, "_client_cache", None)
+    assert nm.append_thesis_note(thesis_slug="ai_cake", text="hi") is False
+
+
+def test_append_thesis_note_writes_paragraph_to_thesis_page(monkeypatch):
+    """Happy path: looks up the thesis row by slug → appends a paragraph
+    block whose content has [YYYY-MM-DD] TICKER prefix + the user's text."""
+    monkeypatch.setenv("NOTION_API_KEY", "ntn_x")
+    monkeypatch.setenv("NOTION_DB_THESES", "fake-db")
+    monkeypatch.setattr(nm, "_client_cache", None)
+
+    captured: dict = {"appended": []}
+
+    class _Databases:
+        def retrieve(self, database_id, **kwargs):
+            return {
+                "id": database_id,
+                "data_sources": [{"id": "ds-fake", "name": "default"}],
+            }
+
+    class _DataSources:
+        def query(self, **kwargs):
+            return {"results": [{"id": "thesis-page-id"}]}
+
+    class _Children:
+        def append(self, **kwargs):
+            captured["appended"].append(kwargs)
+
+    blocks = SimpleNamespace(children=_Children())
+
+    client = SimpleNamespace(
+        databases=_Databases(),
+        data_sources=_DataSources(),
+        blocks=blocks,
+    )
+    monkeypatch.setattr(nm, "_get_client", lambda: client)
+
+    ok = nm.append_thesis_note(
+        thesis_slug="ai_cake",
+        text="trim 20% if Q3 misses $42B",
+        ticker="NVDA",
+    )
+    assert ok is True
+    assert len(captured["appended"]) == 1
+    call = captured["appended"][0]
+    assert call["block_id"] == "thesis-page-id"
+    children = call["children"]
+    assert len(children) == 1
+    assert children[0]["type"] == "paragraph"
+    # The body must include both the ticker tag and the actual note text.
+    rich = children[0]["paragraph"]["rich_text"]
+    body = "".join(seg.get("text", {}).get("content", "") for seg in rich)
+    assert "NVDA:" in body
+    assert "trim 20%" in body
+    # Date prefix YYYY-MM-DD
+    import re
+    assert re.match(r"\[\d{4}-\d{2}-\d{2}\]", body), (
+        f"expected ISO date prefix, got: {body!r}"
+    )
+
+
+def test_append_thesis_note_returns_false_when_thesis_row_missing(monkeypatch):
+    """Slug doesn't match any row in the Theses DB → log + return False
+    (don't crash). bootstrap_notion may not have seeded the row yet."""
+    monkeypatch.setenv("NOTION_API_KEY", "ntn_x")
+    monkeypatch.setenv("NOTION_DB_THESES", "fake-db")
+    monkeypatch.setattr(nm, "_client_cache", None)
+
+    class _Databases:
+        def retrieve(self, database_id, **kwargs):
+            return {"id": database_id, "data_sources": [{"id": "ds-fake"}]}
+
+    class _DataSources:
+        def query(self, **kwargs):
+            return {"results": []}
+
+    client = SimpleNamespace(
+        databases=_Databases(), data_sources=_DataSources()
+    )
+    monkeypatch.setattr(nm, "_get_client", lambda: client)
+    assert nm.append_thesis_note(thesis_slug="missing", text="x") is False
+
+
+def test_append_thesis_note_returns_false_on_api_failure(monkeypatch):
+    """A Notion API error must not propagate to the bot — log + False."""
+    monkeypatch.setenv("NOTION_API_KEY", "ntn_x")
+    monkeypatch.setenv("NOTION_DB_THESES", "fake-db")
+    monkeypatch.setattr(nm, "_client_cache", None)
+
+    class _Databases:
+        def retrieve(self, database_id, **kwargs):
+            return {"id": database_id, "data_sources": [{"id": "ds-fake"}]}
+
+    class _DataSources:
+        def query(self, **kwargs):
+            raise RuntimeError("notion 502")
+
+    client = SimpleNamespace(databases=_Databases(), data_sources=_DataSources())
+    monkeypatch.setattr(nm, "_get_client", lambda: client)
+    assert nm.append_thesis_note(thesis_slug="ai_cake", text="x") is False
+
+
 def test_notion_module_does_not_call_legacy_databases_query():
     """notion-client 3.x deprecated `databases.query`; reads must go through
     `data_sources.query`. A blanket source-text check is the cheapest way to

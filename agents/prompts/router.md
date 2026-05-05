@@ -47,6 +47,15 @@ User: "what's NVDA looking like"
 User: "drill AVGO on ai cake"
 → `{"intent": "drill", "args": {"ticker": "AVGO", "thesis": "ai_cake"}, "confidence": 0.95}`
 
+User: "run a drill on Constellation Energy"
+→ `{"intent": "drill", "args": {"ticker": "CEG"}, "confidence": 0.9}`
+
+User: "what's Microsoft looking like"
+→ `{"intent": "drill", "args": {"ticker": "MSFT"}, "confidence": 0.9}`
+
+User: "drill into Vertiv"
+→ `{"intent": "drill", "args": {"ticker": "VRT"}, "confidence": 0.9}`
+
 User: "analyze defense semis"
 → `{"intent": "analyze", "args": {"topic": "defense semis"}, "confidence": 0.95}`
 
@@ -74,8 +83,9 @@ User: "thanks!"
 ## Rules
 
 1. Tickers are always returned UPPERCASED (e.g. `nvda` → `NVDA`).
-2. Thesis names use snake_case slugs (`ai cake` → `ai_cake`, `NVDA halo` → `nvda_halo`, `construction` stays `construction`). For unknown thesis names, omit the field rather than guess.
-3. For `note` intent, strip leading verbs like "remember to" / "note that" — keep only the substantive note text.
-4. Never include keys with empty-string values; omit them instead.
-5. If the message could plausibly be `drill` OR `analyze`, prefer `drill` only when a recognizable ticker is present; otherwise `analyze`.
-6. Output the JSON object ONLY. No code fences. No prose. No commentary.
+2. **If the user names a company instead of a ticker symbol** (e.g. "Constellation Energy", "Microsoft", "Vertiv"), return the well-known stock ticker symbol uppercased (`CEG`, `MSFT`, `VRT`). For ambiguous or obscure company names where you'd have to guess, return `confidence < 0.7` so the bot asks the user to clarify rather than dispatching to the wrong ticker.
+3. Thesis names use snake_case slugs (`ai cake` → `ai_cake`, `NVDA halo` → `nvda_halo`, `construction` stays `construction`). For unknown thesis names, omit the field rather than guess.
+4. For `note` intent, strip leading verbs like "remember to" / "note that" — keep only the substantive note text.
+5. Never include keys with empty-string values; omit them instead.
+6. If the message could plausibly be `drill` OR `analyze`, prefer `drill` only when a recognizable ticker is present; otherwise `analyze`.
+7. Output the JSON object ONLY. No code fences. No prose. No commentary.

@@ -352,6 +352,77 @@ def read_thesis_notes(thesis_slug: str) -> str:
         return ""
 
 
+# --- append_thesis_note ----------------------------------------------------
+
+
+def append_thesis_note(
+    *,
+    thesis_slug: str,
+    text: str,
+    ticker: str | None = None,
+) -> bool:
+    """Append a note to a thesis's Notion page.
+
+    The note is appended as a single paragraph block at the bottom of the
+    thesis row's page. The body is prefixed with `[YYYY-MM-DD] TICKER:`
+    so when Triage reads the notes back via `read_thesis_notes()`, it sees
+    when the note was added and (optionally) which ticker it scoped to.
+
+    Returns True on success, False on no-op (Notion not configured) or
+    failure (Notion error). Caller should surface failure to the user but
+    NOT crash the bot — notes are best-effort.
+
+    Phase 1 Triage will read these notes verbatim and weight them when
+    scoring material thresholds. Free-text notes outweigh static thesis
+    JSON for the user's evolving view; that's the whole point of the
+    feedback loop.
+    """
+    client = _get_client()
+    db_id = _db_id("NOTION_DB_THESES")
+    if client is None or not db_id:
+        return False
+    ds_id = _resolve_data_source_id(db_id)
+    if not ds_id:
+        return False
+    try:
+        # 1. Find the thesis row by slug.
+        rows = client.data_sources.query(
+            data_source_id=ds_id,
+            filter={"property": "Slug", "rich_text": {"equals": thesis_slug}},
+            page_size=1,
+        )
+        results = rows.get("results", [])
+        if not results:
+            logger.warning(
+                f"[notion] thesis row for slug={thesis_slug!r} not found — "
+                f"can't append note. Has bootstrap_notion seeded the row?"
+            )
+            return False
+        page_id = results[0]["id"]
+
+        # 2. Append a paragraph block with the timestamped note.
+        today = datetime.now(UTC).date().isoformat()
+        prefix = (
+            f"[{today}] {ticker.upper()}: " if ticker else f"[{today}] "
+        )
+        body = prefix + text.strip()
+        client.blocks.children.append(
+            block_id=page_id,
+            children=[
+                {
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": _rich_text(body)},
+                }
+            ],
+        )
+        return True
+    except Exception as e:
+        logger.error(
+            f"[notion] append_thesis_note failed for slug={thesis_slug}: {e}"
+        )
+        return False
+
+
 # --- read_watchlist --------------------------------------------------------
 
 

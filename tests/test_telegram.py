@@ -757,6 +757,483 @@ def test_general_thesis_has_valuation_block_for_mc():
     assert 0.015 <= val["terminal_growth_rate"] <= 0.04
 
 
+# --- /note ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_note_command_no_args_replies_with_usage(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/note")
+    context = SimpleNamespace(args=[])
+    await tg.note_command(update, context)
+    update.message.reply_text.assert_called_once()
+    args, _ = update.message.reply_text.call_args
+    assert "Usage" in args[0] and "/note" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_note_command_only_ticker_no_text_replies_with_usage(monkeypatch):
+    """`/note NVDA` (ticker but no body) should be rejected. Without this
+    a typo could create empty Notion paragraphs the user has to clean up."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/note NVDA")
+    context = SimpleNamespace(args=["NVDA"])
+    await tg.note_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    assert "Usage" in args[0] or "empty" in args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_note_command_appends_to_resolved_thesis(monkeypatch):
+    """`/note NVDA "trim 20%"` resolves NVDA → ai_cake (NVDA's anchor) and
+    appends the note to ai_cake's Notion page.
+
+    Uses `monkeypatch.setattr(data.notion, ...)` rather than replacing
+    `sys.modules["data.notion"]` — the latter pattern leaks across tests
+    because pytest doesn't restore sys.modules between cases.
+    """
+    from data import notion as nm
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(tg, "_resolve_thesis_slug", lambda t, r: "ai_cake")
+    monkeypatch.setattr(nm, "is_configured", lambda: True)
+
+    captured: dict = {}
+
+    def _stub_append(*, thesis_slug, text, ticker=None):
+        captured["thesis_slug"] = thesis_slug
+        captured["text"] = text
+        captured["ticker"] = ticker
+        return True
+
+    monkeypatch.setattr(nm, "append_thesis_note", _stub_append)
+
+    update = _make_update(chat_id=111, text="/note NVDA trim 20% if Q3 misses")
+    context = SimpleNamespace(args=["NVDA", "trim", "20%", "if", "Q3", "misses"])
+    await tg.note_command(update, context)
+    assert captured.get("thesis_slug") == "ai_cake"
+    assert captured.get("ticker") == "NVDA"
+    assert captured.get("text") == "trim 20% if Q3 misses"
+    args, _ = update.message.reply_text.call_args
+    assert "📝" in args[0] or "attached" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_note_command_falls_back_to_general_for_unknown_ticker(monkeypatch):
+    """When ticker isn't in any thematic universe, /note attaches to general
+    rather than dropping the note silently."""
+    from data import notion as nm
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(tg, "_resolve_thesis_slug", lambda t, r: None)
+    monkeypatch.setattr(
+        tg, "_list_thesis_slugs", lambda: ["ai_cake", "construction", "general", "nvda_halo"]
+    )
+    monkeypatch.setattr(nm, "is_configured", lambda: True)
+
+    captured: dict = {}
+
+    def _stub_append(*, thesis_slug, text, ticker=None):
+        captured["thesis_slug"] = thesis_slug
+        return True
+
+    monkeypatch.setattr(nm, "append_thesis_note", _stub_append)
+
+    update = _make_update(chat_id=111, text="/note AAPL margin compression risk")
+    context = SimpleNamespace(args=["AAPL", "margin", "compression", "risk"])
+    await tg.note_command(update, context)
+    assert captured.get("thesis_slug") == "general", (
+        "ad-hoc tickers must route to general so notes are never lost"
+    )
+
+
+@pytest.mark.asyncio
+async def test_note_command_handles_notion_unconfigured(monkeypatch):
+    from data import notion as nm
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(tg, "_resolve_thesis_slug", lambda t, r: "ai_cake")
+    monkeypatch.setattr(nm, "is_configured", lambda: False)
+
+    update = _make_update(chat_id=111, text="/note NVDA test")
+    context = SimpleNamespace(args=["NVDA", "test"])
+    await tg.note_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    assert "Notion" in args[0] and "configured" in args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_note_command_dropped_for_unallowed(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=999, text="/note NVDA test")
+    context = SimpleNamespace(args=["NVDA", "test"])
+    await tg.note_command(update, context)
+    update.message.reply_text.assert_not_called()
+
+
+# --- /thesis NAME --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_thesis_command_no_args_replies_with_usage(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/thesis")
+    context = SimpleNamespace(args=[])
+    await tg.thesis_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    assert "Usage" in args[0] and "/thesis" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_thesis_command_unknown_name_lists_available(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/thesis fake")
+    context = SimpleNamespace(args=["fake"])
+    await tg.thesis_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    body = args[0]
+    assert "not found" in body.lower()
+    # All real theses should be listed for navigation.
+    assert "ai_cake" in body
+    assert "general" in body
+
+
+@pytest.mark.asyncio
+async def test_thesis_command_renders_universe_and_anchors(monkeypatch):
+    """/thesis ai_cake shows the universe with anchors prefixed by ⭐."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/thesis ai_cake")
+    context = SimpleNamespace(args=["ai_cake"])
+    await tg.thesis_command(update, context)
+    args, kwargs = update.message.reply_text.call_args
+    body = args[0]
+    # Slug + display name surface
+    assert "ai_cake" in body
+    # Universe + anchor markers
+    assert "Universe" in body
+    assert "⭐" in body  # at least one anchor must be marked
+    # Activity rows
+    assert "Alerts" in body
+    assert "Last drill-in" in body
+    assert kwargs.get("parse_mode") == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_thesis_command_normalizes_whitespace_and_dashes(monkeypatch):
+    """User types '/thesis ai cake' or '/thesis ai-cake' — both should
+    resolve to ai_cake (case + space + dash insensitive)."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/thesis AI CAKE")
+    context = SimpleNamespace(args=["AI", "CAKE"])
+    await tg.thesis_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    # No "not found" — the resolver normalised "AI CAKE" → "ai_cake".
+    assert "not found" not in args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_thesis_command_renders_general_with_empty_universe(monkeypatch):
+    """The general thesis has empty universe — must say so explicitly so
+    the user understands it's the catch-all rather than a misconfigured one."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/thesis general")
+    context = SimpleNamespace(args=["general"])
+    await tg.thesis_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    body = args[0]
+    assert "general" in body
+    assert "any ticker" in body or "empty" in body
+
+
+@pytest.mark.asyncio
+async def test_thesis_command_dropped_for_unallowed(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=999, text="/thesis ai_cake")
+    context = SimpleNamespace(args=["ai_cake"])
+    await tg.thesis_command(update, context)
+    update.message.reply_text.assert_not_called()
+
+
+# --- NL fallback (Step 10f) -----------------------------------------------
+
+
+def _stub_router_decision(monkeypatch, *, intent, args=None, confidence=0.9):
+    """Replace agents.router.classify with a stub returning a fixed
+    RouterDecision. Avoids a real LLM call so NL tests are fast + offline."""
+    from utils.schemas import RouterDecision
+
+    decision = RouterDecision(
+        intent=intent, args=args or {}, confidence=confidence
+    )
+
+    async def _classify(text):
+        return decision
+
+    from agents import router as r
+    monkeypatch.setattr(r, "classify", _classify)
+    return decision
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_low_confidence_replies_with_clarification(monkeypatch):
+    """Below 0.7 confidence the bot must NOT dispatch — instead reply with
+    the clarification menu so the user picks the right command."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(monkeypatch, intent="unknown", confidence=0.1)
+
+    update = _make_update(chat_id=111, text="hmm")
+    await tg.nl_fallback(update, SimpleNamespace())
+    args, kwargs = update.message.reply_text.call_args
+    body = args[0]
+    assert "Not sure" in body or "clarification" in body.lower() or "Try one of" in body
+    # Must list the canonical commands so the user can self-correct.
+    assert "/drill" in body and "/scan" in body and "/help" in body
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_dispatches_drill_with_ticker(monkeypatch):
+    """High-confidence drill intent → routes to drill_command with
+    context.args = [TICKER] uppercased."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(
+        monkeypatch, intent="drill", args={"ticker": "NVDA"}, confidence=0.92
+    )
+
+    captured: dict = {}
+
+    async def _stub_drill(update, ctx):
+        captured["args"] = list(ctx.args)
+
+    monkeypatch.setattr(tg, "drill_command", _stub_drill)
+
+    update = _make_update(chat_id=111, text="what's NVDA looking like")
+    await tg.nl_fallback(update, SimpleNamespace())
+    assert captured.get("args") == ["NVDA"]
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_drill_resolves_company_name_to_ticker(monkeypatch):
+    """The router prompt teaches Haiku to translate company names
+    (Constellation Energy → CEG). When that succeeds, NL dispatch must
+    pass the resolved TICKER, not the company name, to drill_command."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(
+        monkeypatch, intent="drill", args={"ticker": "CEG"}, confidence=0.9
+    )
+
+    captured: dict = {}
+
+    async def _stub_drill(update, ctx):
+        captured["args"] = list(ctx.args)
+
+    monkeypatch.setattr(tg, "drill_command", _stub_drill)
+
+    update = _make_update(chat_id=111, text="run a drill on Constellation Energy")
+    await tg.nl_fallback(update, SimpleNamespace())
+    assert captured.get("args") == ["CEG"]
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_drill_with_thesis_arg(monkeypatch):
+    """When the router extracts both ticker AND thesis, both must reach
+    drill_command in the right positional order."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(
+        monkeypatch,
+        intent="drill",
+        args={"ticker": "AVGO", "thesis": "ai_cake"},
+        confidence=0.95,
+    )
+
+    captured: dict = {}
+
+    async def _stub_drill(update, ctx):
+        captured["args"] = list(ctx.args)
+
+    monkeypatch.setattr(tg, "drill_command", _stub_drill)
+
+    update = _make_update(chat_id=111, text="drill AVGO on ai cake")
+    await tg.nl_fallback(update, SimpleNamespace())
+    assert captured.get("args") == ["AVGO", "ai_cake"]
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_dispatches_scan_with_no_args(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(monkeypatch, intent="scan", confidence=0.85)
+
+    captured: dict = {}
+
+    async def _stub_scan(update, ctx):
+        captured["called"] = True
+        captured["args"] = list(ctx.args)
+
+    monkeypatch.setattr(tg, "scan_command", _stub_scan)
+
+    update = _make_update(chat_id=111, text="anything new today")
+    await tg.nl_fallback(update, SimpleNamespace())
+    assert captured.get("called") is True
+    assert captured.get("args") == []
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_dispatches_status(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(monkeypatch, intent="status", confidence=1.0)
+
+    captured: dict = {}
+
+    async def _stub(update, ctx):
+        captured["called"] = True
+
+    monkeypatch.setattr(tg, "status_command", _stub)
+    update = _make_update(chat_id=111, text="status")
+    await tg.nl_fallback(update, SimpleNamespace())
+    assert captured.get("called") is True
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_dispatches_thesis(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(
+        monkeypatch, intent="thesis", args={"name": "ai_cake"}, confidence=0.9
+    )
+
+    captured: dict = {}
+
+    async def _stub(update, ctx):
+        captured["args"] = list(ctx.args)
+
+    monkeypatch.setattr(tg, "thesis_command", _stub)
+    update = _make_update(chat_id=111, text="remind me what's in ai cake")
+    await tg.nl_fallback(update, SimpleNamespace())
+    assert captured.get("args") == ["ai_cake"]
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_dispatches_note_with_ticker_and_text(monkeypatch):
+    """/note expects positional args [TICKER, *text_words] — verify the
+    router's `{ticker, text}` dict is correctly translated to that shape."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(
+        monkeypatch,
+        intent="note",
+        args={"ticker": "NVDA", "text": "trim 20% if Q3 misses"},
+        confidence=0.85,
+    )
+
+    captured: dict = {}
+
+    async def _stub(update, ctx):
+        captured["args"] = list(ctx.args)
+
+    monkeypatch.setattr(tg, "note_command", _stub)
+    update = _make_update(chat_id=111, text="trim NVDA 20% if Q3 misses")
+    await tg.nl_fallback(update, SimpleNamespace())
+    # First arg must be ticker, remaining args reassemble to the note text.
+    args = captured.get("args") or []
+    assert args[0] == "NVDA"
+    assert " ".join(args[1:]) == "trim 20% if Q3 misses"
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_note_missing_text_replies_with_clarification(monkeypatch):
+    """Router gave us a note intent but no text arg — we must NOT pass an
+    empty body to /note (which would create an empty Notion paragraph).
+    Reply with a clarification instead."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(
+        monkeypatch, intent="note", args={"ticker": "NVDA"}, confidence=0.85
+    )
+
+    captured: dict = {"called": False}
+
+    async def _stub(update, ctx):
+        captured["called"] = True
+
+    monkeypatch.setattr(tg, "note_command", _stub)
+    update = _make_update(chat_id=111, text="note about NVDA")
+    await tg.nl_fallback(update, SimpleNamespace())
+    assert captured["called"] is False, "must NOT dispatch /note without text"
+    # And the user must see a hint to retry properly.
+    args, _ = update.message.reply_text.call_args
+    assert "ticker" in args[0].lower() and "text" in args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_analyze_explains_step_10e(monkeypatch):
+    """/analyze isn't built yet — NL path must give the same honest UX
+    as the inline keyboard's 'Synthesize custom' button."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(
+        monkeypatch,
+        intent="analyze",
+        args={"topic": "defense semis"},
+        confidence=0.9,
+    )
+
+    update = _make_update(chat_id=111, text="analyze defense semis")
+    await tg.nl_fallback(update, SimpleNamespace())
+    args, _ = update.message.reply_text.call_args
+    body = args[0]
+    assert "10e" in body or "not built" in body.lower()
+    # Tell the user the workable paths until /analyze ships.
+    assert "/drill" in body and "general" in body
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_dispatches_help(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(monkeypatch, intent="help", confidence=1.0)
+
+    captured: dict = {}
+
+    async def _stub(update, ctx):
+        captured["called"] = True
+
+    monkeypatch.setattr(tg, "help_command", _stub)
+    update = _make_update(chat_id=111, text="help")
+    await tg.nl_fallback(update, SimpleNamespace())
+    assert captured.get("called") is True
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_dropped_for_unallowed(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    _stub_router_decision(monkeypatch, intent="drill", args={"ticker": "X"})
+
+    captured: dict = {"called": False}
+
+    async def _stub(update, ctx):
+        captured["called"] = True
+
+    monkeypatch.setattr(tg, "drill_command", _stub)
+    update = _make_update(chat_id=999, text="drill X")
+    await tg.nl_fallback(update, SimpleNamespace())
+    assert captured["called"] is False
+    update.message.reply_text.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_nl_fallback_empty_text_is_a_noop(monkeypatch):
+    """Empty / whitespace input must not waste an LLM classification call."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    called = {"n": 0}
+
+    async def _classify(text):
+        called["n"] += 1
+        from utils.schemas import RouterDecision
+        return RouterDecision(intent="unknown", args={}, confidence=0.0)
+
+    from agents import router as r
+    monkeypatch.setattr(r, "classify", _classify)
+
+    update = _make_update(chat_id=111, text="   ")
+    await tg.nl_fallback(update, SimpleNamespace())
+    assert called["n"] == 0, "empty input must short-circuit before classify"
+    update.message.reply_text.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_drill_command_unknown_thesis_explains(monkeypatch):
     """User typed /drill NVDA fake → reject with 'thesis not found', show
