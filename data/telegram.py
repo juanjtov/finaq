@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Callable, Coroutine
 from urllib.parse import urlencode
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -603,8 +603,18 @@ def _build_streamlit_url(ticker: str, thesis_slug: str, run_id: str | None) -> s
     "Halo · NVDA" can't sneak a `·` (or any other unsafe character) into
     the URL — Telegram's HTML parser refuses to make malformed URLs
     tappable, which the user observed first-hand.
+
+    `localhost` is rewritten to `127.0.0.1` because **Telegram silently
+    strips `<a href>` tags pointing at `localhost`** (server-side, before
+    the message reaches the client) — verified empirically by sending
+    test messages and inspecting the API response's `entities` array.
+    Telegram accepts `127.0.0.1` links untouched, and Streamlit binds to
+    both 127.0.0.1 and localhost by default, so the rewrite is
+    transparent on macOS. The Step 12 droplet deployment will set
+    STREAMLIT_PUBLIC_URL to a real public host, eliminating this branch.
     """
     base = os.environ.get("STREAMLIT_PUBLIC_URL", "http://localhost:8501").rstrip("/")
+    base = base.replace("://localhost", "://127.0.0.1")
     params: dict[str, str] = {"ticker": ticker, "thesis": thesis_slug}
     if run_id:
         params["run_id"] = run_id
@@ -756,20 +766,16 @@ def _format_drill_summary(state: dict, run_id: str, thesis_slug: str | None = No
 
     if lines and lines[-1] != "":
         lines.append("")
-    # Telegram (especially the iOS client) refuses to render
-    # `http://localhost:...` as a tappable link because the host doesn't
-    # resolve from the phone. When STREAMLIT_PUBLIC_URL isn't configured,
-    # surface that explicitly so the user knows to open it from their Mac
-    # rather than wondering why the "link" doesn't open. Step 12 sets
-    # STREAMLIT_PUBLIC_URL on the droplet and this branch goes away.
-    if "localhost" in streamlit_url or "127.0.0.1" in streamlit_url:
-        lines.append(
-            f'🔗 Streamlit (Mac only): <code>{_h(streamlit_url)}</code>'
-        )
-    else:
-        lines.append(
-            f'🔗 <a href="{_h(streamlit_url)}">Open in Streamlit</a>'
-        )
+    # Always render as an <a> tag so the link is tappable. macOS Telegram
+    # opens localhost URLs fine; iOS clients refuse, so when the URL is
+    # localhost we tag it "(Mac only)" so phone users know to switch.
+    # Step 12 sets STREAMLIT_PUBLIC_URL on the droplet and the suffix
+    # goes away.
+    is_localhost = "localhost" in streamlit_url or "127.0.0.1" in streamlit_url
+    suffix = " <i>(Mac only)</i>" if is_localhost else ""
+    lines.append(
+        f'🔗 <a href="{_h(streamlit_url)}">Open in Streamlit</a>{suffix}'
+    )
     if notion_url:
         lines.append(f'🗒️ <a href="{_h(notion_url)}">View in Notion</a>')
 
@@ -1557,6 +1563,44 @@ async def theses_command(
 # --- Bot bootstrapping ------------------------------------------------------
 
 
+# --- Bot commands metadata (Step 10g) -------------------------------------
+#
+# Registered with Telegram on startup so the `/`-autocomplete in the chat
+# UI shows every command + a one-line description. Telegram caches this
+# server-side; we re-register on every bot start to pick up edits.
+#
+# Command names: lowercase letters / digits / underscores, 1-32 chars.
+# Descriptions: 1-256 chars. Must match the slash-command handlers
+# registered in `build_app`.
+
+BOT_COMMANDS: list[tuple[str, str]] = [
+    ("drill",   "Run a full drill-in (TICKER [thesis], 5 min)"),
+    ("scan",    "Surface alerts caught since the last check"),
+    ("status",  "System health: triage, alerts, errors"),
+    ("note",    "Drop a note for Triage to weigh (TICKER text)"),
+    ("thesis",  "Show one thesis's universe + recent activity"),
+    ("theses",  "List all available theses"),
+    ("help",    "Show the welcome message"),
+]
+
+
+async def _register_commands(application: Application) -> None:
+    """Post-init hook: register `BOT_COMMANDS` with Telegram so the
+    `/`-autocomplete dropdown shows them in the chat UI. Idempotent —
+    safe to re-run on every bot start. Failures are logged but don't
+    crash startup (the bot still works without autocomplete; users can
+    type commands by hand)."""
+    commands = [BotCommand(name, desc) for name, desc in BOT_COMMANDS]
+    try:
+        await application.bot.set_my_commands(commands)
+        logger.info(
+            f"[telegram] registered {len(commands)} commands with Telegram "
+            f"for /-autocomplete"
+        )
+    except Exception as e:
+        logger.warning(f"[telegram] set_my_commands failed: {e}")
+
+
 def build_app(*, token: str | None = None, allowlist: str | None = None) -> Application:
     """Build a configured `Application`. Reads token + allowlist from env
     by default; the kwargs let tests inject values without monkeypatching
@@ -1591,7 +1635,12 @@ def build_app(*, token: str | None = None, allowlist: str | None = None) -> Appl
     _allowed_chat_ids.clear()
     _allowed_chat_ids.update(parsed)
 
-    app = Application.builder().token(token).build()
+    # post_init runs once after the Application is initialised but before
+    # polling starts — perfect for registering the command list with
+    # Telegram so `/`-autocomplete shows them in the chat UI.
+    app = (
+        Application.builder().token(token).post_init(_register_commands).build()
+    )
     # /help and /start both show the welcome message — Telegram users hit
     # /start automatically when they tap "Start" on a fresh chat with the
     # bot, so binding both keeps the first-contact flow smooth.

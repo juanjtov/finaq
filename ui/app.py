@@ -306,9 +306,17 @@ def render_sidebar() -> dict:
     # always shows the most recent run and previous snapshots are inaccessible.
     history = _list_run_history(ticker, thesis_slug) if ticker else []
     history_choice: str | None = None
+    # If the URL has `?run_id=...`, the user tapped a Telegram link
+    # pointing at a specific snapshot — preselect that history entry so
+    # the dashboard auto-loads exactly the run they were looking at,
+    # not just the latest.
+    url_run_id = (params.get("run_id") or "").strip()
     if history:
         labels = ["Latest"]
-        for entry in history:
+        # Build labels first so we can compute the default index that
+        # matches `url_run_id` (if any).
+        history_index_default = 0
+        for i, entry in enumerate(history):
             ts = datetime.fromtimestamp(entry["mtime"]).strftime("%Y-%m-%d %H:%M")
             conv = entry.get("convergence")
             conv_str = f"conv={conv:.2f}" if isinstance(conv, (int, float)) else "—"
@@ -316,10 +324,24 @@ def render_sidebar() -> dict:
                 f"{ts} · {entry.get('confidence', '?')} · {conv_str} "
                 f"· {entry['run_id'][:8]}"
             )
+            # `url_run_id` may be the full UUID OR just the 8-char prefix
+            # the bot embeds in URLs. Match both.
+            if url_run_id and (
+                entry["run_id"] == url_run_id
+                or entry["run_id"].startswith(url_run_id)
+            ):
+                history_index_default = i + 1  # +1 because labels[0] is "Latest"
+        if url_run_id and history_index_default == 0:
+            # URL had a run_id but it doesn't match any saved file. Tell
+            # the user instead of silently falling through to the latest.
+            st.sidebar.warning(
+                f"Requested run_id `{url_run_id[:8]}` not found on disk — "
+                f"showing the latest instead."
+            )
         picked = st.sidebar.selectbox(
             "Run history",
             labels,
-            index=0,
+            index=history_index_default,
             help="Load a past drill-in for this ticker × thesis. "
             "Each run is now stored as its own file (no overwriting).",
         )

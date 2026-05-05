@@ -318,13 +318,14 @@ def test_format_drill_summary_carries_all_required_sections(monkeypatch):
     # Action
     assert "Action:" in out
     assert "Hold existing exposure" in out
-    # Links — Streamlit gets a `<code>` block in localhost mode (iOS
-    # Telegram won't render http://localhost as a tappable link).
-    # Ticker / thesis / run_id are still in the URL string.
+    # Links — Streamlit is always rendered as a tappable <a href> so
+    # macOS Telegram opens it on tap (iOS users get a "(Mac only)" hint
+    # appended in the localhost branch).
     assert "ticker=NVDA" in out
     assert "thesis=ai_cake" in out
     assert "run_id=abc12345-deadbeef" in out
-    assert "Streamlit (Mac only)" in out
+    assert "Open in Streamlit</a>" in out
+    assert "(Mac only)" in out  # localhost suffix
     # Notion is a real public URL → tappable anchor tag.
     assert "<a href=" in out
     assert "View in Notion</a>" in out
@@ -345,19 +346,32 @@ def test_format_drill_summary_renders_streamlit_as_link_when_public_url_set(
     assert "Mac only" not in out
 
 
-def test_format_drill_summary_warns_about_localhost_fallback(monkeypatch):
-    """Regression for the bug we observed live: an `http://localhost:...`
-    URL inside an `<a href>` looks tappable to the formatter but iOS
-    Telegram refuses to make it tappable from a phone, so the link
-    appeared 'missing' to the user. The localhost branch now renders the
-    URL as `<code>` text with a 'Mac only' hint instead — honest UX."""
+def test_format_drill_summary_uses_127_not_localhost_in_url(monkeypatch):
+    """Telegram silently strips `<a href>` tags pointing at `localhost`
+    (verified by sending test messages and inspecting the API response's
+    entities array — localhost links return zero entities). `127.0.0.1`
+    is accepted untouched. Streamlit binds to both, so the rewrite is
+    transparent on macOS. Without this, the user sees the link text but
+    Telegram refuses to make it tappable.
+
+    Pin the rewrite so a future edit can't reintroduce the localhost
+    string and re-break the tap-to-open flow."""
     monkeypatch.delenv("STREAMLIT_PUBLIC_URL", raising=False)
     out = tg._format_drill_summary(_DEMO_STATE_FIXTURE, run_id="abc", thesis_slug="ai_cake")
-    # Localhost URL should NOT be inside an <a> tag — the tag is the lie
-    # iOS won't render. It IS inside <code> so the user can copy-paste.
-    assert "<a href=\"http://localhost" not in out
-    assert "<code>http://localhost:8501" in out
-    assert "Mac only" in out
+    # The bare string `localhost` must NOT appear inside the rendered
+    # Streamlit URL — Telegram would strip the link entity if it did.
+    # Extract URLs from <a href="..."> and check.
+    import re
+    href_urls = re.findall(r'href="([^"]+)"', out)
+    streamlit_urls = [u for u in href_urls if "ticker=" in u]
+    assert streamlit_urls, "expected at least one Streamlit URL"
+    for u in streamlit_urls:
+        assert "localhost" not in u, (
+            f"Streamlit URL contains 'localhost' which Telegram strips: {u!r}"
+        )
+        assert "127.0.0.1" in u, f"Streamlit URL must use 127.0.0.1: {u!r}"
+    # And the (Mac only) hint still appears so iOS users know to switch.
+    assert "(Mac only)" in out
 
 
 def test_format_drill_summary_does_not_emit_legacy_markdown_syntax(monkeypatch):
@@ -414,13 +428,16 @@ def test_build_streamlit_url_url_encodes_special_chars(monkeypatch):
     assert "abc+123" in url or "abc%20123" in url
 
 
-def test_format_drill_summary_falls_back_to_localhost_streamlit(monkeypatch):
-    """When STREAMLIT_PUBLIC_URL isn't set (Phase 0 / 10c — Step 12 will
-    set it on the droplet), links use localhost. This is a Mac-only useful
-    link for now, which we accept until reachability ships."""
+def test_format_drill_summary_falls_back_to_127_streamlit(monkeypatch):
+    """When STREAMLIT_PUBLIC_URL isn't set (Phase 0 — Step 12 sets it on
+    the droplet), the link uses `127.0.0.1` rather than `localhost`.
+    Telegram strips localhost-targeted `<a href>` tags server-side; the
+    127 form survives. Streamlit binds to both, so the rewrite is
+    transparent on macOS."""
     monkeypatch.delenv("STREAMLIT_PUBLIC_URL", raising=False)
     out = tg._format_drill_summary(_DEMO_STATE_FIXTURE, run_id="abc12345")
-    assert "http://localhost:8501" in out
+    assert "http://127.0.0.1:8501" in out
+    assert "http://localhost:8501" not in out
 
 
 def test_format_drill_summary_uses_public_url_when_set(monkeypatch):
@@ -434,9 +451,9 @@ def test_format_drill_summary_omits_notion_when_url_missing(monkeypatch):
     state = {**_DEMO_STATE_FIXTURE, "notion_report_url": ""}
     out = tg._format_drill_summary(state, run_id="abc", thesis_slug="ai_cake")
     assert "View in Notion" not in out
-    # Streamlit URL is still present — just rendered as <code> in the
-    # localhost branch since iOS won't tap localhost links.
-    assert "Streamlit" in out
+    # Streamlit link is always present as a tappable <a href> — macOS
+    # Telegram opens localhost URLs fine when wrapped this way.
+    assert "Open in Streamlit</a>" in out
     assert "ticker=NVDA" in out
 
 
@@ -516,6 +533,29 @@ def test_build_streamlit_url_omits_run_id_when_absent(monkeypatch):
     monkeypatch.setenv("STREAMLIT_PUBLIC_URL", "https://example.com/")  # trailing slash
     url = tg._build_streamlit_url("NVDA", "ai_cake", None)
     assert url == "https://example.com/?ticker=NVDA&thesis=ai_cake"
+
+
+def test_build_streamlit_url_rewrites_localhost_to_127(monkeypatch):
+    """Telegram strips `<a href>` tags pointing at `localhost` server-side
+    (verified empirically). `127.0.0.1` survives. Streamlit binds to both,
+    so we rewrite at URL-build time. Pin the rewrite so a future edit
+    can't reintroduce the localhost string."""
+    # Default fallback (no STREAMLIT_PUBLIC_URL set) — must rewrite.
+    monkeypatch.delenv("STREAMLIT_PUBLIC_URL", raising=False)
+    url = tg._build_streamlit_url("NVDA", "ai_cake", None)
+    assert "127.0.0.1" in url
+    assert "localhost" not in url
+    # Explicit localhost in env var — also rewritten so the bot dev
+    # workflow doesn't trip the same Telegram strip.
+    monkeypatch.setenv("STREAMLIT_PUBLIC_URL", "http://localhost:8501")
+    url = tg._build_streamlit_url("NVDA", "ai_cake", None)
+    assert "127.0.0.1" in url
+    assert "localhost" not in url
+    # Public URL untouched — the rewrite only fires for localhost hosts.
+    monkeypatch.setenv("STREAMLIT_PUBLIC_URL", "https://finaq.example.com")
+    url = tg._build_streamlit_url("NVDA", "ai_cake", None)
+    assert "finaq.example.com" in url
+    assert "127.0.0.1" not in url
 
 
 # --- /scan handler --------------------------------------------------------
@@ -1498,6 +1538,77 @@ async def test_drill_thesis_callback_routes_to_picked_slug(monkeypatch):
     edit.assert_called_once()
     assert captured["ticker"] == "CEG"
     assert captured["thesis_slug"] == "nvda_halo"
+
+
+# --- BOT_COMMANDS / set_my_commands (Step 10g) ----------------------------
+
+
+def test_bot_commands_registry_covers_every_handler():
+    """The /-autocomplete list must match the actual CommandHandler set
+    registered in build_app. If we add a new command + forget to update
+    BOT_COMMANDS, users won't see it in the autocomplete dropdown.
+
+    Pin the symmetric set so a future edit is a one-stop change."""
+    from telegram import BotCommand
+
+    # Every entry must be a valid (name, description) pair within
+    # Telegram's constraints.
+    assert tg.BOT_COMMANDS, "registry empty — autocomplete won't work"
+    for name, desc in tg.BOT_COMMANDS:
+        assert 1 <= len(name) <= 32
+        assert name.islower()
+        assert all(c.isalnum() or c == "_" for c in name)
+        assert 1 <= len(desc) <= 256
+
+    # Names cover every real CommandHandler we wire up. /start is bound to
+    # help_command but doesn't need to appear in the menu (Telegram
+    # auto-shows it for first-contact). All other commands MUST be there.
+    expected_names = {"drill", "scan", "status", "note", "thesis", "theses", "help"}
+    actual_names = {name for name, _ in tg.BOT_COMMANDS}
+    missing = expected_names - actual_names
+    assert not missing, f"BOT_COMMANDS missing: {sorted(missing)}"
+
+
+@pytest.mark.asyncio
+async def test_register_commands_calls_set_my_commands(monkeypatch):
+    """`_register_commands` builds a list of telegram.BotCommand objects
+    and ships it via `app.bot.set_my_commands(...)`."""
+    from telegram import BotCommand
+
+    captured: dict = {}
+
+    set_my_commands_mock = AsyncMock()
+
+    class _StubBot:
+        async def set_my_commands(self, commands):
+            captured["commands"] = list(commands)
+
+    class _StubApp:
+        bot = _StubBot()
+
+    await tg._register_commands(_StubApp())
+    sent = captured.get("commands") or []
+    assert len(sent) == len(tg.BOT_COMMANDS)
+    for cmd in sent:
+        assert isinstance(cmd, BotCommand)
+    sent_names = [c.command for c in sent]
+    assert sent_names == [name for name, _ in tg.BOT_COMMANDS]
+
+
+@pytest.mark.asyncio
+async def test_register_commands_swallows_telegram_errors(monkeypatch):
+    """A Telegram outage during set_my_commands must not crash bot startup
+    — the bot still works without autocomplete (users type by hand)."""
+
+    class _BoomBot:
+        async def set_my_commands(self, commands):
+            raise RuntimeError("telegram 502")
+
+    class _StubApp:
+        bot = _BoomBot()
+
+    # Should not raise.
+    await tg._register_commands(_StubApp())
 
 
 @pytest.mark.asyncio
