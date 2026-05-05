@@ -104,7 +104,7 @@ This is the section that earns trust with the technical reader. Most LLM apps sh
 
 **Tier 1 — Deterministic.** Substring faithfulness on the first 60 alphanumeric characters of every quote against retrieved chunks (`utils/rag_eval.py`). Citation-accession existence check. Recall@K on 8 hand-curated golden queries (`tests/eval/golden_queries.py`) including "Hopper architecture data-center demand", "AI Diffusion export control rule impact", "Mellanox networking technology integration", "supply constraints Blackwell ramp". Always-on, zero LLM cost. Bar: ≥75% recall@K. Persists to `data_cache/eval/runs/{timestamp}__golden_recall_at_k.json`.
 
-**Tier 2 — LLM-as-judge.** Per-chunk relevance scoring on `NONE` / `WEAK` / `PARTIAL` / `HIGH` labels (categorical labels are model-stable; integer scales are not). Rationale comes **before** label in the JSON schema, so the autoregressive judge reasons first and commits second. Computes `precision@K`, `NDCG@K`, `MRR`. ~64 judge calls per full run, ~$0.10–0.15 with Haiku-tier model. Gated `pytest -m eval`.
+**Tier 2 — LLM-as-judge.** Per-chunk relevance scoring on `NONE` / `WEAK` / `PARTIAL` / `HIGH` labels (categorical labels are model-stable; integer scales are not). Rationale comes **before** label in the JSON schema, so the autoregressive judge reasons first and commits second. Computes `precision@K`, `NDCG@K`, `MRR`. ~64 judge calls per full run, ~$0.10–0.15 with a cheap-tier model assigned to `MODEL_JUDGE`. Gated `pytest -m eval`.
 
 **Tier 3 — RAGAS framework.** `faithfulness` + `answer_relevancy` + `context_precision` + `context_recall` over real agent output. Same judge model wired through LangChain's `BaseChatModel`. ~$0.50–1.50 per run. Gated `pytest -m eval`.
 
@@ -172,7 +172,7 @@ Plus: PDF export with the brand palette (sage `#2D4F3A` / parchment `#F4ECDC`), 
 | Page                | What it does                                                                                                                            |
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | **Dashboard**       | Main drill-in view: synthesis report, Monte Carlo histogram, per-agent expanders, PDF download.                                          |
-| **Direct Agent**    | Talk to one agent at a time. Re-run a single step or ask a free-text question scoped to that agent's output (Haiku-tier QA, ~$0.001 each). |
+| **Direct Agent**    | Talk to one agent at a time. Re-run a single step or ask a free-text question scoped to that agent's output (cheap-tier QA via `MODEL_AGENT_QA`, ~$0.001 each). |
 | **New Thesis**      | Form-based thesis creator. Pydantic-validated, writes to `theses/<slug>.json`.                                                          |
 | **Architecture**    | Live snapshot — LangGraph topology, agent cards with **current** `MODEL_*` env strings, data sources, eval tiers, brand palette. Never rots. |
 | **Methodology**     | Per-thesis valuation parameters with rationale, Owner-Earnings DCF formula, full `FINANCE_ASSUMPTIONS.md` rendered.                     |
@@ -212,7 +212,7 @@ A README readers can trust is one that admits gaps:
 - **Cross-encoder re-ranking** is intentionally excluded — adds latency and cost beyond what RRF already buys you.
 - **Risk does not feed back into Monte Carlo.** Phase 0 simplification — Risk and MC are independent, both feeding Synthesis side-by-side. Future work could let MC tail-risk calibrate risk thresholds.
 - **Single-user, no auth, no multi-tenancy.** Built for one investor. Multi-tenant deployments would require auth, isolation, and rate-limit layers that don't exist.
-- **Q&A regex recovery** drops citations on truncated JSON in rare cases when the Haiku judge hits max_tokens mid-response. Answer prose is preserved.
+- **Q&A regex recovery** drops citations on truncated JSON in rare cases when the Q&A model hits max_tokens mid-response. Answer prose is preserved.
 
 ---
 

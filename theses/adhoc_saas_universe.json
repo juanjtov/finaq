@@ -1,0 +1,103 @@
+{
+  "name": "SaaS Universe (ad-hoc)",
+  "summary": "Software-as-a-service names are evaluated on recurring revenue durability, net retention, and efficient growth rather than near-term hardware-like cyclicality. The core bet is that best-in-class SaaS platforms can compound ARR and free cash flow through mission-critical workflows, while weaker names face pricing pressure, longer sales cycles, and rising scrutiny on profitability. This universe groups the most comparable US-listed cloud software vendors for cross-comparing growth, margins, and valuation.",
+  "anchor_tickers": [
+    "SNOW",
+    "DDOG",
+    "ZSC"
+  ],
+  "universe": [
+    "SNOW",
+    "DDOG",
+    "ZSC",
+    "CRM",
+    "NOW",
+    "MDB",
+    "OKTA",
+    "FROG",
+    "S",
+    "PATH",
+    "DOCU",
+    "DT",
+    "TWLO",
+    "NCNO"
+  ],
+  "relationships": [
+    {
+      "from_": "CRM",
+      "to": "NOW",
+      "type": "competitor",
+      "note": "Both sell enterprise workflow software and expand through cross-sell into adjacent IT budgets"
+    },
+    {
+      "from_": "OKTA",
+      "to": "ZSC",
+      "type": "competitor",
+      "note": "Identity/security platforms overlap in zero-trust and access-control spend"
+    },
+    {
+      "from_": "DDOG",
+      "to": "FROG",
+      "type": "competitor",
+      "note": "Both monitor cloud applications and infrastructure, competing for observability budgets"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "arr_growth_yoy",
+      "operator": ">",
+      "value": 20.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "net_retention_rate",
+      "operator": "<",
+      "value": 110.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "gross_margin_change_yoy",
+      "operator": "abs >",
+      "value": 200.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "free_cash_flow_margin",
+      "operator": "<",
+      "value": 10.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_equity",
+      "operator": ">",
+      "value": 0.5,
+      "unit": "ratio"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "going concern",
+      "unit": "text"
+    },
+    {
+      "signal": "customer_count_growth_yoy",
+      "operator": "<",
+      "value": 5.0,
+      "unit": "percent"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.06,
+    "erp_basis": "SaaS carries higher multiple and execution risk than the broad market, so a modest risk premium uplift is appropriate.",
+    "terminal_growth_rate": 0.03,
+    "terminal_growth_basis": "Leading SaaS vendors can grow above GDP for long periods, but terminal growth should still converge toward nominal economic growth.",
+    "discount_rate_floor": 0.08,
+    "discount_rate_cap": 0.14
+  }
+}

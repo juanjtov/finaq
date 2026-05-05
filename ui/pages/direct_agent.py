@@ -8,7 +8,7 @@ Two modes per agent:
   - **Ask** (free-text question): runs `agents.qa.ask()` over the agent's
     most recent cached drill-in (or runs Filings RAG fresh if no cached
     state exists). Cheaper than `run()` because it uses MODEL_AGENT_QA
-    (Haiku-tier).
+    (cheap-tier model resolved via `MODEL_AGENT_QA`).
 
 Agents supported: fundamentals, filings, news, risk. Synthesis and Monte
 Carlo are excluded — they're integrators / pure compute, no useful direct
@@ -73,8 +73,10 @@ SUGGESTED_QUESTIONS: dict[str, list[str]] = {
 }
 
 
-@st.cache_data(show_spinner=False)
 def _list_thesis_slugs() -> list[str]:
+    """Not cached — adhoc theses created via Telegram `/analyze` should
+    appear in this dropdown immediately. Same rationale as
+    `ui/app.py:list_thesis_slugs`."""
     return sorted(p.stem for p in THESES_DIR.glob("*.json"))
 
 

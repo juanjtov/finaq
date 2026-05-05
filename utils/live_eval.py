@@ -9,7 +9,8 @@ production-quality data alongside test-fixture data.
 
 Gated by `EVAL_LIVE_DRILL_INS=true` in `.env` (default OFF). Cost is
 ~$0.012-0.025 per drill-in — 3 subqueries × ~8 chunks/subquery × ~$0.0005
-per Haiku-tier judge call. Fired in a daemon thread by `ui/_runner.py`
+per cheap-tier judge call (model resolved via `MODEL_JUDGE`). Fired in
+a daemon thread by `ui/_runner.py`
 after the drill-in's user-visible render completes, so the dashboard isn't
 blocked.
 

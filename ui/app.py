@@ -92,8 +92,12 @@ st.set_page_config(
 # --- Helpers ----------------------------------------------------------------
 
 
-@st.cache_data(show_spinner=False)
 def list_thesis_slugs() -> list[str]:
+    """Glob `theses/*.json`. NOT cached — adhoc theses created via the
+    Telegram `/analyze` flow land in this directory while the dashboard
+    is running, and we want them to appear in the dropdown without the
+    user having to tap "🔄 Reload (clear cache)". The glob is microseconds
+    so the cache wasn't worth the staleness."""
     return sorted(p.stem for p in THESES_DIR.glob("*.json"))
 
 

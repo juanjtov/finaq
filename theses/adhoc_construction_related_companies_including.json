@@ -1,0 +1,107 @@
+{
+  "name": "Construction Materials and Vendors (ad-hoc)",
+  "summary": "Companies providing essential construction materials and services, leveraged to infrastructure spending cycles. The thesis centers on pricing power in commoditized products (aggregates, cement), exposure to public infrastructure bills, and margin resilience against input cost volatility. Key risks include interest-rate sensitivity in residential construction and energy-intensive production economics.",
+  "anchor_tickers": [
+    "VMC",
+    "MLM",
+    "SHW"
+  ],
+  "universe": [
+    "VMC",
+    "MLM",
+    "SHW",
+    "NUE",
+    "FCX",
+    "CX",
+    "CAT",
+    "OC",
+    "BECN",
+    "EXP",
+    "AA",
+    "XYL"
+  ],
+  "relationships": [
+    {
+      "from_": "SHW",
+      "to": "BECN",
+      "type": "supplier",
+      "note": "BECN is largest distributor of Sherwin-Williams architectural paints"
+    },
+    {
+      "from_": "VMC",
+      "to": "CAT",
+      "type": "customer",
+      "note": "Vulcan Materials uses Caterpillar equipment in quarry operations"
+    },
+    {
+      "from_": "NUE",
+      "to": "AA",
+      "type": "competitor",
+      "note": "Nucor and Alcoa compete in structural building materials"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "infrastructure_revenue_share",
+      "operator": ">",
+      "value": 30.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "energy_cost_per_ton",
+      "operator": ">",
+      "value": 15.0,
+      "unit": "USD"
+    },
+    {
+      "signal": "backlog_growth_yoy",
+      "operator": "<",
+      "value": 5.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "gross_margin_change_yoy",
+      "operator": "abs >",
+      "value": 300.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "debt_to_ebitda",
+      "operator": ">",
+      "value": 3.5,
+      "unit": "x"
+    },
+    {
+      "signal": "roe_ttm",
+      "operator": "<",
+      "value": 10.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "supply chain disruption",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "environmental remediation",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.06,
+    "erp_basis": "Higher than broad market due to construction cyclicality and commodity exposure",
+    "terminal_growth_rate": 0.022,
+    "terminal_growth_basis": "Below GDP trend reflecting mature industry with limited pricing power",
+    "discount_rate_floor": 0.08,
+    "discount_rate_cap": 0.15
+  }
+}

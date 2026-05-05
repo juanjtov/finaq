@@ -481,7 +481,7 @@ FINAQ, why it was chosen, and any later revisions.
 - **Original CLAUDE.md §9.4 spec:** `{"score_0_to_10": int, "top_risks": list, "summary": str}`.
 - **Revised because:** Juan asked whether the 0-10 score was the right primary
   signal. Same anti-pattern as the LLM-judge prompt — numeric scales have
-  unstable semantics across models (a "6" on Sonnet might be a "4" on Haiku).
+  unstable semantics across models (a "6" on one tier might be a "4" on another).
   Categorical labels give a model-stable headline; the integer is *derived*
   for spec-compatibility and quick visualisation.
 - **`top_risks.sources` field added** — every risk lists the worker agent(s)
@@ -628,7 +628,7 @@ FINAQ, why it was chosen, and any later revisions.
   Triage doesn't silently lose data.
 
 - **Why a spine mapping** (vs free-form synthesis): without per-section
-  contracts, Opus drifts — uses MC numbers in Bull case, omits convergent
+  contracts, the synthesis LLM drifts — uses MC numbers in Bull case, omits convergent
   signals from Top risks, etc. The mapping makes drift tractable to test
   (Tier 1 structural tests assert on bullet count, citation graph, MC number
   drift) and explainable (every claim's provenance is one of N typed inputs).
@@ -1043,8 +1043,8 @@ FINAQ, why it was chosen, and any later revisions.
 
 - **Decision:** Each of the four worker agents (fundamentals, filings,
   news, risk) gets a parallel **`ask()`** function alongside `run()`,
-  centralised in `agents/qa.py`. Q&A uses a cheap LLM (`MODEL_AGENT_QA`,
-  Haiku-tier) over the agent's existing structured output — except
+  centralised in `agents/qa.py`. Q&A uses a cheap-tier LLM (model
+  resolved via `MODEL_AGENT_QA`) over the agent's existing structured output — except
   Filings, which re-runs RAG retrieval scoped to the user's question.
 - **Why a separate module** rather than methods on each agent file:
   the four functions share boilerplate (prompt loading, JSON parsing,
@@ -1053,8 +1053,8 @@ FINAQ, why it was chosen, and any later revisions.
   four near-duplicate per-agent methods.
 - **Why a separate model var** (`MODEL_AGENT_QA`): Q&A calls are
   potentially frequent (dashboard interactions, Telegram bot turns) and
-  scoped to a single agent's payload — Haiku is the right tier. Using
-  `MODEL_TRIAGE` would conflate two unrelated cost surfaces.
+  scoped to a single agent's payload — a cheap-tier model is the right
+  fit. Using `MODEL_TRIAGE` would conflate two unrelated cost surfaces.
 - **Reused by Phase 1 Telegram**: the `/fundamentals|/filings|/news|/risk
   TICKER "<question>"` slash commands all dispatch through the same
   `ask()` function — keeping the dashboard and bot capability identical.

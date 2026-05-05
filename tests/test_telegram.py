@@ -511,13 +511,15 @@ def test_resolve_thesis_slug_picks_universe_match():
 
 
 def test_resolve_thesis_slug_returns_none_for_ticker_in_no_universe():
-    """An off-the-radar ticker (e.g. AAPL — not in any of our 3 theses)
-    should return None rather than silently fall through to the first
-    thesis. The drill_command surfaces /analyze as the right tool for
-    ad-hoc topics."""
-    assert tg._resolve_thesis_slug("AAPL", None) is None
+    """An off-the-radar ticker (not in any thesis universe — including
+    auto-generated adhoc_*) should return None rather than silently fall
+    through to the first thesis. The drill_command surfaces /analyze as
+    the right tool for ad-hoc topics. Use a fictional symbol so the test
+    stays robust as the user runs more `/analyze` syntheses (which write
+    `theses/adhoc_*.json` and could otherwise contain real tickers)."""
+    assert tg._resolve_thesis_slug("ZZZZ_NOT_REAL", None) is None
     # Sanity check that the same ticker DOES resolve when explicitly forced
-    assert tg._resolve_thesis_slug("AAPL", "ai_cake") == "ai_cake"
+    assert tg._resolve_thesis_slug("ZZZZ_NOT_REAL", "ai_cake") == "ai_cake"
 
 
 # --- Streamlit URL builder ------------------------------------------------
@@ -1053,7 +1055,7 @@ async def test_nl_fallback_dispatches_drill_with_ticker(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_nl_fallback_drill_resolves_company_name_to_ticker(monkeypatch):
-    """The router prompt teaches Haiku to translate company names
+    """The router prompt teaches the LLM to translate company names
     (Constellation Energy → CEG). When that succeeds, NL dispatch must
     pass the resolved TICKER, not the company name, to drill_command."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
@@ -1201,9 +1203,10 @@ async def test_nl_fallback_note_missing_text_replies_with_clarification(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_nl_fallback_analyze_explains_step_10e(monkeypatch):
-    """/analyze isn't built yet — NL path must give the same honest UX
-    as the inline keyboard's 'Synthesize custom' button."""
+async def test_nl_fallback_analyze_routes_to_analyze_command(monkeypatch):
+    """NL `analyze defense semis` → routes to analyze_command with the
+    topic as positional args. Step 10e replaced the 'coming soon' stub
+    with the real synthesizer."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
     _stub_router_decision(
         monkeypatch,
@@ -1212,13 +1215,18 @@ async def test_nl_fallback_analyze_explains_step_10e(monkeypatch):
         confidence=0.9,
     )
 
+    captured: dict = {}
+
+    async def _stub(update, ctx):
+        captured["args"] = list(ctx.args)
+
+    monkeypatch.setattr(tg, "analyze_command", _stub)
+
     update = _make_update(chat_id=111, text="analyze defense semis")
     await tg.nl_fallback(update, SimpleNamespace())
-    args, _ = update.message.reply_text.call_args
-    body = args[0]
-    assert "10e" in body or "not built" in body.lower()
-    # Tell the user the workable paths until /analyze ships.
-    assert "/drill" in body and "general" in body
+    # Topic is split on whitespace and passed as positional args, the
+    # same way Telegram's CommandHandler would split `/analyze defense semis`.
+    assert captured.get("args") == ["defense", "semis"]
 
 
 @pytest.mark.asyncio
@@ -1391,11 +1399,20 @@ async def test_drill_choice_callback_cancel_edits_message(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_drill_choice_callback_analyze_explains_step_10e(monkeypatch):
-    """Analyze button → /analyze isn't built yet (Step 10e). Reply must
-    say so honestly and point at workable paths (run /drill TICKER general
-    or force a thematic thesis) instead of pretending to dispatch."""
+async def test_drill_choice_callback_analyze_acks_synthesis(monkeypatch):
+    """Analyze button → bot acks the synthesis kicking off, then runs
+    `_run_analyze` (which calls the synthesizer in TICKER mode). The
+    detailed dispatch test
+    `test_drill_choice_callback_analyze_runs_synthesizer` covers the
+    end-to-end side; this one just pins that the user sees an ack edit."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    # Stub _run_analyze so the test doesn't actually call OpenRouter.
+    async def _stub(update, *, topic, ticker):
+        return None
+
+    monkeypatch.setattr(tg, "_run_analyze", _stub)
+
     update, edit, answer, _ = _make_callback_query(
         chat_id=111, data="drill_analyze:AAPL"
     )
@@ -1404,10 +1421,9 @@ async def test_drill_choice_callback_analyze_explains_step_10e(monkeypatch):
     edit.assert_called_once()
     args, kwargs = edit.call_args
     body = args[0] if args else kwargs.get("text", "")
-    assert "10e" in body or "not built" in body.lower()
     assert "AAPL" in body
-    # Must point at the workable alternative (drill with general)
-    assert "general" in body
+    # The ack mentions synthesis is happening — no longer "not built".
+    assert "Synthesizing" in body or "synthes" in body.lower()
     assert kwargs.get("parse_mode") == "HTML"
 
 
@@ -1464,8 +1480,13 @@ def test_list_matching_theses_returns_all_universes_excluding_general():
 
 
 def test_list_matching_theses_returns_empty_for_non_universe_ticker():
-    matches = tg._list_matching_theses("AAPL")
-    assert matches == [], "AAPL isn't in any thematic universe"
+    """Fictional ticker that's guaranteed not in any curated thesis OR
+    auto-generated `adhoc_*` thesis. Step 10e introduced ad-hoc theses
+    on disk (e.g. `theses/adhoc_aapl.json` after `/analyze AAPL`), so
+    using AAPL/MSFT/etc. would be brittle as the user runs more
+    syntheses."""
+    matches = tg._list_matching_theses("ZZZZ_NOT_A_REAL_TICKER")
+    assert matches == [], "fictional ticker shouldn't be in any thesis"
 
 
 @pytest.mark.asyncio
@@ -1540,6 +1561,425 @@ async def test_drill_thesis_callback_routes_to_picked_slug(monkeypatch):
     assert captured["thesis_slug"] == "nvda_halo"
 
 
+# --- /analyze (Step 10e) --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_analyze_command_no_args_replies_with_usage(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/analyze")
+    context = SimpleNamespace(args=[])
+    await tg.analyze_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    assert "Usage" in args[0] and "/analyze" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_analyze_command_too_short_topic_rejected(monkeypatch):
+    """1-char topics are too vague — reject before paying $0.05."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/analyze x")
+    context = SimpleNamespace(args=["x"])
+    await tg.analyze_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    assert "too short" in args[0].lower() or "tighter" in args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_analyze_command_dropped_for_unallowed(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=999, text="/analyze defense semis")
+    context = SimpleNamespace(args=["defense", "semis"])
+    await tg.analyze_command(update, context)
+    update.message.reply_text.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_sends_ticker_picker_keyboard_no_auto_drill(monkeypatch):
+    """After Step 10c.7, /analyze must NOT auto-drill the top anchor.
+    Instead it sends an inline keyboard with each anchor as a button so
+    the user picks the ticker explicitly. This prevents the wasted
+    drill-in on a ticker whose filings aren't yet in ChromaDB."""
+    from agents import adhoc_thesis as at_mod
+    from utils.schemas import Thesis
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    fake_thesis = Thesis.model_validate({
+        "name": "Defense semis (ad-hoc)",
+        "summary": "Defense-exposed semis with multi-year backlog visibility.",
+        "anchor_tickers": ["MRCY", "KTOS"],
+        "universe": ["MRCY", "KTOS", "LMT", "RTX", "NOC"],
+        "valuation": {
+            "equity_risk_premium": 0.05,
+            "erp_basis": "test",
+            "terminal_growth_rate": 0.025,
+            "terminal_growth_basis": "test",
+            "discount_rate_floor": 0.07,
+            "discount_rate_cap": 0.12,
+        },
+        "material_thresholds": [
+            {"signal": "roe_ttm", "operator": "<", "value": 12, "unit": "percent"},
+        ],
+    })
+    fake_result = at_mod.AdhocThesisResult(
+        slug="adhoc_defense_semis",
+        thesis=fake_thesis,
+        path=Path("theses/adhoc_defense_semis.json"),
+    )
+
+    async def _stub_synth(**kwargs):
+        return fake_result
+
+    monkeypatch.setattr(at_mod, "synthesize_adhoc_thesis", _stub_synth)
+
+    drill_called: dict = {"n": 0}
+
+    async def _stub_drill(reply_target, ticker, thesis_slug):
+        drill_called["n"] += 1
+
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub_drill)
+
+    update = _make_update(chat_id=111, text="/analyze defense semis")
+    context = SimpleNamespace(args=["defense", "semis"])
+    await tg.analyze_command(update, context)
+
+    # Drill MUST NOT have run (the user hasn't tapped a ticker yet).
+    assert drill_called["n"] == 0
+
+    # The last reply should carry the ticker-picker keyboard with both
+    # anchors as buttons + Cancel.
+    last_kwargs = update.message.reply_text.call_args_list[-1][1]
+    markup = last_kwargs.get("reply_markup")
+    assert markup is not None, "ticker picker keyboard missing"
+    button_data = [
+        btn.callback_data for row in markup.inline_keyboard for btn in row
+    ]
+    assert any(d == "ap:adhoc_defense_semis:MRCY" for d in button_data)
+    assert any(d == "ap:adhoc_defense_semis:KTOS" for d in button_data)
+    assert any(d.startswith("ax:") for d in button_data)
+    button_labels = [
+        btn.text for row in markup.inline_keyboard for btn in row
+    ]
+    # Anchors should be visually marked.
+    assert any("⭐" in lbl and "MRCY" in lbl for lbl in button_labels)
+
+
+@pytest.mark.asyncio
+async def test_analyze_action_callback_pick_shows_action_keyboard(monkeypatch):
+    """User taps a ticker on the picker → bot edits the prompt to
+    show the action keyboard (drill now / ingest first / cancel)."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    # has_ticker → False (not ingested) so both options should appear.
+    from data import chroma as _chroma
+    from data import edgar as _edgar
+
+    monkeypatch.setattr(_chroma, "has_ticker", lambda t: False)
+    monkeypatch.setattr(_edgar, "has_filings_in_unsupported_kinds", lambda t: [])
+
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="ap:adhoc_defense_semis:MRCY"
+    )
+    await tg.analyze_action_callback(update, SimpleNamespace())
+    answer.assert_called_once()
+    edit.assert_called_once()
+    args, kwargs = edit.call_args
+    body = args[0] if args else kwargs.get("text", "")
+    markup = kwargs.get("reply_markup")
+    assert "MRCY" in body
+    assert "not ingested" in body.lower() or "ingest" in body.lower()
+    button_data = [
+        btn.callback_data for row in markup.inline_keyboard for btn in row
+    ]
+    assert any(d == "ad:adhoc_defense_semis:MRCY" for d in button_data)
+    assert any(d == "ai:adhoc_defense_semis:MRCY" for d in button_data)
+    assert any(d.startswith("ab:") for d in button_data)
+    assert any(d.startswith("ax:") for d in button_data)
+
+
+@pytest.mark.asyncio
+async def test_analyze_action_callback_pick_omits_ingest_for_ingested_ticker(
+    monkeypatch,
+):
+    """When the ticker is already ingested, the 'Ingest first' button
+    must NOT appear — it's a no-op and would confuse."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    from data import chroma as _chroma
+    from data import edgar as _edgar
+
+    monkeypatch.setattr(_chroma, "has_ticker", lambda t: True)
+    monkeypatch.setattr(_edgar, "has_filings_in_unsupported_kinds", lambda t: [])
+
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="ap:adhoc_defense_semis:NVDA"
+    )
+    await tg.analyze_action_callback(update, SimpleNamespace())
+    args, kwargs = edit.call_args
+    markup = kwargs.get("reply_markup")
+    button_data = [
+        btn.callback_data for row in markup.inline_keyboard for btn in row
+    ]
+    assert any(d == "ad:adhoc_defense_semis:NVDA" for d in button_data)
+    assert not any(
+        d.startswith("ai:") for d in button_data
+    ), "Ingest button must NOT appear when ticker is already ingested"
+
+
+@pytest.mark.asyncio
+async def test_analyze_action_callback_drill_now_dispatches(monkeypatch):
+    """Tap on 'Drill now' → bot edits prompt + dispatches drill."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    captured: dict = {}
+
+    async def _stub_drill(reply_target, ticker, thesis_slug):
+        captured["ticker"] = ticker
+        captured["thesis_slug"] = thesis_slug
+
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub_drill)
+
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="ad:adhoc_defense_semis:MRCY"
+    )
+    await tg.analyze_action_callback(update, SimpleNamespace())
+    edit.assert_called_once()
+    assert captured.get("ticker") == "MRCY"
+    assert captured.get("thesis_slug") == "adhoc_defense_semis"
+
+
+@pytest.mark.asyncio
+async def test_analyze_action_callback_ingest_then_drill(monkeypatch):
+    """Tap on 'Ingest first, then drill' → bot ingests via
+    `scripts.ingest_universe.ingest_ticker` then dispatches drill."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    ingest_called: dict = {}
+    drill_called: dict = {}
+
+    async def _stub_ingest(ticker):
+        ingest_called["ticker"] = ticker
+        return 42  # chunk count
+
+    async def _stub_drill(reply_target, ticker, thesis_slug):
+        drill_called["ticker"] = ticker
+        drill_called["thesis_slug"] = thesis_slug
+
+    import scripts.ingest_universe as iu
+
+    monkeypatch.setattr(iu, "ingest_ticker", _stub_ingest)
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub_drill)
+
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="ai:adhoc_defense_semis:MRCY"
+    )
+    await tg.analyze_action_callback(update, SimpleNamespace())
+    # Both ingest + drill must have run, in order.
+    assert ingest_called.get("ticker") == "MRCY"
+    assert drill_called.get("ticker") == "MRCY"
+    assert drill_called.get("thesis_slug") == "adhoc_defense_semis"
+    # And the user saw an ingest-status reply (alongside any others).
+    all_replies = [
+        c.args[0] for c in update.callback_query.message.reply_text.call_args_list
+    ]
+    assert any("Ingested" in r or "chunks" in r.lower() for r in all_replies)
+
+
+@pytest.mark.asyncio
+async def test_analyze_action_callback_ingest_failure_falls_through_to_drill(
+    monkeypatch,
+):
+    """Ingestion error must NOT block the drill — the user gets SOMETHING
+    rather than a hung prompt. Failure is surfaced as a reply."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    async def _boom_ingest(ticker):
+        raise RuntimeError("EDGAR rate limit")
+
+    drill_called: dict = {}
+
+    async def _stub_drill(reply_target, ticker, thesis_slug):
+        drill_called["ticker"] = ticker
+
+    import scripts.ingest_universe as iu
+
+    monkeypatch.setattr(iu, "ingest_ticker", _boom_ingest)
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub_drill)
+
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="ai:adhoc_defense_semis:MRCY"
+    )
+    await tg.analyze_action_callback(update, SimpleNamespace())
+    # Drill ran despite ingest failure.
+    assert drill_called.get("ticker") == "MRCY"
+    # And the user saw the failure message.
+    all_replies = [
+        c.args[0] for c in update.callback_query.message.reply_text.call_args_list
+    ]
+    assert any("Ingestion failed" in r or "rate limit" in r for r in all_replies)
+
+
+@pytest.mark.asyncio
+async def test_analyze_action_callback_cancel_edits_message(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="ax:adhoc_defense_semis"
+    )
+    await tg.analyze_action_callback(update, SimpleNamespace())
+    edit.assert_called_once()
+    args, kwargs = edit.call_args
+    body = args[0] if args else kwargs.get("text", "")
+    assert "Cancel" in body or "cancel" in body.lower()
+
+
+@pytest.mark.asyncio
+async def test_analyze_action_callback_back_re_renders_picker(
+    monkeypatch, tmp_path
+):
+    """Tap on 'Back' → bot reloads the thesis from disk + re-renders
+    the ticker-picker keyboard. Same shape as the initial picker."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(tg, "THESES_DIR", tmp_path)
+    # Write a real thesis JSON so _try_load_adhoc_thesis can reload.
+    (tmp_path / "adhoc_defense_semis.json").write_text(
+        json.dumps({
+            "name": "Defense semis (ad-hoc)",
+            "summary": "test summary",
+            "anchor_tickers": ["MRCY", "KTOS"],
+            "universe": ["MRCY", "KTOS", "LMT"],
+            "valuation": {
+                "equity_risk_premium": 0.05,
+                "erp_basis": "x",
+                "terminal_growth_rate": 0.025,
+                "terminal_growth_basis": "x",
+                "discount_rate_floor": 0.07,
+                "discount_rate_cap": 0.12,
+            },
+            "material_thresholds": [
+                {"signal": "roe_ttm", "operator": "<", "value": 12, "unit": "percent"}
+            ],
+        })
+    )
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="ab:adhoc_defense_semis"
+    )
+    await tg.analyze_action_callback(update, SimpleNamespace())
+    edit.assert_called_once()
+    args, kwargs = edit.call_args
+    markup = kwargs.get("reply_markup")
+    button_data = [
+        btn.callback_data for row in markup.inline_keyboard for btn in row
+    ]
+    # Must re-show the ticker picker buttons.
+    assert any(d == "ap:adhoc_defense_semis:MRCY" for d in button_data)
+    assert any(d == "ap:adhoc_defense_semis:KTOS" for d in button_data)
+
+
+@pytest.mark.asyncio
+async def test_analyze_action_callback_dropped_for_unallowed(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=999, data="ad:adhoc_defense_semis:MRCY"
+    )
+    await tg.analyze_action_callback(update, SimpleNamespace())
+    edit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_analyze_synth_failure_replies_gracefully(monkeypatch):
+    """Synthesizer error (vague input, schema fail, LLM outage) → user
+    sees a friendly message, no drill kicked off."""
+    from agents import adhoc_thesis as at_mod
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    fake_result = at_mod.AdhocThesisResult(
+        slug="",
+        thesis=None,  # type: ignore[arg-type]
+        path=Path(),
+        error="input too vague",
+    )
+
+    async def _stub_synth(**kwargs):
+        return fake_result
+
+    monkeypatch.setattr(at_mod, "synthesize_adhoc_thesis", _stub_synth)
+
+    captured: dict = {"called": False}
+
+    async def _stub_run(reply_target, ticker, thesis_slug):
+        captured["called"] = True
+
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub_run)
+
+    update = _make_update(chat_id=111, text="/analyze stocks")
+    context = SimpleNamespace(args=["stocks"])
+    await tg.analyze_command(update, context)
+    assert captured["called"] is False, "must NOT drill on synth failure"
+    args = [c.args[0] for c in update.message.reply_text.call_args_list]
+    assert any("vague" in a.lower() for a in args)
+
+
+@pytest.mark.asyncio
+async def test_drill_choice_callback_analyze_runs_synthesizer(monkeypatch):
+    """The "Synthesize custom" inline-keyboard branch routes to the
+    synthesizer in TICKER mode. Step 10c.7 changed the post-synthesis
+    flow: it no longer auto-drills; it now sends the ticker-picker
+    keyboard. Pin the synthesizer dispatch + assert no auto-drill."""
+    from agents import adhoc_thesis as at_mod
+    from utils.schemas import Thesis
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    fake_thesis = Thesis.model_validate({
+        "name": "Apple (single-name ad-hoc)",
+        "summary": "AAPL drill, single-name.",
+        "anchor_tickers": ["AAPL"],
+        "universe": ["AAPL", "MSFT", "GOOGL"],
+        "valuation": {
+            "equity_risk_premium": 0.05,
+            "erp_basis": "test",
+            "terminal_growth_rate": 0.025,
+            "terminal_growth_basis": "test",
+            "discount_rate_floor": 0.07,
+            "discount_rate_cap": 0.11,
+        },
+        "material_thresholds": [
+            {"signal": "roe_ttm", "operator": "<", "value": 12, "unit": "percent"},
+        ],
+    })
+    fake_result = at_mod.AdhocThesisResult(
+        slug="adhoc_aapl",
+        thesis=fake_thesis,
+        path=Path("theses/adhoc_aapl.json"),
+    )
+
+    captured: dict = {"synth_kwargs": None}
+
+    async def _stub_synth(**kwargs):
+        captured["synth_kwargs"] = kwargs
+        return fake_result
+
+    monkeypatch.setattr(at_mod, "synthesize_adhoc_thesis", _stub_synth)
+
+    drill_called: dict = {"n": 0}
+
+    async def _stub_run(reply_target, ticker, thesis_slug):
+        drill_called["n"] += 1
+
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub_run)
+
+    update, edit, answer, _ = _make_callback_query(
+        chat_id=111, data="drill_analyze:AAPL"
+    )
+    await tg.drill_choice_callback(update, SimpleNamespace())
+
+    # Synthesizer was called in TICKER mode (not topic mode).
+    assert captured["synth_kwargs"] == {"topic": None, "ticker": "AAPL"}
+    # And the drill MUST NOT have run yet — _run_analyze now ends at
+    # the ticker-picker keyboard, not at a drill dispatch.
+    assert drill_called["n"] == 0
+
+
 # --- BOT_COMMANDS / set_my_commands (Step 10g) ----------------------------
 
 
@@ -1563,7 +2003,9 @@ def test_bot_commands_registry_covers_every_handler():
     # Names cover every real CommandHandler we wire up. /start is bound to
     # help_command but doesn't need to appear in the menu (Telegram
     # auto-shows it for first-contact). All other commands MUST be there.
-    expected_names = {"drill", "scan", "status", "note", "thesis", "theses", "help"}
+    expected_names = {
+        "drill", "analyze", "scan", "status", "note", "thesis", "theses", "help"
+    }
     actual_names = {name for name, _ in tg.BOT_COMMANDS}
     missing = expected_names - actual_names
     assert not missing, f"BOT_COMMANDS missing: {sorted(missing)}"

@@ -13,7 +13,7 @@ Costs ~$0.005/judgement × 5 ≈ $0.025/run plus one full Synthesis call. Gated
 `pytest -m eval`.
 
 These tests run synthesis ONCE per test module via a session-scoped fixture
-to avoid re-paying for the Opus call across each judge category.
+to avoid re-paying for the synthesis-LLM call across each judge category.
 """
 
 from __future__ import annotations
@@ -228,7 +228,7 @@ def _stub_full_state() -> dict:
 
 @pytest.fixture(scope="module")
 async def synthesis_result() -> dict:
-    """Run Synthesis once for the whole module — Opus calls are slow + expensive.
+    """Run Synthesis once for the whole module — synthesis LLM calls are slow + expensive.
     All 5 judge tests share this output."""
     state = _stub_full_state()
     result = await synthesis_run(state)

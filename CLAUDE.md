@@ -212,7 +212,7 @@ START → load_thesis → ┬→ fundamentals ─┐
                       └→ news ──────────┘
 ```
 
-`fundamentals`, `filings`, `news` run in parallel (LangGraph fans out from `load_thesis`). `risk` joins them via a single edge that waits for all three. `monte_carlo` is a pure-Python node (no LLM) that consumes `fundamentals.projections`. `synthesis` is the only Opus call.
+`fundamentals`, `filings`, `news` run in parallel (LangGraph fans out from `load_thesis`). `risk` joins them via a single edge that waits for all three. `monte_carlo` is a pure-Python node (no LLM) that consumes `fundamentals.projections`. `synthesis` is the only call to the synthesis-tier LLM (model resolved via `MODEL_SYNTHESIS`).
 
 Use `graph.astream()` so the Streamlit UI can render node-by-node progress.
 
@@ -277,7 +277,7 @@ Output:
 
 ### 9.5 Synthesis (`agents/synthesis.py`)
 
-Opus call. Reads the entire state. Writes the final report as Markdown following the template in `§11`. Output:
+Single LLM call (model resolved via `MODEL_SYNTHESIS`). Reads the entire state. Writes the final report as Markdown following the template in `§11`. Output:
 
 ```python
 {"report": str}  # markdown string
@@ -428,16 +428,16 @@ Build in this order. Do not skip ahead. Each step has a concrete acceptance test
 4. **LangGraph skeleton (2–3h).** Build the graph in `agents/__init__.py` with **all five agent nodes returning hardcoded stub dicts**. Wire fan-out and fan-in.
    - **Test:** `graph.invoke({"ticker": "NVDA", "thesis": {...}})` returns a state dict with all keys filled and prints stub messages.
 
-5. **Worker agents (8–12h).** Replace stubs with real Sonnet calls. Build in this order: Fundamentals → Filings → News → Risk. Confirm each works in isolation before running through the graph.
+5. **Worker agents (8–12h).** Replace stubs with real LLM calls (model resolved per agent via the corresponding `MODEL_*` env var). Build in this order: Fundamentals → Filings → News → Risk. Confirm each works in isolation before running through the graph.
    - **Test per agent:** `python -m agents.fundamentals NVDA` prints a populated dict with all required keys.
 
 6. **Monte Carlo engine (2–3h).** Implement `utils/monte_carlo.py` per `§10`.
    - **Test:** `simulate(revenue_now=60e9, growth_mean=0.15, growth_std=0.05, margin_mean=0.30, margin_std=0.05, exit_multiple_mean=25, exit_multiple_std=5, shares_outstanding=24.5e9)` returns a dict with `p50` between 0 and 1000.
 
-7. **Synthesis agent (3–4h).** Opus call producing Markdown per `§11`. Implement `pdf_export.py`.
+7. **Synthesis agent (3–4h).** Single LLM call (model resolved via `MODEL_SYNTHESIS`) producing Markdown per `§11`. Implement `pdf_export.py`.
    - **Test:** End-to-end graph run produces a Markdown report with all required sections, and the PDF exporter writes a valid file.
 
-8. **Streamlit UI + demo polish (6–8h).** Build `ui/app.py` per `§12`. Pre-cache 2 demo runs (NVDA on AI cake, EME on Construction) to JSON so the demo never waits on Opus. Write README with run instructions.
+8. **Streamlit UI + demo polish (6–8h).** Build `ui/app.py` per `§12`. Pre-cache 2 demo runs (NVDA on AI cake, EME on Construction) to JSON so the demo never waits on the synthesis LLM. Write README with run instructions.
    - **Test:** `streamlit run ui/app.py` opens a working app; clicking "Run drill-in" on NVDA loads the cached run instantly.
 
 ## 15. Phase scope
@@ -453,9 +453,9 @@ Built on top of a working Phase 0:
 | Feature | Phase 1 implementation |
 |---|---|
 | Notion memory of record | `data/notion.py` — read thesis notes, write reports, write/update alerts. One-way: read notes, write reports/alerts. |
-| Bidirectional Telegram bot | `data/telegram.py` + `agents/router.py`. Slash commands (`/drill`, `/analyze`, `/scan`, `/note`, `/thesis`, `/help`) plus a Haiku-backed natural-language fallback for free-text requests. |
+| Bidirectional Telegram bot | `data/telegram.py` + `agents/router.py`. Slash commands (`/drill`, `/analyze`, `/scan`, `/note`, `/thesis`, `/help`) plus an LLM-backed natural-language fallback (model resolved via `MODEL_ROUTER`) for free-text requests. |
 | Ad-hoc industry analysis | `agents/adhoc_thesis.py` synthesizes a `Thesis` from a free-text topic on demand and runs the existing drill-in graph against the top 1–3 anchor tickers. Discovery-lite. |
-| Continuous Triage | `agents/triage.py` (real, Haiku-backed) + `scripts/run_triage.py` + `launchd` plist. Polls EDGAR + Tavily across all theses and pushes alerts to Telegram + Notion. |
+| Continuous Triage | `agents/triage.py` (LLM-backed; model resolved via `MODEL_TRIAGE`) + `scripts/run_triage.py` + `launchd` plist. Polls EDGAR + Tavily across all theses and pushes alerts to Telegram + Notion. |
 | Public reachability | Decided at Step 12: Cloudflare Tunnel (free, laptop-awake) vs. DigitalOcean droplet (`$6/mo`, always-on) vs. inline-only Telegram (no dashboard link). |
 
 ### 15.3 Out of scope (deferred to Phase 2+)

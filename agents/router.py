@@ -3,7 +3,8 @@
 The Telegram bot has two parsing paths: deterministic slash commands
 (`/drill NVDA`) and free-text natural-language messages ("what's NVDA
 looking like"). This module handles the second path: a single cheap
-Haiku call classifies the message into one of seven slash-command intents,
+a single cheap-tier LLM call (model resolved via `MODEL_ROUTER`)
+classifies the message into one of seven slash-command intents,
 extracts the relevant args, and reports a confidence score.
 
 The bot dispatches when `confidence >= ROUTER_CONFIDENCE_THRESHOLD` (0.7)
@@ -40,7 +41,8 @@ common."""
 
 LLM_MAX_TOKENS = 200
 """Router output is a small JSON object — 200 tokens is plenty and caps
-the worst-case bill at ~$0.0003 per call (Haiku rates at 2026-04-26)."""
+the worst-case bill predictable for the cheap-tier model assigned to
+`MODEL_ROUTER`."""
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "router.md"
 _SYSTEM_PROMPT = _PROMPT_PATH.read_text()

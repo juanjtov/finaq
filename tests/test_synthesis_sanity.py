@@ -5,7 +5,7 @@ Run via:  pytest -m integration tests/test_synthesis_sanity.py
 Catches catastrophic input bugs that all-stub tests would miss: a Risk
 refactor that drops `level` would break Synthesis silently; this test
 fails loudly. Also asserts the structural contract on the markdown
-produced by a real Opus call (all 7 sections present, MC numbers within
+produced by a real synthesis-LLM call (all 7 sections present, MC numbers within
 ±1 of state, PDF exports without error, evidence has citations).
 """
 
@@ -65,7 +65,8 @@ def _require_keys():
 @pytest.fixture(scope="module")
 async def nvda_ai_cake_run() -> dict:
     """One real graph run on NVDA + ai_cake. Slow (~3-5 min). Cached for
-    every test in the module to avoid re-paying for Opus on each test."""
+    every test in the module to avoid re-paying for the synthesis LLM
+    on each test."""
     thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
     graph = build_graph()
     final = await graph.ainvoke({"ticker": "NVDA", "thesis": thesis})
@@ -132,7 +133,7 @@ async def test_real_run_top_risks_have_severity(nvda_ai_cake_run):
 @pytest.mark.asyncio
 async def test_real_run_mc_section_quotes_state_p50(nvda_ai_cake_run):
     """The MC section must reference numbers within ±$2 of state.monte_carlo.dcf.p50.
-    Catches Opus-style number drift (says $190 when state says $185)."""
+    Catches LLM-style number drift (says $190 when state says $185)."""
     mc = nvda_ai_cake_run.get("monte_carlo") or {}
     if mc.get("method") == "skipped":
         pytest.skip(f"MC was skipped — cannot grade Synthesis MC section. errors={mc.get('errors')}")

@@ -355,6 +355,77 @@ def read_thesis_notes(thesis_slug: str) -> str:
 # --- append_thesis_note ----------------------------------------------------
 
 
+def write_adhoc_thesis(
+    *,
+    slug: str,
+    thesis: Any,  # `utils.schemas.Thesis` — typed as Any to avoid circ import
+    db_id: str | None = None,
+) -> str | None:
+    """Mirror an ad-hoc thesis into a Notion DB row. Best-effort — returns
+    the page URL on success, None on no-op / failure.
+
+    Step 10e — Discovery-lite. The existing Theses DB is for curated
+    theses (ai_cake / nvda_halo / construction / general); ad-hoc
+    syntheses live in their own DB so they don't pollute the curated
+    list. Both share the same shape (Name, Slug, Universe, Anchors)
+    plus an Origin field flagging "topic" vs "ticker" mode.
+
+    Caller resolves `db_id` from `NOTION_DB_ADHOC_THESES` env var; this
+    function expects it to already be present on disk. Bootstrap creation
+    of the DB is intentionally manual — `python -m scripts.bootstrap_notion`
+    will be extended in a future commit; for now the user creates it via
+    the Notion UI when they're ready to use the mirror.
+    """
+    client = _get_client()
+    if client is None or not db_id:
+        return None
+    universe = list(getattr(thesis, "universe", None) or [])
+    anchors = list(getattr(thesis, "anchor_tickers", None) or [])
+    name = getattr(thesis, "name", slug) or slug
+    summary = getattr(thesis, "summary", "") or ""
+
+    properties: dict[str, Any] = {
+        "Name": {"title": [{"type": "text", "text": {"content": name}}]},
+        "Slug": {
+            "rich_text": [{"type": "text", "text": {"content": slug}}]
+        },
+        "Universe": {
+            "rich_text": [
+                {
+                    "type": "text",
+                    "text": {"content": ", ".join(universe)[:1900]},
+                }
+            ]
+        },
+        "Anchors": {
+            "rich_text": [{"type": "text", "text": {"content": ", ".join(anchors)}}]
+        },
+        "Created": {"date": {"start": datetime.now(UTC).date().isoformat()}},
+    }
+
+    # Page body holds the summary so the user can browse the synthesis
+    # rationale in Notion without round-tripping to the JSON on disk.
+    children: list[dict] = []
+    if summary:
+        children.append(
+            {
+                "type": "paragraph",
+                "paragraph": {"rich_text": _rich_text(summary)},
+            }
+        )
+
+    try:
+        page = client.pages.create(
+            parent={"database_id": db_id},
+            properties=properties,
+            children=children if children else None,
+        )
+        return page.get("url")
+    except Exception as e:
+        logger.error(f"[notion] write_adhoc_thesis failed for {slug}: {e}")
+        return None
+
+
 def append_thesis_note(
     *,
     thesis_slug: str,

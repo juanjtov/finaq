@@ -382,7 +382,7 @@ async def run(state: FinaqState) -> dict:
     errors: list[str] = []
 
     # If literally all upstream agents failed, the synthesis is meaningless —
-    # short-circuit to the fallback so we don't waste an Opus call.
+    # short-circuit to the fallback so we don't waste a synthesis-LLM call.
     has_any_input = any(
         bool(state.get(n)) for n in ("fundamentals", "filings", "news", "risk", "monte_carlo")
     )

@@ -1,0 +1,88 @@
+{
+  "name": "Apple (single-name ad-hoc)",
+  "summary": "Single-name drill-in on Apple. The core bet is that the installed base keeps monetizing through higher services attach, premium hardware refreshes, and ecosystem lock-in, while valuation depends on whether margins and capital returns can stay resilient through smartphone maturity and China demand swings. The peer set is chosen to benchmark Apple against consumer-electronics, hardware, and platform-adjacent companies plus key supply-chain dependencies.",
+  "anchor_tickers": [
+    "AAPL"
+  ],
+  "universe": [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "QCOM",
+    "TSM"
+  ],
+  "relationships": [
+    {
+      "from_": "AAPL",
+      "to": "TSM",
+      "type": "supplier",
+      "note": "TSM manufactures advanced chips for iPhone and Mac silicon"
+    },
+    {
+      "from_": "AAPL",
+      "to": "QCOM",
+      "type": "supplier",
+      "note": "Qualcomm supplies modem and RF components for iPhone devices"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "services_revenue_growth_yoy",
+      "operator": "<",
+      "value": 8.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "iphone_revenue_growth_yoy",
+      "operator": "abs >",
+      "value": 10.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "gross_margin_change_yoy",
+      "operator": "abs >",
+      "value": 200.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "shares_outstanding_change_yoy",
+      "operator": ">",
+      "value": 2.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "roa_ttm",
+      "operator": "<",
+      "value": 10.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_equity",
+      "operator": ">",
+      "value": 1.0,
+      "unit": "ratio"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "going concern",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.05,
+    "erp_basis": "Use a market-like ERP because Apple is a large, diversified mega-cap with lower business-risk than earlier-stage hardware names.",
+    "terminal_growth_rate": 0.025,
+    "terminal_growth_basis": "Long-run terminal growth is anchored to mature developed-market GDP-like growth rather than category-specific hypergrowth.",
+    "discount_rate_floor": 0.07,
+    "discount_rate_cap": 0.11
+  }
+}

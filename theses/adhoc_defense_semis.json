@@ -1,0 +1,112 @@
+{
+  "name": "Defense Semiconductors (Ad-Hoc)",
+  "summary": "Defense-exposed semiconductor and electronics names benefit from sustained U.S. and allied modernization spending, higher mission-critical content, and long program lifecycles that support backlog visibility. The core debate is whether investors are paying for durable growth and margin resilience versus program timing risk, customer concentration, and eventual normalization after budget spikes. This basket groups the most relevant pure-play and adjacent suppliers used to triangulate valuation across ruggedized compute, sensors, power, RF, and mission systems.",
+  "anchor_tickers": [
+    "MRCY",
+    "KTOS",
+    "LITE"
+  ],
+  "universe": [
+    "MRCY",
+    "KTOS",
+    "LITE",
+    "TDY",
+    "KEYS",
+    "LHX",
+    "BAH",
+    "RTX",
+    "NOC",
+    "LMT",
+    "HII"
+  ],
+  "relationships": [
+    {
+      "from_": "LMT",
+      "to": "MRCY",
+      "type": "customer",
+      "note": "Mercury supplies rugged compute and embedded electronics into defense platform programs."
+    },
+    {
+      "from_": "RTX",
+      "to": "MRCY",
+      "type": "customer",
+      "note": "RTX is a major defense prime that can source mission electronics and subsystems from specialty suppliers."
+    },
+    {
+      "from_": "NOC",
+      "to": "LITE",
+      "type": "customer",
+      "note": "Northrop programs can require high-reliability optics, sensing, and communications components."
+    },
+    {
+      "from_": "LHX",
+      "to": "KEYS",
+      "type": "customer",
+      "note": "L3Harris integrates test, RF, and electronic warfare-related instrumentation and components in defense systems."
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "backlog_growth_yoy",
+      "operator": ">",
+      "value": 20.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "defense_revenue_share",
+      "operator": ">",
+      "value": 40.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "book_to_bill",
+      "operator": ">",
+      "value": 1.1,
+      "unit": "x"
+    },
+    {
+      "signal": "gross_margin_change_yoy",
+      "operator": "abs >",
+      "value": 200.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "roe_ttm",
+      "operator": "<",
+      "value": 12.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_equity",
+      "operator": ">",
+      "value": 0.6,
+      "unit": "ratio"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "program delay",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "going concern",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.055,
+    "erp_basis": "A modest premium to the market reflects defense budget durability and program visibility, offset by procurement timing and customer concentration risk.",
+    "terminal_growth_rate": 0.03,
+    "terminal_growth_basis": "Long-run growth should track nominal GDP plus a small premium from continued defense modernization and electronics content growth.",
+    "discount_rate_floor": 0.08,
+    "discount_rate_cap": 0.14
+  }
+}

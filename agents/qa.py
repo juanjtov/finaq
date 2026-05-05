@@ -16,7 +16,7 @@ Why a separate module rather than a method on each agent file:
   - The 4 functions share boilerplate (prompt loading, JSON parsing,
     citation coercion, error fallback) — DRY rule of three is satisfied.
   - The agent files stay focused on the `run()` graph-node contract.
-  - One model env var (`MODEL_AGENT_QA`, defaulting to Haiku) governs the
+  - One model env var (`MODEL_AGENT_QA`, typically a cheap-tier model) governs the
     cost of the entire Q&A surface.
 
 Public API: `await ask(state, agent, question)` returns an AgentAnswer.
@@ -378,7 +378,7 @@ async def ask(state: FinaqState, agent: AgentName, question: str) -> AgentAnswer
         agent_context = _risk_context(state)
     elif agent == "filings":
         # Re-run RAG with the user's question; cheaper than re-running the full
-        # Filings agent because we use Haiku and skip the synthesis.
+        # Filings agent because we use the Q&A-tier model and skip the synthesis.
         from data.chroma import query as chroma_query
 
         if not ticker:

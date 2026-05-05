@@ -374,7 +374,7 @@ async def echo_placeholder(
 async def nl_fallback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Route free-text messages through the Haiku intent classifier
+    """Route free-text messages through the LLM intent classifier
     (`agents.router.classify`) and dispatch to the matching slash-command
     handler. When confidence < 0.7 OR intent is `unknown`, reply with a
     clarification prompt instead of guessing.
@@ -476,21 +476,16 @@ async def nl_fallback(
         return
 
     if intent == "analyze":
-        # Step 10e isn't built yet — same honest UX as the /drill inline
-        # keyboard's "Synthesize custom" button.
         topic = (args_dict.get("topic") or "").strip()
-        await update.message.reply_text(
-            f"⏳ Custom-thesis synthesis (<code>/analyze</code>) lands in "
-            f"<b>Step 10e</b> — not built yet.\n\n"
-            f"For ad-hoc topics like <i>{_h(topic) or 'this'}</i>, two paths "
-            f"available today:\n"
-            f"• Drill against the Buffett-framework thesis: "
-            f"<code>/drill TICKER general</code>\n"
-            f"• Force a thematic thesis: "
-            f"<code>/drill TICKER ai_cake</code> "
-            f"(or <code>nvda_halo</code> / <code>construction</code>).",
-            parse_mode="HTML",
-        )
+        if not topic:
+            await update.message.reply_text(
+                "I detected an analyze request but couldn't extract the topic. "
+                "Try <code>/analyze defense semis</code> or "
+                "<code>/analyze data center cooling</code>.",
+                parse_mode="HTML",
+            )
+            return
+        await analyze_command(update, _SN(args=topic.split()))
         return
 
     # Defensive fallback — should never hit unless the schema and handler
@@ -974,6 +969,15 @@ _CALLBACK_PREFIX_CANCEL = "drill_cancel"
 # matching thematic theses from the ambiguous-ticker keyboard.
 _CALLBACK_PREFIX_THESIS = "drill_thesis"
 
+# /analyze multi-step flow callbacks. Short prefixes (2 chars) because
+# `callback_data` is capped at 64 bytes and the slug can be up to 46
+# chars (`adhoc_` + 40-char body) — leaves room for ticker.
+_AA_PREFIX_PICK = "ap"        # ap:{slug}:{TICKER}    — user picked a ticker (phase 1 → 2)
+_AA_PREFIX_DRILL_NOW = "ad"   # ad:{slug}:{TICKER}    — drill without ingestion
+_AA_PREFIX_INGEST = "ai"      # ai:{slug}:{TICKER}    — ingest filings, then drill
+_AA_PREFIX_BACK = "ab"        # ab:{slug}             — back to ticker picker
+_AA_PREFIX_CANCEL = "ax"      # ax:{slug}             — cancel and dismiss prompt
+
 
 async def _send_drill_choice_prompt(update: Update, ticker: str) -> None:
     """Send the 3-button inline keyboard that lets the user choose how to
@@ -1005,8 +1009,8 @@ async def _send_drill_choice_prompt(update: Update, ticker: str) -> None:
         f"• <b>Use generic thesis</b> — runs against the Buffett-framework "
         f"<code>general</code> thesis (universal red flags: ROE, ROIC, debt/equity, "
         f"margin compression, accounting red flags).\n"
-        f"• <b>Synthesize custom</b> — Sonnet builds a tailored thesis around "
-        f"<code>{_h(ticker)}</code> first, then drills (Step 10e).\n"
+        f"• <b>Synthesize custom</b> — I'll build a tailored thesis around "
+        f"<code>{_h(ticker)}</code> first, then drill (Step 10e).\n"
         f"• <b>Cancel</b> — dismiss this prompt without drilling."
     )
     await update.message.reply_text(
@@ -1122,19 +1126,24 @@ async def drill_choice_callback(
         )
         await _run_drill_and_reply(query.message, ticker, "general")
     elif prefix == _CALLBACK_PREFIX_ANALYZE:
-        # /analyze isn't built yet (Step 10e). Be honest and point the
-        # user at workable paths until then.
+        # User chose to synthesize a custom thesis around the ticker.
+        # Build a single-name thesis around it (TICKER mode in
+        # `agents/adhoc_thesis.py`), then drill against it.
         await query.edit_message_text(
-            f"⏳ Custom-thesis synthesis (<code>/analyze</code>) lands in "
-            f"<b>Step 10e</b> — not built yet.\n\n"
-            f"For now you can:\n"
-            f"• Run <code>/drill {_h(ticker)} general</code> to use the "
-            f"Buffett-framework thesis directly.\n"
-            f"• Force a thematic thesis: "
-            f"<code>/drill {_h(ticker)} ai_cake</code> "
-            f"(or <code>nvda_halo</code> / <code>construction</code>).",
+            f"🧪 Synthesizing custom thesis around <b>{_h(ticker)}</b>… "
+            f"(~30s) then drilling.",
             parse_mode="HTML",
         )
+
+        # Build a fake `Update` whose `.message` is the prompt message,
+        # so `_run_analyze` can use `update.message.reply_text(...)` for
+        # follow-ups (same shim pattern `drill_choice_callback` uses
+        # for the generic branch).
+        from types import SimpleNamespace
+        pseudo_update = SimpleNamespace(
+            message=query.message, effective_chat=query.message.chat
+        )
+        await _run_analyze(pseudo_update, topic=None, ticker=ticker)
     elif prefix == _CALLBACK_PREFIX_CANCEL:
         await query.edit_message_text(
             f"❌ Cancelled — no drill-in run for <code>{_h(ticker)}</code>.",
@@ -1310,6 +1319,438 @@ async def status_command(
     """`/status` — system health summary read from `data_cache/state.db`."""
     body = _format_status_body()
     await update.message.reply_text(body, parse_mode="HTML")
+
+
+# --- /analyze TOPIC (Step 10e — Discovery-lite) ---------------------------
+
+
+@require_allowlist
+async def analyze_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/analyze TOPIC` — synthesize an ad-hoc thesis from a free-text topic
+    (e.g. "defense semis", "data center cooling") via the LLM (model
+    resolved via `MODEL_ADHOC_THESIS`), then run a
+    drill-in against the top anchor ticker. Total cost ~$0.55 (~$0.05
+    thesis synthesis + ~$0.50 drill-in), wall-clock ~5-6 min.
+
+    The synthesised thesis is saved to `theses/adhoc_{slug}.json` so the
+    user can re-run with `/drill TICKER adhoc_{slug}` later without
+    re-paying the synthesis cost. Same file is auto-discovered by
+    `/theses` and the dashboard sidebar.
+
+    The keyboard's "Synthesize custom" branch (callback `drill_analyze`)
+    routes to `_run_analyze_for_ticker()` instead — same path but the
+    synthesizer gets a TICKER input rather than a topic, building a
+    single-name thesis around it.
+    """
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/analyze TOPIC</code>\n"
+            "Examples:\n"
+            "• <code>/analyze defense semis</code>\n"
+            "• <code>/analyze data center cooling</code>\n"
+            "• <code>/analyze AI infrastructure power</code>\n\n"
+            "I'll synthesize an ad-hoc thesis for the topic, then drill into "
+            "the top anchor ticker. Cost ~$0.55, takes ~6 min.",
+            parse_mode="HTML",
+        )
+        return
+
+    topic = " ".join(args).strip()
+    if len(topic) < 3:
+        await update.message.reply_text(
+            "Topic too short — try a 2-3 word description like "
+            "<code>defense semis</code> or <code>regional banks</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    await _run_analyze(update, topic=topic, ticker=None)
+
+
+async def _run_analyze(
+    update: Update,
+    *,
+    topic: str | None,
+    ticker: str | None,
+) -> None:
+    """Shared synthesis pipeline used by both the slash command (`topic`)
+    and the inline-keyboard "Synthesize custom" branch (`ticker`).
+
+    Flow:
+      1. Ack the synthesis kicking off
+      2. Synthesize the thesis (~30s)
+      3. Reply with the thesis preview + ticker-picker keyboard
+      4. The user's tap routes to `analyze_action_callback`, which
+         shows a second keyboard (drill now vs ingest first vs cancel)
+         per ticker
+
+    Auto-drilling on `anchors[0]` (the previous behaviour) was removed
+    because LLM-suggested tickers often don't have filings in ChromaDB,
+    producing incomplete drills with empty Filings sections. Forcing the
+    user to pick the ticker AND the action explicitly fixes that.
+    """
+    label = topic or ticker or "?"
+    ack = (
+        f"🧪 Synthesizing ad-hoc thesis for "
+        f"<i>{_h(label)}</i>… (~30s)"
+    )
+    await update.message.reply_text(ack, parse_mode="HTML")
+
+    # Lazy import — keeps bot startup snappy and avoids importing the
+    # OpenRouter client until /analyze is actually called.
+    from agents.adhoc_thesis import synthesize_adhoc_thesis
+
+    result = await synthesize_adhoc_thesis(topic=topic, ticker=ticker)
+    if result.error or result.thesis is None:
+        await update.message.reply_text(
+            f"❌ Couldn't synthesize a thesis: <code>{_h(result.error or 'unknown error')}</code>\n\n"
+            f"Try a tighter topic (e.g. 'defense semis' instead of 'stocks') "
+            f"or a specific ticker.",
+            parse_mode="HTML",
+        )
+        return
+
+    thesis = result.thesis
+    anchors = thesis.anchor_tickers or []
+    if not anchors:
+        await update.message.reply_text(
+            f"⚠️ Thesis synthesised but had no anchor tickers — can't pick "
+            f"one to drill. Saved to <code>{_h(result.slug)}</code> for "
+            f"manual <code>/drill TICKER {_h(result.slug)}</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    await _send_analyze_ticker_picker(
+        update.message, thesis=thesis, slug=result.slug, cached=result.cached
+    )
+
+
+async def _send_analyze_ticker_picker(
+    reply_target,
+    *,
+    thesis,
+    slug: str,
+    cached: bool,
+) -> None:
+    """Phase 2 of /analyze — show the synthesized thesis preview + an
+    inline keyboard letting the user pick which anchor ticker to drill.
+    Anchors only (not the full universe) so the keyboard stays tight;
+    non-anchor tickers can be drilled via `/drill TICKER {slug}` manually.
+    """
+    anchors = list(thesis.anchor_tickers or [])
+    universe = list(thesis.universe or [])
+    universe_str = ", ".join(universe[:8]) + (
+        f" + {len(universe) - 8} more" if len(universe) > 8 else ""
+    )
+    cache_marker = " <i>(cached)</i>" if cached else ""
+
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for t in anchors[:6]:  # cap at 6 anchors so the keyboard fits the screen
+        keyboard.append([
+            InlineKeyboardButton(
+                f"⭐ {t}",
+                callback_data=f"{_AA_PREFIX_PICK}:{slug}:{t}",
+            )
+        ])
+    keyboard.append([
+        InlineKeyboardButton(
+            "Cancel", callback_data=f"{_AA_PREFIX_CANCEL}:{slug}"
+        )
+    ])
+
+    body = (
+        f"📚 <b>{_h(thesis.name)}</b>{cache_marker}\n"
+        f"slug: <code>{_h(slug)}</code> · {len(universe)} tickers\n\n"
+        f"<i>{_h(thesis.summary[:300])}"
+        + ("…</i>" if len(thesis.summary) > 300 else "</i>")
+        + f"\n\nUniverse: {_h(universe_str)}\n\n"
+        f"<b>Pick a ticker to drill</b> "
+        f"(⭐ = anchor; non-anchors via "
+        f"<code>/drill TICKER {_h(slug)}</code>):"
+    )
+    await reply_target.reply_text(
+        body,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True,
+    )
+
+
+async def _send_analyze_action_keyboard(
+    *,
+    query,
+    slug: str,
+    ticker: str,
+) -> None:
+    """Phase 3 of /analyze — the user picked a ticker; now ask whether
+    to drill immediately or ingest filings first.
+
+    Status-aware: if the ticker is already ingested in ChromaDB, only
+    "Drill now" appears (ingestion would be a no-op). If it's a foreign
+    issuer (files 20-F/6-K), explain that ingestion won't help — only
+    the drill-anyway option is offered. Otherwise both options appear.
+    """
+    # Check ingest status. Lazy imports keep the bot's startup snappy.
+    from data.chroma import has_ticker
+    from data.edgar import has_filings_in_unsupported_kinds
+
+    try:
+        ingested = has_ticker(ticker)
+    except Exception as e:
+        logger.warning(f"[telegram] has_ticker({ticker}) failed: {e}")
+        ingested = False
+    try:
+        unsupported = has_filings_in_unsupported_kinds(ticker)
+    except Exception as e:
+        logger.warning(
+            f"[telegram] has_filings_in_unsupported_kinds({ticker}) failed: {e}"
+        )
+        unsupported = []
+
+    keyboard: list[list[InlineKeyboardButton]] = []
+    if ingested:
+        status_line = "✅ Filings already ingested in ChromaDB."
+        keyboard.append([
+            InlineKeyboardButton(
+                "🚀 Drill now (~5 min, ~$0.50)",
+                callback_data=f"{_AA_PREFIX_DRILL_NOW}:{slug}:{ticker}",
+            )
+        ])
+    elif unsupported:
+        kinds_str = ", ".join(unsupported)
+        status_line = (
+            f"🌍 <b>{_h(ticker)}</b> files {_h(kinds_str)} (foreign issuer). "
+            f"My ingest pipeline only handles 10-K + 10-Q today, so "
+            f"running ingestion won't help. Drill-in will run but Filings "
+            f"will be empty."
+        )
+        keyboard.append([
+            InlineKeyboardButton(
+                "⚠️ Drill anyway (Filings empty)",
+                callback_data=f"{_AA_PREFIX_DRILL_NOW}:{slug}:{ticker}",
+            )
+        ])
+    else:
+        status_line = (
+            f"📥 <b>{_h(ticker)}</b> not ingested yet. Filings RAG will "
+            f"return zero chunks unless you ingest first."
+        )
+        keyboard.append([
+            InlineKeyboardButton(
+                "🚀 Drill now (Filings empty, ~5 min, ~$0.50)",
+                callback_data=f"{_AA_PREFIX_DRILL_NOW}:{slug}:{ticker}",
+            )
+        ])
+        keyboard.append([
+            InlineKeyboardButton(
+                "📥 Ingest first, then drill (~10–15 min)",
+                callback_data=f"{_AA_PREFIX_INGEST}:{slug}:{ticker}",
+            )
+        ])
+    keyboard.append([
+        InlineKeyboardButton(
+            "◀ Back", callback_data=f"{_AA_PREFIX_BACK}:{slug}"
+        )
+    ])
+    keyboard.append([
+        InlineKeyboardButton(
+            "Cancel", callback_data=f"{_AA_PREFIX_CANCEL}:{slug}"
+        )
+    ])
+
+    body = (
+        f"✓ Picked <b>{_h(ticker)}</b> × <code>{_h(slug)}</code>\n\n"
+        f"{status_line}\n\n"
+        f"How do you want to proceed?"
+    )
+    await query.edit_message_text(
+        body,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True,
+    )
+
+
+async def analyze_action_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle taps on /analyze's two keyboards (ticker picker + action picker).
+
+    Callback shapes:
+      ap:{slug}:{TICKER}  → phase 1 → 2 (ticker picked, show action keyboard)
+      ad:{slug}:{TICKER}  → drill now (no ingestion)
+      ai:{slug}:{TICKER}  → ingest filings, then drill
+      ab:{slug}           → back to ticker picker
+      ax:{slug}           → cancel
+    """
+    query = update.callback_query
+    if query is None:
+        return
+    chat = query.message.chat if query.message else None
+    chat_id = chat.id if chat else None
+    if chat_id is None or chat_id not in _allowed_chat_ids:
+        if query:
+            await query.answer()
+        return
+    await query.answer()
+
+    data = query.data or ""
+    parts = data.split(":")
+    if not parts:
+        return
+    prefix = parts[0]
+
+    # `ax:{slug}` and `ab:{slug}` carry only one arg.
+    if prefix == _AA_PREFIX_CANCEL:
+        slug = parts[1] if len(parts) > 1 else "?"
+        await query.edit_message_text(
+            f"❌ Cancelled — no drill-in run for <code>{_h(slug)}</code>.",
+            parse_mode="HTML",
+        )
+        return
+    if prefix == _AA_PREFIX_BACK:
+        slug = parts[1] if len(parts) > 1 else ""
+        # Reload the thesis from disk and re-render the ticker picker.
+        thesis = _try_load_adhoc_thesis(slug)
+        if thesis is None:
+            await query.edit_message_text(
+                f"⚠️ Couldn't reload thesis <code>{_h(slug)}</code> from disk.",
+                parse_mode="HTML",
+            )
+            return
+        # `_send_analyze_ticker_picker` uses `.reply_text(...)`. We're
+        # editing the prompt in place instead — call the inner builder
+        # directly with the existing query.message.
+        await _edit_analyze_ticker_picker(query, thesis=thesis, slug=slug)
+        return
+
+    if len(parts) < 3:
+        logger.warning(f"[telegram] malformed analyze callback: {data!r}")
+        return
+    slug = parts[1]
+    ticker = parts[2].strip().upper()
+
+    if prefix == _AA_PREFIX_PICK:
+        await _send_analyze_action_keyboard(query=query, slug=slug, ticker=ticker)
+        return
+    if prefix == _AA_PREFIX_DRILL_NOW:
+        await query.edit_message_text(
+            f"🏃 Drilling <b>{_h(ticker)}</b> × <code>{_h(slug)}</code>…",
+            parse_mode="HTML",
+        )
+        await _run_drill_and_reply(query.message, ticker, slug)
+        return
+    if prefix == _AA_PREFIX_INGEST:
+        await _run_ingest_then_drill(query, ticker=ticker, slug=slug)
+        return
+
+    logger.warning(f"[telegram] unhandled analyze prefix: {prefix!r}")
+
+
+def _try_load_adhoc_thesis(slug: str):
+    """Reload an adhoc thesis from `theses/{slug}.json`. Returns the
+    Pydantic model or None if missing / invalid."""
+    from utils.schemas import Thesis
+
+    path = THESES_DIR / f"{slug}.json"
+    if not path.exists():
+        return None
+    try:
+        return Thesis.model_validate_json(path.read_text())
+    except Exception as e:
+        logger.warning(f"[telegram] could not reload thesis {slug}: {e}")
+        return None
+
+
+async def _edit_analyze_ticker_picker(query, *, thesis, slug: str) -> None:
+    """Edit the existing prompt message in place to re-show the ticker
+    picker (used by the "◀ Back" callback). Mirrors
+    `_send_analyze_ticker_picker` but uses `edit_message_text` so we
+    don't spam the chat with new messages on every back-tap."""
+    anchors = list(thesis.anchor_tickers or [])
+    universe = list(thesis.universe or [])
+    universe_str = ", ".join(universe[:8]) + (
+        f" + {len(universe) - 8} more" if len(universe) > 8 else ""
+    )
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for t in anchors[:6]:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"⭐ {t}", callback_data=f"{_AA_PREFIX_PICK}:{slug}:{t}"
+            )
+        ])
+    keyboard.append([
+        InlineKeyboardButton(
+            "Cancel", callback_data=f"{_AA_PREFIX_CANCEL}:{slug}"
+        )
+    ])
+    body = (
+        f"📚 <b>{_h(thesis.name)}</b>\n"
+        f"slug: <code>{_h(slug)}</code> · {len(universe)} tickers\n\n"
+        f"<i>{_h(thesis.summary[:300])}"
+        + ("…</i>" if len(thesis.summary) > 300 else "</i>")
+        + f"\n\nUniverse: {_h(universe_str)}\n\n"
+        f"<b>Pick a ticker to drill</b>:"
+    )
+    await query.edit_message_text(
+        body,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True,
+    )
+
+
+async def _run_ingest_then_drill(query, *, ticker: str, slug: str) -> None:
+    """Run filings ingestion for `ticker`, then dispatch the drill-in.
+
+    Ingestion downloads recent 10-K/10-Q filings via SEC EDGAR, chunks
+    each on Item headers, embeds via OpenRouter's `/v1/embeddings`, and
+    upserts to ChromaDB. ~5-10 minutes the first time per ticker;
+    repeat ingestions are no-ops.
+
+    Errors during ingestion don't block the drill — we surface a
+    warning and proceed with whatever's in ChromaDB so the user gets
+    SOMETHING rather than a hang.
+    """
+    await query.edit_message_text(
+        f"📥 Ingesting filings for <b>{_h(ticker)}</b>… "
+        f"(downloading + chunking + embedding, ~5–10 min)",
+        parse_mode="HTML",
+    )
+
+    # Lazy-import the ingestion entry point. `ingest_ticker` is async
+    # and returns the chunk count — same routine the dashboard's
+    # 'Ingest now' button calls.
+    try:
+        from scripts.ingest_universe import ingest_ticker
+
+        chunks = await ingest_ticker(ticker)
+        if chunks > 0:
+            ingest_msg = (
+                f"✅ Ingested {chunks} chunks for <b>{_h(ticker)}</b>. "
+                f"Now drilling…"
+            )
+        else:
+            ingest_msg = (
+                f"⚠️ Ingestion ran but produced 0 chunks for "
+                f"<b>{_h(ticker)}</b> (foreign issuer or no matching "
+                f"10-K/10-Q?). Drilling anyway with empty Filings."
+            )
+    except Exception as e:
+        logger.error(f"[telegram] ingest_ticker({ticker}) failed: {e}")
+        ingest_msg = (
+            f"❌ Ingestion failed: <code>{_h(str(e)[:200])}</code>. "
+            f"Drilling anyway with whatever is in ChromaDB."
+        )
+
+    # Reply with the ingest result (don't edit the prompt — we want the
+    # ingest status visible alongside the drill summary).
+    await query.message.reply_text(ingest_msg, parse_mode="HTML")
+    await _run_drill_and_reply(query.message, ticker, slug)
 
 
 # --- /note ----------------------------------------------------------------
@@ -1575,6 +2016,7 @@ async def theses_command(
 
 BOT_COMMANDS: list[tuple[str, str]] = [
     ("drill",   "Run a full drill-in (TICKER [thesis], 5 min)"),
+    ("analyze", "Synthesize an ad-hoc thesis from a topic & drill"),
     ("scan",    "Surface alerts caught since the last check"),
     ("status",  "System health: triage, alerts, errors"),
     ("note",    "Drop a note for Triage to weigh (TICKER text)"),
@@ -1647,6 +2089,7 @@ def build_app(*, token: str | None = None, allowlist: str | None = None) -> Appl
     app.add_handler(CommandHandler(["help", "start"], help_command))
     # Real slash commands.
     app.add_handler(CommandHandler("drill", drill_command))
+    app.add_handler(CommandHandler("analyze", analyze_command))
     app.add_handler(CommandHandler("scan", scan_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("theses", theses_command))
@@ -1666,7 +2109,18 @@ def build_app(*, token: str | None = None, allowlist: str | None = None) -> Appl
             ),
         )
     )
-    # Free text → Haiku-driven NL router → dispatch (Step 10f).
+    # /analyze multi-step callbacks (ticker picker + action picker).
+    app.add_handler(
+        CallbackQueryHandler(
+            analyze_action_callback,
+            pattern=(
+                f"^({_AA_PREFIX_PICK}|{_AA_PREFIX_DRILL_NOW}|"
+                f"{_AA_PREFIX_INGEST}|{_AA_PREFIX_BACK}|"
+                f"{_AA_PREFIX_CANCEL}):"
+            ),
+        )
+    )
+    # Free text → LLM-driven NL router → dispatch (Step 10f).
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, nl_fallback))
     # Unknown slash commands (e.g. `/foo`) → friendly error.
     app.add_handler(MessageHandler(filters.COMMAND, echo_placeholder))
