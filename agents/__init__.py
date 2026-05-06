@@ -47,6 +47,13 @@ def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
         started_iso = datetime.now(UTC).isoformat()
         t0 = time.perf_counter()
         error_msg: str | None = None
+        # Per-node LLM telemetry accumulator. The OpenRouter client wrapper
+        # (utils/openrouter.py) reads this ContextVar on every chat-completion
+        # response and increments tokens_in/tokens_out/cost_usd/n_calls.
+        # We bind a fresh dict here so each node gets its own counter, then
+        # write the totals to node_runs in the `finally` block.
+        accumulator = state_db.new_node_telemetry()
+        token_var = state_db.node_telemetry_var.set(accumulator)
         try:
             result = await run_fn(state)
             # Surface "soft failures" — agents that return successfully but
@@ -78,6 +85,9 @@ def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
         finally:
             ended_iso = datetime.now(UTC).isoformat()
             duration_s = time.perf_counter() - t0
+            # Detach the ContextVar BEFORE writing — if the write fails,
+            # the next node still gets a clean accumulator.
+            state_db.node_telemetry_var.reset(token_var)
             try:
                 state_db.record_node_run(
                     run_id=run_id,
@@ -87,6 +97,10 @@ def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
                     duration_s=duration_s,
                     status="failed" if error_msg else "completed",
                     error=error_msg,
+                    tokens_in=accumulator.get("tokens_in", 0),
+                    tokens_out=accumulator.get("tokens_out", 0),
+                    cost_usd=accumulator.get("cost_usd", 0.0),
+                    n_calls=accumulator.get("n_calls", 0),
                 )
                 if error_msg:
                     state_db.record_error(name, error_msg, run_id=run_id)

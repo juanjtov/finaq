@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 DB_PATH = Path("data_cache/state.db")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # bumped when node_runs got tokens_in/tokens_out/cost_usd/n_calls
 
 # Contextvars propagated across asyncio tasks within a single graph invocation.
 # Set by `invoke_with_telemetry`; read by `_safe_node` to attach node rows to
@@ -45,6 +45,21 @@ SCHEMA_VERSION = 1
 current_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_run_id", default=None
 )
+
+# Per-node token + cost accumulator. `_safe_node` enters a fresh dict here on
+# entry; `utils.openrouter`'s telemetry interceptor reads `response.usage` on
+# every LLM call and adds to the dict; `_safe_node` writes the totals to
+# node_runs on exit. Default None = "no node active" so direct ad-hoc calls
+# (e.g. `agents/qa.py:ask` outside the graph) don't accumulate ghost rows.
+node_telemetry_var: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "node_telemetry", default=None
+)
+
+
+def new_node_telemetry() -> dict:
+    """Return a fresh accumulator dict for a single node invocation.
+    Caller binds it to `node_telemetry_var` for the node's lifetime."""
+    return {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0, "n_calls": 0}
 
 
 # --- Schema migration -------------------------------------------------------
@@ -76,6 +91,13 @@ CREATE TABLE IF NOT EXISTS node_runs (
     duration_s  REAL,
     status      TEXT NOT NULL,                  -- completed | failed
     error       TEXT,
+    -- Step 10c.8 (schema v2) — per-node LLM telemetry. Populated by the
+    -- ContextVar accumulator in `utils.openrouter`. Nodes that don't make
+    -- LLM calls (load_thesis, monte_carlo) leave these at 0.
+    tokens_in   INTEGER NOT NULL DEFAULT 0,
+    tokens_out  INTEGER NOT NULL DEFAULT 0,
+    cost_usd    REAL    NOT NULL DEFAULT 0.0,
+    n_calls     INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (run_id) REFERENCES graph_runs(run_id)
 );
 
@@ -126,9 +148,32 @@ def _connect(db_path: Path | None = None) -> sqlite3.Connection:
 
 
 def init_db(db_path: Path | None = None) -> None:
-    """Create the schema if missing. Idempotent — calling twice is a no-op."""
+    """Create the schema if missing + apply forward-only migrations.
+    Idempotent — calling twice is a no-op.
+
+    Schema v1 → v2 (Step 10c.8): adds tokens_in / tokens_out / cost_usd /
+    n_calls columns to `node_runs`. Existing rows back-fill to 0 (which
+    is honest — we didn't track tokens before this migration). New rows
+    populate from the ContextVar accumulator.
+    """
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA_SQL)
+        # Forward-only migrations for DBs created before SCHEMA_VERSION
+        # bumps. PRAGMA table_info is the cheapest way to introspect
+        # column presence without depending on a dedicated migration tool.
+        existing = {
+            row["name"] for row in conn.execute("PRAGMA table_info(node_runs)")
+        }
+        for col_name, col_def in [
+            ("tokens_in",  "INTEGER NOT NULL DEFAULT 0"),
+            ("tokens_out", "INTEGER NOT NULL DEFAULT 0"),
+            ("cost_usd",   "REAL NOT NULL DEFAULT 0.0"),
+            ("n_calls",    "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            if col_name not in existing:
+                conn.execute(
+                    f"ALTER TABLE node_runs ADD COLUMN {col_name} {col_def}"
+                )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
@@ -204,19 +249,36 @@ def record_node_run(
     status: str,
     *,
     error: str | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    cost_usd: float = 0.0,
+    n_calls: int = 0,
     db_path: Path | None = None,
 ) -> int:
-    """Insert a node_runs row. `status` ∈ {completed, failed}."""
+    """Insert a node_runs row. `status` ∈ {completed, failed}.
+
+    Token / cost fields default to 0 so legacy callers (and tests) work
+    unchanged. `_safe_node` populates them from the ContextVar
+    accumulator that `utils/openrouter.py`'s telemetry interceptor
+    fills as LLM calls happen inside the node.
+    """
     if status not in ("completed", "failed"):
         raise ValueError(f"status must be 'completed' or 'failed', got {status!r}")
     init_db(db_path)
     with _connect(db_path) as conn:
         cur = conn.execute(
             """
-            INSERT INTO node_runs (run_id, node, started_at, ended_at, duration_s, status, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO node_runs (
+                run_id, node, started_at, ended_at, duration_s, status, error,
+                tokens_in, tokens_out, cost_usd, n_calls
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, node, started_at, ended_at, duration_s, status, error),
+            (
+                run_id, node, started_at, ended_at, duration_s, status, error,
+                int(tokens_in or 0), int(tokens_out or 0),
+                float(cost_usd or 0.0), int(n_calls or 0),
+            ),
         )
         return cur.lastrowid or 0
 
@@ -326,6 +388,74 @@ def recent_node_runs(limit: int = 100, *, db_path: Path | None = None) -> list[d
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def node_runs_for_run(run_id: str, *, db_path: Path | None = None) -> list[dict]:
+    """Every node_run for a single graph run, ordered by start time.
+    Used by the Run Inspector to show the agent-by-agent timeline."""
+    if not Path(db_path or DB_PATH).exists():
+        return []
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM node_runs WHERE run_id = ? ORDER BY started_at",
+            (run_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def errors_for_run(run_id: str, *, db_path: Path | None = None) -> list[dict]:
+    """Error events scoped to a single run_id, ordered by timestamp."""
+    if not Path(db_path or DB_PATH).exists():
+        return []
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM errors WHERE run_id = ? ORDER BY ts",
+            (run_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def daily_cost(days: int = 7, *, db_path: Path | None = None) -> list[dict]:
+    """Per-day rollup of cost_usd from node_runs over the last `days` days.
+    Used by Mission Control's cost chart and `/status`'s "today's spend".
+    Returns rows in chronological order: [{date: 'YYYY-MM-DD', cost_usd: 0.42}, …].
+    """
+    if not Path(db_path or DB_PATH).exists():
+        return []
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                substr(started_at, 1, 10) AS date,
+                SUM(cost_usd)             AS cost_usd,
+                SUM(tokens_in)            AS tokens_in,
+                SUM(tokens_out)           AS tokens_out,
+                SUM(n_calls)              AS n_calls
+            FROM node_runs
+            WHERE started_at >= date('now', ?)
+            GROUP BY date
+            ORDER BY date
+            """,
+            (f"-{int(days)} days",),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def cost_today(*, db_path: Path | None = None) -> dict:
+    """Aggregate cost + token stats for the UTC date covering 'now'.
+    Returns {cost_usd, tokens_in, tokens_out, n_calls}, all 0 when nothing
+    happened today."""
+    rows = daily_cost(days=1, db_path=db_path)
+    today = datetime.now(UTC).date().isoformat()
+    for r in rows:
+        if r.get("date") == today:
+            return {
+                "cost_usd":   float(r.get("cost_usd") or 0.0),
+                "tokens_in":  int(r.get("tokens_in") or 0),
+                "tokens_out": int(r.get("tokens_out") or 0),
+                "n_calls":    int(r.get("n_calls") or 0),
+            }
+    return {"cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0, "n_calls": 0}
 
 
 def recent_errors(limit: int = 50, *, db_path: Path | None = None) -> list[dict]:

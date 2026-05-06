@@ -494,6 +494,79 @@ def test_md_safe_handles_none_input():
     assert md_safe("") == ""
 
 
+# --- Run Inspector page (Step 10c.8) --------------------------------------
+
+
+def test_run_inspector_renders_with_empty_db(tmp_path, monkeypatch):
+    """Empty state.db (no runs) → page renders a friendly 'no runs' note,
+    doesn't crash."""
+    from data import state as state_db
+
+    monkeypatch.setattr(state_db, "DB_PATH", tmp_path / "empty.db")
+    state_db.init_db(db_path=tmp_path / "empty.db")
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "run_inspector.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.run()
+    assert not at.exception
+    # Should warn (not error) so the user knows what to do.
+    warnings = [w.value for w in at.warning]
+    assert any("No graph runs" in w for w in warnings)
+
+
+def test_run_inspector_renders_with_populated_db(tmp_path, monkeypatch):
+    """Populate state.db with a fake run + per-node rows; the inspector
+    must render the run header + node table without crashing."""
+    from data import state as state_db
+
+    db = tmp_path / "test.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    run_id = state_db.start_graph_run("NVDA", "ai_cake", db_path=db)
+    state_db.record_node_run(
+        run_id, "fundamentals", "2026-05-05T10:00:00+00:00", "2026-05-05T10:00:01+00:00",
+        1.0, "completed", tokens_in=500, tokens_out=200, cost_usd=0.0035, n_calls=1,
+        db_path=db,
+    )
+    state_db.record_node_run(
+        run_id, "synthesis", "2026-05-05T10:00:02+00:00", "2026-05-05T10:00:15+00:00",
+        13.0, "completed", tokens_in=3000, tokens_out=1500, cost_usd=0.06, n_calls=1,
+        db_path=db,
+    )
+    state_db.finish_graph_run(run_id, status="completed", confidence="medium", db_path=db)
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "run_inspector.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.run()
+    assert not at.exception
+    # Sidebar selectbox should list the run we just inserted.
+    sel = next((sb for sb in at.selectbox if sb.label == "Run"), None)
+    assert sel is not None
+    assert any("NVDA" in opt and "ai_cake" in opt for opt in sel.options)
+
+
+def test_run_inspector_langsmith_url_only_when_tracing_enabled(monkeypatch):
+    """Defensive: the LangSmith deep-link button MUST NOT appear when
+    LANGSMITH_TRACING is unset — there'd be no traces to link to."""
+    import importlib
+
+    monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
+    ri = importlib.reload(
+        importlib.import_module("ui.pages.run_inspector")
+    ) if "ui.pages.run_inspector" in importlib.sys.modules else (
+        importlib.import_module("ui.pages.run_inspector")
+    )
+    assert ri._langsmith_url_for_run("abc-123") is None
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "finaq")
+    url = ri._langsmith_url_for_run("abc-123")
+    assert url is not None
+    assert "finaq" in url
+    assert "abc-123" in url
+
+
 def test_md_safe_leaves_lone_dollar_alone():
     from ui.app import _md_safe
 

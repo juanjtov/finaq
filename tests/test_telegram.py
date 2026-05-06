@@ -1428,10 +1428,13 @@ async def test_drill_choice_callback_analyze_acks_synthesis(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_drill_choice_callback_generic_routes_to_runner(monkeypatch):
-    """Generic button → edits the prompt to ack the choice, then calls
-    `_run_drill_and_reply` with thesis_slug='general'. We mock the runner
-    helper so the test doesn't actually drill — we just assert the dispatch."""
+async def test_drill_choice_callback_generic_routes_to_ingest_check(monkeypatch):
+    """Generic button → edits the prompt to ack the choice, then routes
+    through `_dispatch_drill_with_ingest_check` (which decides between
+    silent drill and ingest-action keyboard based on whether the ticker
+    is in ChromaDB). Step 10c.8b — closes the gap where the previous
+    direct-to-runner dispatch silently produced inaccurate drills for
+    not-yet-ingested tickers like FROG."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
     update, edit, answer, _ = _make_callback_query(
         chat_id=111, data="drill_generic:AAPL"
@@ -1439,15 +1442,14 @@ async def test_drill_choice_callback_generic_routes_to_runner(monkeypatch):
 
     captured: dict = {}
 
-    async def _fake_run(reply_target, ticker, thesis_slug):
+    async def _fake_dispatch(reply_target, ticker, thesis_slug):
         captured["ticker"] = ticker
         captured["thesis_slug"] = thesis_slug
 
-    monkeypatch.setattr(tg, "_run_drill_and_reply", _fake_run)
+    monkeypatch.setattr(tg, "_dispatch_drill_with_ingest_check", _fake_dispatch)
     await tg.drill_choice_callback(update, SimpleNamespace())
     answer.assert_called_once()
     edit.assert_called_once()
-    # Must have routed through the shared runner helper with the general slug.
     assert captured["ticker"] == "AAPL"
     assert captured["thesis_slug"] == "general"
 
@@ -1517,10 +1519,13 @@ async def test_drill_command_ambiguous_ticker_sends_thesis_choice_keyboard(monke
 
 
 @pytest.mark.asyncio
-async def test_drill_command_single_match_dispatches_silently(monkeypatch):
-    """When a ticker matches exactly one thematic thesis (NVDA → ai_cake
-    only IF we pretend NVDA isn't in nvda_halo for this test), no
-    keyboard is sent — silent dispatch is fine."""
+async def test_drill_command_single_match_dispatches_via_ingest_check(monkeypatch):
+    """When a ticker matches exactly one thematic thesis, drill_command
+    now routes through `_dispatch_drill_with_ingest_check` rather than
+    silent dispatch. That helper decides between immediate drill (when
+    ingested) and ingest-action keyboard (when not). This is the gap
+    the user reported with /drill FROG (not in ChromaDB) silently
+    producing an inaccurate report."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
     monkeypatch.setattr(tg, "_list_matching_theses", lambda t: ["ai_cake"])
 
@@ -1530,7 +1535,7 @@ async def test_drill_command_single_match_dispatches_silently(monkeypatch):
         captured["ticker"] = ticker
         captured["thesis_slug"] = thesis_slug
 
-    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub)
+    monkeypatch.setattr(tg, "_dispatch_drill_with_ingest_check", _stub)
     update = _make_update(chat_id=111, text="/drill NVDA")
     context = SimpleNamespace(args=["NVDA"])
     await tg.drill_command(update, context)
@@ -1539,9 +1544,132 @@ async def test_drill_command_single_match_dispatches_silently(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_drill_with_ingest_check_silent_when_ingested(monkeypatch):
+    """If ChromaDB already has the ticker, no keyboard — straight to drill."""
+    from data import chroma as _chroma
+    from data import edgar as _edgar
+
+    monkeypatch.setattr(_chroma, "has_ticker", lambda t: True)
+    monkeypatch.setattr(_edgar, "has_filings_in_unsupported_kinds", lambda t: [])
+
+    captured: dict = {}
+
+    async def _stub_drill(reply_target, ticker, thesis_slug):
+        captured["called"] = True
+        captured["ticker"] = ticker
+        captured["thesis_slug"] = thesis_slug
+
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub_drill)
+
+    reply_mock = AsyncMock()
+    reply_target = SimpleNamespace(reply_text=reply_mock)
+    await tg._dispatch_drill_with_ingest_check(reply_target, "NVDA", "ai_cake")
+    assert captured.get("called") is True
+    assert captured.get("ticker") == "NVDA"
+    # No keyboard message sent — straight dispatch.
+    reply_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_drill_with_ingest_check_warns_for_foreign_issuer(monkeypatch):
+    """Foreign issuer (TSM, ASML) — ingestion won't help. Send a 1-line
+    warning + drill anyway. No keyboard."""
+    from data import chroma as _chroma
+    from data import edgar as _edgar
+
+    monkeypatch.setattr(_chroma, "has_ticker", lambda t: False)
+    monkeypatch.setattr(_edgar, "has_filings_in_unsupported_kinds", lambda t: ["20-F"])
+
+    drill_called = {"n": 0}
+
+    async def _stub_drill(reply_target, ticker, thesis_slug):
+        drill_called["n"] += 1
+
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub_drill)
+
+    reply_mock = AsyncMock()
+    reply_target = SimpleNamespace(reply_text=reply_mock)
+    await tg._dispatch_drill_with_ingest_check(reply_target, "TSM", "ai_cake")
+    assert drill_called["n"] == 1
+    # The warning message must mention the unsupported kind so the user
+    # knows why the drill will have empty filings.
+    args, _ = reply_mock.call_args
+    assert "20-F" in args[0]
+    assert "foreign issuer" in args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_drill_with_ingest_check_offers_keyboard_when_not_ingested(
+    monkeypatch,
+):
+    """The user's reported case: ticker not in ChromaDB AND files
+    supported kinds → must show the action keyboard before drilling so
+    they can pick ingest-first."""
+    from data import chroma as _chroma
+    from data import edgar as _edgar
+
+    monkeypatch.setattr(_chroma, "has_ticker", lambda t: False)
+    monkeypatch.setattr(_edgar, "has_filings_in_unsupported_kinds", lambda t: [])
+
+    drill_called = {"n": 0}
+
+    async def _stub_drill(reply_target, ticker, thesis_slug):
+        drill_called["n"] += 1
+
+    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub_drill)
+
+    reply_mock = AsyncMock()
+    reply_target = SimpleNamespace(reply_text=reply_mock)
+    await tg._dispatch_drill_with_ingest_check(reply_target, "FROG", "adhoc_saas")
+    # MUST NOT have drilled yet — waiting on user's keyboard tap.
+    assert drill_called["n"] == 0
+    # Must have sent a message with the action keyboard.
+    reply_mock.assert_called_once()
+    args, kwargs = reply_mock.call_args
+    body = args[0]
+    assert "FROG" in body
+    assert "not ingested" in body.lower() or "ingest" in body.lower()
+    markup = kwargs.get("reply_markup")
+    assert markup is not None, "must attach an inline keyboard"
+    # Keyboard must offer all three options: drill-now / ingest-then-drill / cancel.
+    button_data = [
+        btn.callback_data for row in markup.inline_keyboard for btn in row
+    ]
+    assert any(d.startswith("ad:adhoc_saas:FROG") for d in button_data)
+    assert any(d.startswith("ai:adhoc_saas:FROG") for d in button_data)
+    assert any(d.startswith("ax:adhoc_saas") for d in button_data)
+
+
+@pytest.mark.asyncio
+async def test_drill_command_explicit_thesis_also_runs_ingest_check(monkeypatch):
+    """`/drill FROG adhoc_saas` (explicit thesis arg) must also route
+    through the ingest check — the original bug was specifically about
+    drills with adhoc theses where the ticker hasn't been ingested."""
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(
+        tg, "_resolve_thesis_slug",
+        lambda t, r: r if r in ("adhoc_saas", "ai_cake") else None,
+    )
+
+    captured: dict = {}
+
+    async def _stub(reply_target, ticker, thesis_slug):
+        captured["ticker"] = ticker
+        captured["thesis_slug"] = thesis_slug
+
+    monkeypatch.setattr(tg, "_dispatch_drill_with_ingest_check", _stub)
+    update = _make_update(chat_id=111, text="/drill FROG adhoc_saas")
+    context = SimpleNamespace(args=["FROG", "adhoc_saas"])
+    await tg.drill_command(update, context)
+    assert captured.get("thesis_slug") == "adhoc_saas"
+    assert captured.get("ticker") == "FROG"
+
+
+@pytest.mark.asyncio
 async def test_drill_thesis_callback_routes_to_picked_slug(monkeypatch):
-    """Tap on a `drill_thesis:nvda_halo:CEG` button must run the drill
-    against nvda_halo, not the alphabetically-first matching slug."""
+    """Tap on a `drill_thesis:nvda_halo:CEG` button must dispatch with
+    the picked slug. Step 10c.8b: now goes through the ingest-check
+    helper rather than directly into `_run_drill_and_reply`."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
     update, edit, answer, _ = _make_callback_query(
         chat_id=111, data="drill_thesis:nvda_halo:CEG"
@@ -1553,7 +1681,7 @@ async def test_drill_thesis_callback_routes_to_picked_slug(monkeypatch):
         captured["ticker"] = ticker
         captured["thesis_slug"] = thesis_slug
 
-    monkeypatch.setattr(tg, "_run_drill_and_reply", _stub)
+    monkeypatch.setattr(tg, "_dispatch_drill_with_ingest_check", _stub)
     await tg.drill_choice_callback(update, SimpleNamespace())
     answer.assert_called_once()
     edit.assert_called_once()

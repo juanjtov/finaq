@@ -833,7 +833,7 @@ async def drill_command(
             )
             await update.message.reply_text(body, parse_mode="HTML")
             return
-        await _run_drill_and_reply(update.message, ticker, thesis_slug)
+        await _dispatch_drill_with_ingest_check(update.message, ticker, thesis_slug)
         return
 
     # No explicit thesis — figure out the thematic matches.
@@ -851,8 +851,9 @@ async def drill_command(
         # the worst-case UX.
         await _send_thesis_choice_prompt(update, ticker, matches)
         return
-    # Single thematic match — dispatch.
-    await _run_drill_and_reply(update.message, ticker, matches[0])
+    # Single thematic match — dispatch (with an ingest check first; if
+    # the ticker isn't in ChromaDB, the keyboard offers ingest-first).
+    await _dispatch_drill_with_ingest_check(update.message, ticker, matches[0])
 
 
 async def _run_drill_and_reply(
@@ -1106,11 +1107,11 @@ async def drill_choice_callback(
         ticker = ticker.strip().upper()
         thesis_slug = thesis_slug.strip()
         await query.edit_message_text(
-            f"✓ Running drill on <b>{_h(ticker)}</b> with the "
-            f"<code>{_h(thesis_slug)}</code> thesis…",
+            f"✓ Picked <code>{_h(thesis_slug)}</code>. "
+            f"Checking ingest status for <b>{_h(ticker)}</b>…",
             parse_mode="HTML",
         )
-        await _run_drill_and_reply(query.message, ticker, thesis_slug)
+        await _dispatch_drill_with_ingest_check(query.message, ticker, thesis_slug)
         return
 
     prefix, ticker = data.split(":", 1)
@@ -1118,13 +1119,13 @@ async def drill_choice_callback(
 
     if prefix == _CALLBACK_PREFIX_GENERIC:
         # User chose the generic thesis. Edit the prompt to reflect
-        # the choice, then run the drill against the `general` slug.
+        # the choice, then check ingest status before drilling.
         await query.edit_message_text(
-            f"✓ Running drill on <b>{_h(ticker)}</b> with the "
-            f"<code>general</code> Buffett-framework thesis…",
+            f"✓ Picked <code>general</code> thesis. "
+            f"Checking ingest status for <b>{_h(ticker)}</b>…",
             parse_mode="HTML",
         )
-        await _run_drill_and_reply(query.message, ticker, "general")
+        await _dispatch_drill_with_ingest_check(query.message, ticker, "general")
     elif prefix == _CALLBACK_PREFIX_ANALYZE:
         # User chose to synthesize a custom thesis around the ticker.
         # Build a single-name thesis around it (TICKER mode in
@@ -1299,6 +1300,18 @@ def _format_status_body() -> str:
             f"{_h((first_err.get('message') or '')[:80])})"
         )
 
+    # Today's spend — populated by the per-node ContextVar accumulator in
+    # `_safe_node` (Step 10c.8). Zero when the user hasn't drilled today.
+    today = _state.cost_today()
+    if today["n_calls"] > 0:
+        cost_line = (
+            f"Today's spend: <b>${today['cost_usd']:.2f}</b> across "
+            f"{today['n_calls']} LLM calls "
+            f"({today['tokens_in']:,} in / {today['tokens_out']:,} out)"
+        )
+    else:
+        cost_line = "Today's spend: <b>$0.00</b> (no LLM calls today)"
+
     return "\n".join([
         "🔧 <b>FINAQ status</b>",
         "",
@@ -1306,9 +1319,7 @@ def _format_status_body() -> str:
         triage_line,
         alerts_line,
         errors_line,
-        "",
-        "<i>Cost tracking lands when state.db schema gains the cost_usd column "
-        "— see POSTPONED §1.</i>",
+        cost_line,
     ])
 
 
@@ -1477,6 +1488,97 @@ async def _send_analyze_ticker_picker(
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard),
         disable_web_page_preview=True,
+    )
+
+
+async def _dispatch_drill_with_ingest_check(
+    reply_target,
+    ticker: str,
+    thesis_slug: str,
+) -> None:
+    """Decide between silent drill-dispatch vs the ingest-action keyboard
+    based on whether the ticker has filings in ChromaDB.
+
+    Three branches:
+      - **Ingested** → silent dispatch. No extra tap; the happy path
+        (NVDA, AVGO, etc.) keeps the existing 1-step UX.
+      - **Foreign issuer** (files 20-F/6-K) → silent dispatch with a
+        1-line warning. Ingestion wouldn't help — surfacing the choice
+        would just add friction without giving the user a useful action.
+      - **Supported but not ingested yet** → send the action keyboard
+        so the user picks "Drill now (Filings empty)" vs "Ingest first,
+        then drill". Closes the gap where `/drill FROG` (ad-hoc ticker
+        not in ChromaDB) would silently produce an inaccurate report.
+
+    Reuses the `_AA_PREFIX_*` callback prefixes from the /analyze flow so
+    the same `analyze_action_callback` handler dispatches the tap — no
+    duplicate handler code.
+    """
+    from data.chroma import has_ticker
+    from data.edgar import has_filings_in_unsupported_kinds
+
+    try:
+        ingested = has_ticker(ticker)
+    except Exception as e:
+        logger.warning(f"[telegram] has_ticker({ticker}) failed: {e}")
+        ingested = False
+    try:
+        unsupported = has_filings_in_unsupported_kinds(ticker)
+    except Exception as e:
+        logger.warning(
+            f"[telegram] has_filings_in_unsupported_kinds({ticker}) failed: {e}"
+        )
+        unsupported = []
+
+    if ingested:
+        # Happy path — straight to the drill.
+        await _run_drill_and_reply(reply_target, ticker, thesis_slug)
+        return
+
+    if unsupported:
+        # Foreign issuer — ingestion won't help. Warn + drill anyway.
+        kinds_str = ", ".join(unsupported)
+        await reply_target.reply_text(
+            f"🌍 <b>{_h(ticker)}</b> files {_h(kinds_str)} (foreign issuer). "
+            f"Filings RAG will return zero chunks; synthesis will flag this "
+            f"as a coverage gap. Drilling anyway…",
+            parse_mode="HTML",
+        )
+        await _run_drill_and_reply(reply_target, ticker, thesis_slug)
+        return
+
+    # Not ingested + supported → ask the user.
+    keyboard: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                "🚀 Drill now (Filings empty, ~5 min, ~$0.50)",
+                callback_data=f"{_AA_PREFIX_DRILL_NOW}:{thesis_slug}:{ticker}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📥 Ingest first, then drill (~10–15 min)",
+                callback_data=f"{_AA_PREFIX_INGEST}:{thesis_slug}:{ticker}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "Cancel",
+                callback_data=f"{_AA_PREFIX_CANCEL}:{thesis_slug}",
+            )
+        ],
+    ]
+    body = (
+        f"📥 <b>{_h(ticker)}</b> isn't ingested in ChromaDB yet. "
+        f"Filings RAG will return zero chunks unless you ingest first — "
+        f"the drill-in's Filings section + thesis-aware bull/bear citations "
+        f"would be empty otherwise.\n\n"
+        f"How do you want to proceed?"
+    )
+    await reply_target.reply_text(
+        body,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 

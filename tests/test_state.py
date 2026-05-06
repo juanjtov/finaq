@@ -114,6 +114,172 @@ def test_record_node_run_round_trip(tmp_path: Path):
     assert len(rows) == 1
     assert rows[0]["node"] == "fundamentals"
     assert rows[0]["duration_s"] == pytest.approx(2.4)
+    # Step 10c.8 added telemetry columns. Defaults must be 0 so legacy
+    # callers (and existing tests) don't have to know about them.
+    assert rows[0]["tokens_in"] == 0
+    assert rows[0]["tokens_out"] == 0
+    assert rows[0]["cost_usd"] == pytest.approx(0.0)
+    assert rows[0]["n_calls"] == 0
+
+
+def test_record_node_run_persists_telemetry_fields(tmp_path: Path):
+    """Step 10c.8 — `_safe_node` writes per-node tokens + cost from the
+    ContextVar accumulator. The DB must round-trip those values."""
+    db = tmp_path / "test.db"
+    run_id = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    st.record_node_run(
+        run_id,
+        "filings",
+        st._now_iso(),
+        st._now_iso(),
+        17.5,
+        "completed",
+        tokens_in=1234,
+        tokens_out=567,
+        cost_usd=0.0234,
+        n_calls=3,
+        db_path=db,
+    )
+    rows = st.all_node_runs_for(run_id, db_path=db)
+    assert rows[0]["tokens_in"] == 1234
+    assert rows[0]["tokens_out"] == 567
+    assert rows[0]["cost_usd"] == pytest.approx(0.0234)
+    assert rows[0]["n_calls"] == 3
+
+
+def test_init_db_migrates_v1_to_v2(tmp_path: Path):
+    """A DB created before Step 10c.8 has no tokens_in/tokens_out/cost_usd/
+    n_calls columns. The forward-only migration in `init_db` must add
+    them WITHOUT dropping existing rows. Simulates an upgrade by
+    creating a v1-shaped table manually, then calling init_db."""
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    # Create a v1 node_runs table with the exact pre-migration schema.
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE node_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT,
+            node TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            duration_s REAL,
+            status TEXT NOT NULL,
+            error TEXT
+        );
+        INSERT INTO node_runs (run_id, node, started_at, status)
+        VALUES ('legacy-run', 'fundamentals', '2026-04-01T00:00:00Z', 'completed');
+        """
+    )
+    conn.commit()
+    conn.close()
+    # Run the migration.
+    st.init_db(db_path=db)
+    # Existing row preserved + new columns default to 0.
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    rows = list(conn.execute("SELECT * FROM node_runs"))
+    assert len(rows) == 1
+    assert rows[0]["node"] == "fundamentals"
+    assert rows[0]["tokens_in"] == 0
+    assert rows[0]["cost_usd"] == 0.0
+    conn.close()
+    # New inserts populate cleanly with the new fields.
+    st.record_node_run(
+        "legacy-run", "filings", "2026-04-01T00:00:01Z", "2026-04-01T00:00:02Z",
+        1.0, "completed", tokens_in=100, tokens_out=50, cost_usd=0.0015,
+        n_calls=1, db_path=db,
+    )
+    rows = st.all_node_runs_for("legacy-run", db_path=db)
+    by_node = {r["node"]: r for r in rows}
+    assert by_node["filings"]["tokens_in"] == 100
+    assert by_node["fundamentals"]["tokens_in"] == 0  # legacy row untouched
+
+
+def test_node_telemetry_var_default_is_none():
+    """ContextVar default must be None so direct ad-hoc LLM calls (outside
+    the graph) don't accumulate ghost telemetry rows."""
+    assert st.node_telemetry_var.get() is None
+
+
+def test_new_node_telemetry_returns_fresh_dict():
+    """Each node entry binds a fresh accumulator — repeated calls must
+    return distinct dicts (not a shared singleton)."""
+    a = st.new_node_telemetry()
+    b = st.new_node_telemetry()
+    assert a is not b
+    assert a == {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0, "n_calls": 0}
+
+
+def test_daily_cost_aggregates_node_runs(tmp_path: Path):
+    """`daily_cost(days=N)` must group by date and sum cost_usd /
+    tokens_in / tokens_out / n_calls per day. Used by /status and the
+    Mission Control cost chart."""
+    from datetime import UTC, datetime, timedelta
+
+    db = tmp_path / "test.db"
+    run_id = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    today = datetime.now(UTC).date().isoformat()
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
+    # Today: two LLM calls totalling $0.05.
+    st.record_node_run(
+        run_id, "fundamentals", f"{today}T10:00:00+00:00", f"{today}T10:00:01+00:00",
+        1.0, "completed", tokens_in=100, tokens_out=50, cost_usd=0.02, n_calls=1,
+        db_path=db,
+    )
+    st.record_node_run(
+        run_id, "synthesis", f"{today}T10:01:00+00:00", f"{today}T10:01:05+00:00",
+        5.0, "completed", tokens_in=2000, tokens_out=500, cost_usd=0.03, n_calls=1,
+        db_path=db,
+    )
+    # Yesterday: one call.
+    st.record_node_run(
+        run_id, "filings", f"{yesterday}T10:00:00+00:00", f"{yesterday}T10:00:02+00:00",
+        2.0, "completed", tokens_in=300, tokens_out=100, cost_usd=0.01, n_calls=1,
+        db_path=db,
+    )
+    rolled = st.daily_cost(days=7, db_path=db)
+    by_date = {r["date"]: r for r in rolled}
+    assert today in by_date and yesterday in by_date
+    assert by_date[today]["cost_usd"] == pytest.approx(0.05)
+    assert by_date[today]["n_calls"] == 2
+    assert by_date[today]["tokens_in"] == 2100
+    assert by_date[yesterday]["cost_usd"] == pytest.approx(0.01)
+
+
+def test_cost_today_returns_zero_when_no_runs(tmp_path: Path):
+    db = tmp_path / "empty.db"
+    st.init_db(db_path=db)
+    today = st.cost_today(db_path=db)
+    assert today == {"cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0, "n_calls": 0}
+
+
+def test_node_runs_for_run_filters_by_id(tmp_path: Path):
+    db = tmp_path / "test.db"
+    a = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    b = st.start_graph_run("MSFT", "ai_cake", db_path=db)
+    st.record_node_run(a, "fundamentals", st._now_iso(), st._now_iso(), 1.0, "completed", db_path=db)
+    st.record_node_run(a, "filings", st._now_iso(), st._now_iso(), 2.0, "completed", db_path=db)
+    st.record_node_run(b, "fundamentals", st._now_iso(), st._now_iso(), 1.5, "completed", db_path=db)
+    a_nodes = st.node_runs_for_run(a, db_path=db)
+    b_nodes = st.node_runs_for_run(b, db_path=db)
+    assert len(a_nodes) == 2
+    assert len(b_nodes) == 1
+    assert {n["node"] for n in a_nodes} == {"fundamentals", "filings"}
+
+
+def test_errors_for_run_filters_by_id(tmp_path: Path):
+    db = tmp_path / "test.db"
+    a = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    b = st.start_graph_run("MSFT", "ai_cake", db_path=db)
+    st.record_error("risk", "validation failed", run_id=a, db_path=db)
+    st.record_error("risk", "different error", run_id=b, db_path=db)
+    a_errs = st.errors_for_run(a, db_path=db)
+    assert len(a_errs) == 1
+    assert "validation failed" in a_errs[0]["message"]
 
 
 def test_record_node_run_with_failure(tmp_path: Path):
