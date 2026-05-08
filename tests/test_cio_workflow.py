@@ -74,17 +74,31 @@ def stub_news(monkeypatch):
 
 def _stub_decide_factory(canned: dict[tuple[str, str], CIODecision]):
     """Returns a `planner.decide` stub that looks up its response by
-    (ticker, thesis_slug). Default to dismiss for unmapped pairs."""
+    (ticker, thesis_slug). Default to dismiss for unmapped pairs.
+
+    Step 11.19 — `decide` now returns `(CIODecision, telemetry_dict)`.
+    The stub returns a synthetic telemetry payload so the orchestrator's
+    cost-aggregation path is exercised in tests too.
+    """
 
     def _stub(*, ticker, thesis, **kw):
         slug = (thesis or {}).get("slug") if isinstance(thesis, dict) else None
         key = (ticker.upper(), slug or "")
         if key in canned:
-            return canned[key]
-        return CIODecision(
-            action="dismiss", ticker=ticker.upper(), thesis=slug,
-            rationale="default stub", confidence="low",
-        )
+            decision = canned[key]
+        else:
+            decision = CIODecision(
+                action="dismiss", ticker=ticker.upper(), thesis=slug,
+                rationale="default stub", confidence="low",
+            )
+        telemetry = {
+            "model_used": "stub-model",
+            "tokens_in": 100,
+            "tokens_out": 50,
+            "cost_usd": 0.001,
+            "latency_s": 0.5,
+        }
+        return decision, telemetry
 
     return _stub
 
@@ -201,10 +215,14 @@ async def test_heartbeat_planner_exception_demotes_to_dismiss(
         counter["n"] += 1
         if counter["n"] == 1:
             raise RuntimeError("synthetic planner crash")
-        return CIODecision(
-            action="dismiss", ticker=ticker.upper(),
-            thesis=(thesis or {}).get("slug"),
-            rationale="ok", confidence="low",
+        return (
+            CIODecision(
+                action="dismiss", ticker=ticker.upper(),
+                thesis=(thesis or {}).get("slug"),
+                rationale="ok", confidence="low",
+            ),
+            {"model_used": "stub-model", "tokens_in": 0, "tokens_out": 0,
+             "cost_usd": 0.0, "latency_s": 0.1},
         )
 
     monkeypatch.setattr(cio_planner, "decide", _flaky_decide)
@@ -486,6 +504,69 @@ async def test_budget_cap_demotes_to_reuse_when_prior_drill_exists(
 
 
 # --- Stable ordering when actions are ties --------------------------------
+
+
+# --- Step 11.19 — telemetry roundtrip (model + cost + latency) -----------
+
+
+@pytest.mark.asyncio
+async def test_cycle_aggregates_per_action_cost_onto_cio_runs(
+    isolated_db, fake_thesis_dir, stub_news, monkeypatch,
+):
+    """Each cio_actions row carries its own (model, tokens, cost, latency).
+    cio_runs.total_cost_usd should equal sum(cio_actions.cost_usd) for the
+    cycle, and cio_runs.model_used should be the planner's MODEL_CIO."""
+    canned = {
+        ("AAA", "curated_a"): CIODecision(action="dismiss", ticker="AAA",
+                                            thesis="curated_a",
+                                            rationale="quiet", confidence="low"),
+        ("BBB", "curated_a"): CIODecision(action="drill", ticker="BBB",
+                                            thesis="curated_a",
+                                            rationale="x", confidence="high"),
+    }
+
+    # Stub returns a custom cost per pair so we can verify aggregation.
+    def _stub(*, ticker, thesis, **kw):
+        slug = (thesis or {}).get("slug") if isinstance(thesis, dict) else None
+        decision = canned.get(
+            (ticker.upper(), slug or ""),
+            CIODecision(action="dismiss", ticker=ticker.upper(), thesis=slug,
+                        rationale="default", confidence="low"),
+        )
+        # Distinct costs per ticker so the sum is provable, not a coincidence.
+        cost = 0.001 if ticker.upper() == "AAA" else 0.002
+        telemetry = {
+            "model_used": "openai/gpt-5.4-mini",
+            "tokens_in": 2500, "tokens_out": 80,
+            "cost_usd": cost, "latency_s": 1.2,
+        }
+        return decision, telemetry
+
+    monkeypatch.setattr(cio_planner, "decide", _stub)
+
+    async def _fake_drill(ticker, thesis):
+        return f"r-{ticker}"
+
+    monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
+
+    plan, _ = await cio_mod.run_heartbeat()
+
+    # Inspect what landed.
+    runs = state_db.recent_cio_runs(limit=1)
+    assert runs[0]["model_used"] == "openai/gpt-5.4-mini"
+
+    actions = state_db.recent_cio_actions(limit=20)
+    expected_total = sum((a.get("cost_usd") or 0.0) for a in actions)
+    assert runs[0]["total_cost_usd"] == pytest.approx(expected_total, rel=1e-9)
+    assert runs[0]["total_cost_usd"] > 0.0  # something was spent
+
+    # Each row's per-call telemetry round-trips.
+    aaa = next(a for a in actions if a["ticker"] == "AAA")
+    bbb = next(a for a in actions if a["ticker"] == "BBB")
+    assert aaa["model_used"] == "openai/gpt-5.4-mini"
+    assert aaa["cost_usd"] == pytest.approx(0.001)
+    assert bbb["cost_usd"] == pytest.approx(0.002)
+    assert aaa["latency_s"] == pytest.approx(1.2)
 
 
 @pytest.mark.asyncio

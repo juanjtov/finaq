@@ -125,6 +125,11 @@ def _worker(ticker: str, thesis_slug: str, record: dict[str, Any]) -> None:
 
         thesis_path = Path("theses") / f"{thesis_slug}.json"
         thesis = json.loads(thesis_path.read_text())
+        # Step 11.20 — stamp slug on the dict so `invoke_with_telemetry`
+        # writes graph_runs.thesis = slug (canonical), not the human name.
+        # Without this, the CIO planner's cooldown gate can't join its
+        # `cio_actions.thesis` (slug) to graph_runs.
+        thesis.setdefault("slug", thesis_slug)
         graph = build_graph()
 
         async def _run() -> dict[str, Any]:

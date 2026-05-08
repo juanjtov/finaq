@@ -221,6 +221,10 @@ def _run_full_graph(ticker: str, thesis_slug: str) -> dict:
     from agents import build_graph, invoke_with_telemetry
 
     thesis = load_thesis(thesis_slug)
+    # Step 11.20 — see ui/_runner.py for the equivalent fix; the CIO's
+    # cooldown gate joins by slug, so graph_runs.thesis must hold slug.
+    if isinstance(thesis, dict):
+        thesis.setdefault("slug", thesis_slug)
     graph = build_graph()
     return asyncio.run(
         invoke_with_telemetry(graph, {"ticker": ticker.upper(), "thesis": thesis})

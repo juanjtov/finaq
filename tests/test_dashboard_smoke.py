@@ -444,6 +444,52 @@ def test_direct_agent_page_renders_agent_dropdown():
 # --- New Thesis form fields -----------------------------------------------
 
 
+def test_mission_control_renders_cio_telemetry_panels():
+    """Step 11.19 — Mission Control must render the new CIO sections:
+      - 'Recent CIO actions' (with model + cost columns)
+      - 'Recent CIO cycles' (with model + total $ columns)
+      - 'CIO model performance — last 30 days'
+    """
+    # Seed state.db with one CIO cycle + 2 actions so the panels have data.
+    from data import state as state_db
+
+    rid = state_db.start_cio_run("heartbeat")
+    state_db.record_cio_action(
+        ticker="NVDA", thesis="ai_cake", action="drill",
+        cio_run_id=rid, model_used="openai/gpt-5.4-mini",
+        tokens_in=2500, tokens_out=80, cost_usd=0.0025, latency_s=1.5,
+        confidence="high",
+    )
+    state_db.record_cio_action(
+        ticker="MSFT", thesis="ai_cake", action="dismiss",
+        cio_run_id=rid, model_used="openai/gpt-5.4-mini",
+        tokens_in=2200, tokens_out=70, cost_usd=0.0021, latency_s=1.2,
+        confidence="high",
+    )
+    state_db.finish_cio_run(
+        rid, "completed", model_used="openai/gpt-5.4-mini",
+        total_cost_usd=0.0046, n_actions=2, n_drilled=1, n_dismissed=1,
+        duration_s=2.7,
+    )
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+
+    # Section headers present
+    markdown_blob = " ".join(m.value for m in at.markdown)
+    for required in (
+        "Recent CIO actions",
+        "Recent CIO cycles",
+        "CIO model performance",
+    ):
+        assert required in markdown_blob, (
+            f"Mission Control missing section: {required!r}"
+        )
+
+
 def test_theses_admin_renders_three_sections_and_per_row_buttons():
     """Theses admin page must show:
       - "Curated theses" / "Ad-hoc theses" / "Archive" subheaders

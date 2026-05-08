@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -691,3 +692,190 @@ def test_recent_cio_runs_empty_when_db_missing(tmp_path: Path):
 
 def test_recent_cio_actions_empty_when_db_missing(tmp_path: Path):
     assert st.recent_cio_actions(db_path=tmp_path / "nope.db") == []
+
+
+# --- Step 11.19 schema migration + per-model performance rollup ----------
+
+
+def test_init_db_adds_step_11_19_columns_to_cio_actions(tmp_path: Path):
+    """Forward-only migration: a fresh init_db must add the per-call
+    telemetry columns (model_used, tokens_in/out, cost_usd, latency_s)
+    to cio_actions."""
+    db = tmp_path / "test.db"
+    st.init_db(db)
+    with sqlite3.connect(db) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cio_actions)")}
+    for required in {"model_used", "tokens_in", "tokens_out", "cost_usd", "latency_s"}:
+        assert required in cols, f"cio_actions missing column {required!r}"
+
+
+def test_init_db_adds_step_11_19_columns_to_cio_runs(tmp_path: Path):
+    db = tmp_path / "test.db"
+    st.init_db(db)
+    with sqlite3.connect(db) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cio_runs)")}
+    for required in {"model_used", "total_cost_usd"}:
+        assert required in cols, f"cio_runs missing column {required!r}"
+
+
+def test_init_db_v3_to_v4_migration_preserves_existing_rows(tmp_path: Path):
+    """Simulate a pre-Step-11.19 database: drop the new columns and
+    re-run init_db. Existing rows must survive the ALTER TABLE additions."""
+    db = tmp_path / "test.db"
+    st.init_db(db)
+    rid = st.start_cio_run("heartbeat", db_path=db)
+    st.record_cio_action(ticker="NVDA", thesis="ai_cake", action="drill",
+                         cio_run_id=rid, db_path=db)
+
+    # Pretend the new cols never existed: delete them via a copy table.
+    # SQLite doesn't support DROP COLUMN until 3.35; we use the table
+    # copy idiom that mirrors how a real legacy DB would look.
+    with sqlite3.connect(db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE cio_actions_v3 AS
+            SELECT id, cio_run_id, ts, trigger, ticker, thesis, action,
+                   rationale, drill_run_id, reuse_run_id, confidence, decision_json
+              FROM cio_actions;
+            DROP TABLE cio_actions;
+            ALTER TABLE cio_actions_v3 RENAME TO cio_actions;
+
+            CREATE TABLE cio_runs_v3 AS
+            SELECT run_id, trigger, started_at, ended_at, duration_s, status,
+                   error, n_actions, n_drilled, n_reused, n_dismissed, summary
+              FROM cio_runs;
+            DROP TABLE cio_runs;
+            ALTER TABLE cio_runs_v3 RENAME TO cio_runs;
+            """
+        )
+
+    # Re-run init_db: the v4 migration must add the new columns and keep data.
+    st.init_db(db)
+    with sqlite3.connect(db) as conn:
+        action_cols = {row[1] for row in conn.execute("PRAGMA table_info(cio_actions)")}
+        run_cols = {row[1] for row in conn.execute("PRAGMA table_info(cio_runs)")}
+        action_count = conn.execute("SELECT COUNT(*) FROM cio_actions").fetchone()[0]
+
+    assert "model_used" in action_cols
+    assert "cost_usd" in action_cols
+    assert "total_cost_usd" in run_cols
+    assert action_count == 1, "pre-existing row was lost during migration"
+
+
+def test_cio_model_performance_groups_by_model(tmp_path: Path):
+    """Multiple models in cio_actions roll up to one row per model,
+    with parse_fail counted from the rationale prefix."""
+    db = tmp_path / "test.db"
+
+    # Three calls on gpt-mini (one parse-fail), two on haiku (clean).
+    st.record_cio_action(
+        ticker="A", action="drill", model_used="openai/gpt-5.4-mini",
+        tokens_in=1000, tokens_out=50, cost_usd=0.001, latency_s=1.0,
+        db_path=db,
+    )
+    st.record_cio_action(
+        ticker="B", action="dismiss", model_used="openai/gpt-5.4-mini",
+        tokens_in=2000, tokens_out=80, cost_usd=0.002, latency_s=1.5,
+        db_path=db,
+    )
+    st.record_cio_action(
+        ticker="C", action="dismiss",
+        rationale="LLM response unparseable: empty",
+        model_used="openai/gpt-5.4-mini",
+        tokens_in=1500, tokens_out=0, cost_usd=0.001, latency_s=2.0,
+        db_path=db,
+    )
+    st.record_cio_action(
+        ticker="D", action="reuse", model_used="anthropic/claude-haiku-4.5",
+        tokens_in=900, tokens_out=70, cost_usd=0.0009, latency_s=0.8,
+        db_path=db,
+    )
+    st.record_cio_action(
+        ticker="E", action="dismiss", model_used="anthropic/claude-haiku-4.5",
+        tokens_in=950, tokens_out=60, cost_usd=0.001, latency_s=0.9,
+        db_path=db,
+    )
+
+    perf = st.cio_model_performance(days=30, db_path=db)
+    by_model = {p["model_used"]: p for p in perf}
+
+    assert "openai/gpt-5.4-mini" in by_model
+    assert "anthropic/claude-haiku-4.5" in by_model
+
+    gpt = by_model["openai/gpt-5.4-mini"]
+    assert gpt["n_calls"] == 3
+    assert gpt["n_drills"] == 1
+    assert gpt["n_dismisses"] == 2
+    assert gpt["n_parse_fails"] == 1
+    assert gpt["total_cost_usd"] == pytest.approx(0.004)
+
+    hk = by_model["anthropic/claude-haiku-4.5"]
+    assert hk["n_calls"] == 2
+    assert hk["n_reuses"] == 1
+    assert hk["n_parse_fails"] == 0
+
+
+def test_cio_model_performance_excludes_old_rows(tmp_path: Path):
+    """Rows older than `days` must not appear in the rollup."""
+    db = tmp_path / "test.db"
+    st.record_cio_action(
+        ticker="A", action="dismiss", model_used="openai/gpt-5.4-mini",
+        cost_usd=0.001, db_path=db,
+    )
+    # Back-date that row to 100 days ago.
+    with sqlite3.connect(db) as conn:
+        old_iso = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+        conn.execute("UPDATE cio_actions SET ts = ?", (old_iso,))
+
+    perf = st.cio_model_performance(days=30, db_path=db)
+    assert perf == [], "old rows must be filtered by the days window"
+
+
+def test_cio_model_performance_empty_when_db_missing(tmp_path: Path):
+    assert st.cio_model_performance(db_path=tmp_path / "nope.db") == []
+
+
+def test_finish_cio_run_persists_model_and_total_cost(tmp_path: Path):
+    """Step 11.19 — `finish_cio_run` round-trips the new fields."""
+    db = tmp_path / "test.db"
+    rid = st.start_cio_run("heartbeat", db_path=db)
+    st.finish_cio_run(
+        rid, "completed",
+        model_used="openai/gpt-5.4-mini",
+        total_cost_usd=0.1312,
+        n_actions=38, n_drilled=3, n_reused=0, n_dismissed=35,
+        duration_s=390.0,
+        db_path=db,
+    )
+    runs = st.recent_cio_runs(db_path=db)
+    assert runs[0]["model_used"] == "openai/gpt-5.4-mini"
+    assert runs[0]["total_cost_usd"] == pytest.approx(0.1312)
+
+
+def test_finish_cio_run_defaults_zero_cost_when_unset(tmp_path: Path):
+    """Backwards-compat: callers that don't pass model/cost still work."""
+    db = tmp_path / "test.db"
+    rid = st.start_cio_run("heartbeat", db_path=db)
+    st.finish_cio_run(rid, "completed", db_path=db)  # no kwargs
+    runs = st.recent_cio_runs(db_path=db)
+    assert runs[0]["model_used"] is None
+    assert runs[0]["total_cost_usd"] == 0.0
+
+
+def test_record_cio_action_persists_telemetry_columns(tmp_path: Path):
+    db = tmp_path / "test.db"
+    aid = st.record_cio_action(
+        ticker="NVDA", thesis="ai_cake", action="drill",
+        model_used="openai/gpt-5.4-mini",
+        tokens_in=2500, tokens_out=80,
+        cost_usd=0.0025, latency_s=1.5,
+        db_path=db,
+    )
+    assert aid > 0
+    actions = st.recent_cio_actions(db_path=db)
+    a = actions[0]
+    assert a["model_used"] == "openai/gpt-5.4-mini"
+    assert a["tokens_in"] == 2500
+    assert a["tokens_out"] == 80
+    assert a["cost_usd"] == pytest.approx(0.0025)
+    assert a["latency_s"] == pytest.approx(1.5)

@@ -167,9 +167,16 @@ def _record_decision(
     cio_run_id: str,
     trigger: str,
     decision: CIODecision,
+    telemetry: dict | None = None,
     drill_run_id: str | None = None,
 ) -> None:
-    """Persist a single CIODecision as a `cio_actions` row."""
+    """Persist a single CIODecision as a `cio_actions` row.
+
+    `telemetry` is the dict the planner returned: model_used, tokens_in,
+    tokens_out, cost_usd, latency_s. None → all zeros (e.g. for the
+    drill-budget-cap demoted decisions that have no LLM call of their own).
+    """
+    t = telemetry or {}
     try:
         state_db.record_cio_action(
             cio_run_id=cio_run_id,
@@ -182,6 +189,11 @@ def _record_decision(
             reuse_run_id=decision.reuse_run_id if decision.action == "reuse" else None,
             confidence=decision.confidence,
             decision_json=decision.model_dump_json(),
+            model_used=t.get("model_used"),
+            tokens_in=int(t.get("tokens_in") or 0),
+            tokens_out=int(t.get("tokens_out") or 0),
+            cost_usd=float(t.get("cost_usd") or 0.0),
+            latency_s=float(t.get("latency_s") or 0.0),
         )
     except Exception as e:
         logger.warning(
@@ -196,13 +208,18 @@ async def _execute_plan(
     trigger: str,
     plan: Plan,
     pair_to_thesis: dict[tuple[str, str | None], dict],
+    pair_to_telemetry: dict[tuple[str, str | None], dict],
 ) -> Plan:
     """Run drills + persist every decision as a cio_actions row.
 
     `pair_to_thesis` maps `(ticker, thesis_slug)` → loaded thesis dict so
     we can hand the right thesis to `_drill_one` without re-loading.
+    `pair_to_telemetry` maps the same key → planner-call telemetry dict
+    (model_used, tokens, cost_usd, latency_s) so each cio_actions row
+    captures the LLM call that produced it.
     """
     for d in plan.decisions:
+        telemetry = pair_to_telemetry.get((d.ticker, d.thesis))
         if d.action == "drill":
             thesis = pair_to_thesis.get((d.ticker, d.thesis))
             if not thesis:
@@ -211,15 +228,19 @@ async def _execute_plan(
                 )
                 _record_decision(
                     cio_run_id=cio_run_id, trigger=trigger, decision=d,
+                    telemetry=telemetry,
                 )
                 continue
             drill_run_id = await _drill_one(d.ticker, thesis)
             _record_decision(
                 cio_run_id=cio_run_id, trigger=trigger, decision=d,
-                drill_run_id=drill_run_id,
+                drill_run_id=drill_run_id, telemetry=telemetry,
             )
         else:
-            _record_decision(cio_run_id=cio_run_id, trigger=trigger, decision=d)
+            _record_decision(
+                cio_run_id=cio_run_id, trigger=trigger, decision=d,
+                telemetry=telemetry,
+            )
     return plan
 
 
@@ -262,7 +283,9 @@ async def _run_cycle(
     t0 = time.perf_counter()
 
     pair_to_thesis: dict[tuple[str, str | None], dict] = {}
+    pair_to_telemetry: dict[tuple[str, str | None], dict] = {}
     decisions: list[CIODecision] = []
+    cycle_model: str | None = None
 
     try:
         for ticker, slug in candidates:
@@ -273,7 +296,7 @@ async def _run_cycle(
             pair_to_thesis[(ticker.upper(), slug)] = thesis
             news = _fetch_news(ticker, thesis.get("name"))
             try:
-                decision = cio_planner.decide(
+                decision, telemetry = cio_planner.decide(
                     ticker=ticker,
                     thesis=thesis,
                     news_items=news,
@@ -285,7 +308,11 @@ async def _run_cycle(
                     action="dismiss", ticker=ticker.upper(), thesis=slug,
                     rationale=f"planner error: {e!s}", confidence="low",
                 )
+                telemetry = cio_planner._empty_telemetry()
             decisions.append(decision)
+            pair_to_telemetry[(ticker.upper(), slug)] = telemetry
+            if cycle_model is None and telemetry.get("model_used"):
+                cycle_model = telemetry["model_used"]
 
         capped_decisions, n_capped = cio_planner.apply_drill_budget(
             decisions, drill_budget=drill_budget,
@@ -298,6 +325,14 @@ async def _run_cycle(
         await _execute_plan(
             cio_run_id=cio_run_id, trigger=trigger, plan=plan,
             pair_to_thesis=pair_to_thesis,
+            pair_to_telemetry=pair_to_telemetry,
+        )
+
+        # Step 11.19 — aggregate per-cycle cost from the per-action
+        # telemetry we just wrote. This is the canonical $-spent-per-CIO-cycle
+        # number Mission Control surfaces; per-action rows have the breakdown.
+        total_cost_usd = float(
+            sum(t.get("cost_usd") or 0.0 for t in pair_to_telemetry.values())
         )
 
         duration_s = time.perf_counter() - t0
@@ -310,6 +345,8 @@ async def _run_cycle(
             n_reused=plan.n_reused,
             n_dismissed=plan.n_dismissed,
             summary=summary,
+            model_used=cycle_model,
+            total_cost_usd=total_cost_usd,
         )
         return plan, summary
     except Exception as e:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -29,6 +30,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from cio import memory as cio_memory
 from cio import rag as cio_rag
+from data import state as state_db
 from data.chroma import _BM25_STOPWORDS
 from utils import logger
 from utils.models import MODEL_CIO
@@ -486,6 +488,17 @@ def _call_llm(*, system_prompt: str, evidence: dict) -> str:
     return resp.choices[0].message.content or ""
 
 
+def _empty_telemetry(model: str | None = None) -> dict:
+    """Zero-init telemetry shape for gate-shortcut / pre-LLM paths."""
+    return {
+        "model_used": model,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost_usd": 0.0,
+        "latency_s": 0.0,
+    }
+
+
 def decide(
     *,
     ticker: str,
@@ -494,49 +507,79 @@ def decide(
     news_items: list[dict] | None = None,
     cooldown_hours: int = cio_memory.DEFAULT_COOLDOWN_HOURS,
     system_prompt: str | None = None,
-) -> CIODecision:
+) -> tuple[CIODecision, dict]:
     """End-to-end per-pair decision: gate → bundle → LLM → parse.
 
-    Always returns a `CIODecision`: a parse failure becomes a deterministic
-    `dismiss` with the error in the rationale (so the run never hangs on
-    a flaky LLM response).
+    Returns `(decision, telemetry)`:
+      - `decision`: a `CIODecision`. On any LLM/parse failure this is a
+        deterministic `dismiss` with the error in the rationale so the
+        cycle never hangs on a flaky model response.
+      - `telemetry`: `{model_used, tokens_in, tokens_out, cost_usd, latency_s}`.
+        All zero for gate-shortcut decisions (yo-yo guard) since no LLM
+        call fired. Captured via the existing `node_telemetry_var`
+        ContextVar — `utils.openrouter`'s interceptor reads
+        `response.usage` per call and writes into the accumulator we
+        bind below.
 
     `system_prompt` defaults to the persona file. Tests pass a stub.
     """
     thesis_slug = (thesis or {}).get("slug") if isinstance(thesis, dict) else None
     gates = evaluate_gates(ticker, thesis_slug, cooldown_hours=cooldown_hours)
     if gates.shortcut is not None:
-        return gates.shortcut
+        return gates.shortcut, _empty_telemetry()
 
     bundle = build_evidence_bundle(
         ticker=ticker, thesis=thesis, gates=gates,
         rag_question=rag_question, news_items=news_items,
     )
 
+    # Bind a fresh telemetry accumulator just for this decide() call. The
+    # openrouter interceptor (utils/openrouter.py) reads response.usage on
+    # each chat_completions create and writes here. We collect totals on
+    # exit and surface them as the per-action telemetry row.
+    accumulator = state_db.new_node_telemetry()
+    cv_token = state_db.node_telemetry_var.set(accumulator)
+    t0 = time.perf_counter()
+    raw: str | None = None
+    llm_error: str | None = None
     try:
         raw = _call_llm(
             system_prompt=system_prompt or _SYSTEM_PROMPT,
             evidence=bundle,
         )
     except Exception as e:
+        llm_error = str(e)
         logger.error(f"[cio.planner] LLM call failed for {ticker}/{thesis_slug}: {e}")
-        return CIODecision(
-            action="dismiss",
-            ticker=ticker.upper(),
-            thesis=thesis_slug,
-            rationale=f"LLM call failed: {e!s}",
-            confidence="low",
+    finally:
+        latency_s = time.perf_counter() - t0
+        state_db.node_telemetry_var.reset(cv_token)
+
+    telemetry = {
+        "model_used":  MODEL_CIO,
+        "tokens_in":   int(accumulator.get("tokens_in") or 0),
+        "tokens_out":  int(accumulator.get("tokens_out") or 0),
+        "cost_usd":    float(accumulator.get("cost_usd") or 0.0),
+        "latency_s":   round(latency_s, 3),
+    }
+
+    if llm_error is not None:
+        return (
+            CIODecision(
+                action="dismiss", ticker=ticker.upper(), thesis=thesis_slug,
+                rationale=f"LLM call failed: {llm_error}", confidence="low",
+            ),
+            telemetry,
         )
 
-    decision, err = _parse_decision(raw)
+    decision, err = _parse_decision(raw or "")
     if decision is None:
         logger.warning(f"[cio.planner] parse failed for {ticker}/{thesis_slug}: {err}")
-        return CIODecision(
-            action="dismiss",
-            ticker=ticker.upper(),
-            thesis=thesis_slug,
-            rationale=f"LLM response unparseable: {err}",
-            confidence="low",
+        return (
+            CIODecision(
+                action="dismiss", ticker=ticker.upper(), thesis=thesis_slug,
+                rationale=f"LLM response unparseable: {err}", confidence="low",
+            ),
+            telemetry,
         )
 
     # Force ticker / thesis to match what we asked about — the LLM has a
@@ -553,7 +596,7 @@ def decide(
     if decision.action == "reuse" and not decision.reuse_run_id:
         decision.reuse_run_id = (gates.cooldown_status or {}).get("last_drill_run_id")
 
-    return decision
+    return decision, telemetry
 
 
 # --- Plan-level: cap drills + rank --------------------------------------

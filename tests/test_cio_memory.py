@@ -178,3 +178,48 @@ def test_dismissals_in_window_excludes_old_rows(isolated_db, monkeypatch):
         conn.execute("UPDATE cio_actions SET ts = ?", (old_iso,))
     out = cio_memory.dismissals_in_window("NVDA", "ai_cake", window_days=7)
     assert out == []
+
+
+# --- Step 11.20 — slug-based cooldown round-trip regression --------------
+
+
+def test_cooldown_round_trip_via_invoke_with_telemetry(isolated_db, monkeypatch):
+    """Regression for the schema-mismatch bug found 2026-05-07: the CIO
+    planner queries `graph_runs.thesis` by SLUG (e.g. "ai_cake") but the
+    runner used to write the human-readable NAME (e.g. "AI cake"). This
+    silently broke the cooldown gate — the planner saw `active=False`
+    even when there was a fresh drill 17 minutes earlier — and let the
+    LLM re-drill the same pair.
+
+    Test: simulate `invoke_with_telemetry` writing a graph_runs row with
+    a slug-bearing thesis dict, then assert that the CIO memory layer's
+    cooldown_status round-trips with `active=True` and a usable
+    `last_drill_run_id`.
+    """
+    # Open + close a graph_runs row using the same helpers
+    # `invoke_with_telemetry` uses, with a thesis dict that has both
+    # `slug` and `name` set. The runner picks `slug` per Step 11.20.
+    thesis = {"slug": "ai_cake", "name": "AI cake"}
+    label = thesis.get("slug") or thesis.get("name") or "?"
+    rid = state_db.start_graph_run("NVDA", label)
+    state_db.finish_graph_run(rid, "completed", duration_s=42.0)
+
+    # CIO memory layer queries by slug — must find the row.
+    out = cio_memory.cooldown_status("NVDA", "ai_cake")
+    assert out["active"] is True, (
+        "cooldown_status reports inactive — graph_runs.thesis is probably "
+        "still being written as the human name instead of the slug. See "
+        "agents/__init__.py:invoke_with_telemetry."
+    )
+    assert out["last_drill_run_id"] == rid
+
+
+def test_cooldown_inactive_when_slug_mismatch(isolated_db):
+    """Sanity counter-test: if a row IS written with the wrong label
+    (the legacy bug shape), cooldown_status correctly reports inactive.
+    Confirms the failure mode the regression test above guards against."""
+    rid = state_db.start_graph_run("NVDA", "AI cake")  # ← legacy bad label
+    state_db.finish_graph_run(rid, "completed")
+    out = cio_memory.cooldown_status("NVDA", "ai_cake")  # ← slug query
+    assert out["active"] is False
+    assert out["last_drill_run_id"] is None

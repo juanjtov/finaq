@@ -262,10 +262,20 @@ async def invoke_with_telemetry(graph: Any, initial_state: dict[str, Any]) -> di
     """
     ticker = (initial_state.get("ticker") or "").upper() or "?"
     thesis = initial_state.get("thesis") or {}
-    thesis_name = (
-        thesis.get("name") if isinstance(thesis, dict) else str(thesis) if thesis else "?"
-    )
-    run_id = state_db.start_graph_run(ticker, thesis_name)
+    # Persist the SLUG (canonical) on graph_runs.thesis, not the human-
+    # readable name. The CIO planner's cooldown gate joins
+    # `cio_actions.thesis` (slug) ↔ `graph_runs.thesis` and was silently
+    # broken before this fix because rows had `name` (e.g. "AI cake")
+    # while the planner queried by `slug` (e.g. "ai_cake"). Fall back to
+    # name when slug is absent (older callers, ad-hoc invocations
+    # without the slug field set).
+    if isinstance(thesis, dict):
+        thesis_label = thesis.get("slug") or thesis.get("name") or "?"
+    elif thesis:
+        thesis_label = str(thesis)
+    else:
+        thesis_label = "?"
+    run_id = state_db.start_graph_run(ticker, thesis_label)
     token = state_db.current_run_id.set(run_id)
     t0 = time.perf_counter()
 

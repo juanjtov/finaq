@@ -161,9 +161,13 @@ def test_decide_yo_yo_shortcut_skips_llm(isolated_db, stub_external, monkeypatch
 
     monkeypatch.setattr(planner, "_call_llm", _fail_if_called)
 
-    out = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    out, telemetry = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
     assert out.action == "dismiss"
     assert called["n"] == 0
+    # Gate-shortcut path → no LLM ran, telemetry zeroed.
+    assert telemetry["model_used"] is None
+    assert telemetry["cost_usd"] == 0.0
+    assert telemetry["tokens_in"] == 0
 
 
 def test_decide_calls_llm_and_returns_parsed(isolated_db, stub_external, monkeypatch):
@@ -179,10 +183,14 @@ def test_decide_calls_llm_and_returns_parsed(isolated_db, stub_external, monkeyp
         ),
     )
 
-    out = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    out, telemetry = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
     assert out.action == "drill"
     assert out.confidence == "high"
     assert out.thesis == "ai_cake"  # post-processed from input
+    # Telemetry shape is always populated, even when the openrouter
+    # interceptor didn't see usage (because _call_llm is monkey-patched).
+    assert telemetry["model_used"] is not None  # planner stamps MODEL_CIO
+    assert "latency_s" in telemetry
 
 
 def test_decide_normalises_ticker_case(isolated_db, stub_external, monkeypatch):
@@ -197,16 +205,19 @@ def test_decide_normalises_ticker_case(isolated_db, stub_external, monkeypatch):
             }
         ),
     )
-    out = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    out, _ = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
     assert out.ticker == "NVDA"
 
 
 def test_decide_falls_back_to_dismiss_on_parse_error(isolated_db, stub_external, monkeypatch):
     monkeypatch.setattr(planner, "_call_llm", lambda **kw: "garbage not json")
-    out = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    out, telemetry = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
     assert out.action == "dismiss"
     assert out.confidence == "low"
     assert "unparseable" in out.rationale.lower()
+    # Telemetry still captured even on parse fail — the LLM call did fire,
+    # so we want the latency_s / tokens to land on the cio_actions row.
+    assert telemetry["latency_s"] >= 0.0
 
 
 def test_decide_falls_back_to_dismiss_on_llm_exception(isolated_db, stub_external, monkeypatch):
@@ -214,9 +225,11 @@ def test_decide_falls_back_to_dismiss_on_llm_exception(isolated_db, stub_externa
         raise RuntimeError("openrouter 503")
 
     monkeypatch.setattr(planner, "_call_llm", _boom)
-    out = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    out, telemetry = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
     assert out.action == "dismiss"
     assert "llm call failed" in out.rationale.lower()
+    # Telemetry still has the model + a (small) latency reading.
+    assert telemetry["model_used"] is not None
 
 
 def test_decide_reuse_backfills_run_id_when_llm_omits_it(isolated_db, stub_external, monkeypatch):
@@ -234,9 +247,36 @@ def test_decide_reuse_backfills_run_id_when_llm_omits_it(isolated_db, stub_exter
             }
         ),
     )
-    out = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    out, _ = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
     assert out.action == "reuse"
     assert out.reuse_run_id == rid
+
+
+def test_decide_telemetry_captured_via_contextvar(isolated_db, stub_external, monkeypatch):
+    """When `_call_llm` runs (stubbed), the planner binds an accumulator
+    to `node_telemetry_var`. To validate the wiring, we monkey-patch
+    `_call_llm` to write directly into the bound accumulator — same
+    surface the real openrouter interceptor uses."""
+    def _llm_with_usage(**kw):
+        # Simulate what utils/openrouter's interceptor does on a real call.
+        accumulator = state_db.node_telemetry_var.get()
+        if accumulator is not None:
+            accumulator["tokens_in"] += 1500
+            accumulator["tokens_out"] += 200
+            accumulator["cost_usd"] += 0.0024
+            accumulator["n_calls"] += 1
+        return json.dumps(
+            {"action": "dismiss", "ticker": "NVDA",
+             "rationale": "quiet", "confidence": "low"}
+        )
+
+    monkeypatch.setattr(planner, "_call_llm", _llm_with_usage)
+
+    out, telemetry = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    assert out.action == "dismiss"
+    assert telemetry["tokens_in"] == 1500
+    assert telemetry["tokens_out"] == 200
+    assert telemetry["cost_usd"] == 0.0024
 
 
 # --- apply_drill_budget ---------------------------------------------------

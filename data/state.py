@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 DB_PATH = Path("data_cache/state.db")
-SCHEMA_VERSION = 3  # bumped when cio_runs + cio_actions tables landed (Step 11.5)
+SCHEMA_VERSION = 4  # Step 11.19 — per-CIO-call telemetry: model_used, tokens, cost_usd, latency_s
 
 # Contextvars propagated across asyncio tasks within a single graph invocation.
 # Set by `invoke_with_telemetry`; read by `_safe_node` to attach node rows to
@@ -140,18 +140,23 @@ CREATE TABLE IF NOT EXISTS errors (
 -- cio_runs row per cycle; the planner writes one cio_actions row per
 -- decision. Mission Control reads both to render "last 20 actions".
 CREATE TABLE IF NOT EXISTS cio_runs (
-    run_id        TEXT PRIMARY KEY,
-    trigger       TEXT NOT NULL,                -- heartbeat | on_demand | catchup
-    started_at    TEXT NOT NULL,
-    ended_at      TEXT,
-    duration_s    REAL,
-    status        TEXT NOT NULL,                -- running | completed | failed
-    error         TEXT,
-    n_actions     INTEGER NOT NULL DEFAULT 0,
-    n_drilled     INTEGER NOT NULL DEFAULT 0,
-    n_reused      INTEGER NOT NULL DEFAULT 0,
-    n_dismissed   INTEGER NOT NULL DEFAULT 0,
-    summary       TEXT                          -- exec summary markdown sent to user
+    run_id          TEXT PRIMARY KEY,
+    trigger         TEXT NOT NULL,                -- heartbeat | on_demand | catchup
+    started_at      TEXT NOT NULL,
+    ended_at        TEXT,
+    duration_s      REAL,
+    status          TEXT NOT NULL,                -- running | completed | failed
+    error           TEXT,
+    n_actions       INTEGER NOT NULL DEFAULT 0,
+    n_drilled       INTEGER NOT NULL DEFAULT 0,
+    n_reused        INTEGER NOT NULL DEFAULT 0,
+    n_dismissed     INTEGER NOT NULL DEFAULT 0,
+    summary         TEXT,                         -- exec summary markdown sent to user
+    -- Step 11.19 — model + cost rollup. `model_used` is the MODEL_CIO env at
+    -- decide time (one cycle = one model). `total_cost_usd` is the sum of
+    -- per-action LLM costs computed from MODEL_PRICING + response.usage.
+    model_used      TEXT,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS cio_actions (
@@ -167,6 +172,15 @@ CREATE TABLE IF NOT EXISTS cio_actions (
     reuse_run_id   TEXT,                        -- graph_runs.run_id when action=reuse
     confidence     TEXT,                        -- low | medium | high
     decision_json  TEXT,                        -- full CIODecision Pydantic serialised
+    -- Step 11.19 — per-call LLM telemetry. Filled by the planner via
+    -- node_telemetry_var ContextVar (the openrouter interceptor reads
+    -- response.usage and computes USD via MODEL_PRICING). All zero for
+    -- gate-shortcut decisions (yo-yo guard) since no LLM call fired.
+    model_used     TEXT,                        -- OpenRouter model id used for this call
+    tokens_in      INTEGER NOT NULL DEFAULT 0,
+    tokens_out     INTEGER NOT NULL DEFAULT 0,
+    cost_usd       REAL    NOT NULL DEFAULT 0.0,
+    latency_s      REAL    NOT NULL DEFAULT 0.0,
     FOREIGN KEY (cio_run_id) REFERENCES cio_runs(run_id)
 );
 
@@ -215,6 +229,36 @@ def init_db(db_path: Path | None = None) -> None:
                 conn.execute(
                     f"ALTER TABLE node_runs ADD COLUMN {col_name} {col_def}"
                 )
+
+        # Step 11.19 — cio_actions per-call telemetry columns.
+        existing_actions = {
+            row["name"] for row in conn.execute("PRAGMA table_info(cio_actions)")
+        }
+        for col_name, col_def in [
+            ("model_used", "TEXT"),
+            ("tokens_in",  "INTEGER NOT NULL DEFAULT 0"),
+            ("tokens_out", "INTEGER NOT NULL DEFAULT 0"),
+            ("cost_usd",   "REAL    NOT NULL DEFAULT 0.0"),
+            ("latency_s",  "REAL    NOT NULL DEFAULT 0.0"),
+        ]:
+            if col_name not in existing_actions:
+                conn.execute(
+                    f"ALTER TABLE cio_actions ADD COLUMN {col_name} {col_def}"
+                )
+
+        # Step 11.19 — cio_runs cost rollup columns.
+        existing_runs = {
+            row["name"] for row in conn.execute("PRAGMA table_info(cio_runs)")
+        }
+        for col_name, col_def in [
+            ("model_used",     "TEXT"),
+            ("total_cost_usd", "REAL NOT NULL DEFAULT 0.0"),
+        ]:
+            if col_name not in existing_runs:
+                conn.execute(
+                    f"ALTER TABLE cio_runs ADD COLUMN {col_name} {col_def}"
+                )
+
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
@@ -663,9 +707,16 @@ def finish_cio_run(
     n_reused: int = 0,
     n_dismissed: int = 0,
     summary: str | None = None,
+    model_used: str | None = None,
+    total_cost_usd: float = 0.0,
     db_path: Path | None = None,
 ) -> None:
-    """Close a cio_runs row at completion. `status` ∈ {completed, failed}."""
+    """Close a cio_runs row at completion. `status` ∈ {completed, failed}.
+
+    `model_used` and `total_cost_usd` (Step 11.19) are summed across all
+    cio_actions in this cycle by the orchestrator, then passed in here so
+    Mission Control can compare per-cycle cost without re-aggregating.
+    """
     if status not in ("completed", "failed"):
         raise ValueError(f"status must be 'completed' or 'failed', got {status!r}")
     ended_at = _now_iso()
@@ -675,13 +726,13 @@ def finish_cio_run(
             UPDATE cio_runs
                SET ended_at = ?, status = ?, error = ?, duration_s = ?,
                    n_actions = ?, n_drilled = ?, n_reused = ?, n_dismissed = ?,
-                   summary = ?
+                   summary = ?, model_used = ?, total_cost_usd = ?
              WHERE run_id = ?
             """,
             (
                 ended_at, status, error, duration_s,
                 int(n_actions), int(n_drilled), int(n_reused), int(n_dismissed),
-                summary, run_id,
+                summary, model_used, float(total_cost_usd or 0.0), run_id,
             ),
         )
 
@@ -698,6 +749,11 @@ def record_cio_action(
     reuse_run_id: str | None = None,
     confidence: str | None = None,
     decision_json: str | None = None,
+    model_used: str | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    cost_usd: float = 0.0,
+    latency_s: float = 0.0,
     db_path: Path | None = None,
 ) -> int:
     """Append a cio_actions row. Returns the row id.
@@ -705,6 +761,10 @@ def record_cio_action(
     `action` ∈ {drill, reuse, dismiss}. `confidence` ∈ {low, medium, high}.
     `cio_run_id` is the parent cycle id from `start_cio_run` (None ok for
     standalone unit tests).
+
+    Step 11.19 — `model_used`, tokens, cost_usd, and latency_s capture the
+    LLM call that produced this decision. All zero/None for gate-shortcut
+    decisions (yo-yo guard) since no LLM call fired.
     """
     if action not in _CIO_ACTION_VALUES:
         raise ValueError(f"action must be one of {_CIO_ACTION_VALUES}, got {action!r}")
@@ -720,13 +780,17 @@ def record_cio_action(
             """
             INSERT INTO cio_actions (
                 cio_run_id, ts, trigger, ticker, thesis, action, rationale,
-                drill_run_id, reuse_run_id, confidence, decision_json
+                drill_run_id, reuse_run_id, confidence, decision_json,
+                model_used, tokens_in, tokens_out, cost_usd, latency_s
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 cio_run_id, _now_iso(), trigger, ticker, thesis, action, rationale,
                 drill_run_id, reuse_run_id, confidence, decision_json,
+                model_used,
+                int(tokens_in or 0), int(tokens_out or 0),
+                float(cost_usd or 0.0), float(latency_s or 0.0),
             ),
         )
         return cur.lastrowid or 0
@@ -803,6 +867,60 @@ def last_drill_for(
     with _connect(db_path) as conn:
         row = conn.execute(sql, args).fetchone()
     return dict(row) if row else None
+
+
+def cio_model_performance(
+    *,
+    days: int = 30,
+    db_path: Path | None = None,
+) -> list[dict]:
+    """Rollup of CIO per-call metrics grouped by `model_used`, last `days` days.
+
+    Used by Mission Control's "CIO model performance" panel so the user
+    can see which model is producing the best decisions, fastest, cheapest.
+    A `parse_fail` is detected by rationale starting with "LLM response
+    unparseable" (the deterministic-fallback case in
+    `cio.planner.decide`).
+
+    Returns rows like:
+      {
+        "model_used": "openai/gpt-5.4-mini",
+        "n_calls":    154,
+        "n_drills":   8,
+        "n_reuses":   3,
+        "n_dismisses": 143,
+        "n_parse_fails": 11,
+        "avg_latency_s": 4.2,
+        "total_cost_usd": 0.34,
+        "avg_tokens_in":  1840,
+        "avg_tokens_out": 230,
+      }
+    """
+    if not Path(db_path or DB_PATH).exists():
+        return []
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                COALESCE(model_used, '(none — gate shortcut)') AS model_used,
+                COUNT(*)                                          AS n_calls,
+                SUM(CASE WHEN action='drill'    THEN 1 ELSE 0 END) AS n_drills,
+                SUM(CASE WHEN action='reuse'    THEN 1 ELSE 0 END) AS n_reuses,
+                SUM(CASE WHEN action='dismiss'  THEN 1 ELSE 0 END) AS n_dismisses,
+                SUM(CASE WHEN rationale LIKE 'LLM response unparseable%'
+                          OR rationale LIKE 'LLM call failed%'
+                         THEN 1 ELSE 0 END)                       AS n_parse_fails,
+                AVG(latency_s)                                    AS avg_latency_s,
+                SUM(cost_usd)                                     AS total_cost_usd,
+                AVG(tokens_in)                                    AS avg_tokens_in,
+                AVG(tokens_out)                                   AS avg_tokens_out
+              FROM cio_actions
+             WHERE ts >= datetime('now', '-{int(days)} days')
+          GROUP BY model_used
+          ORDER BY n_calls DESC
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def last_successful_cio_run_at(*, db_path: Path | None = None) -> str | None:

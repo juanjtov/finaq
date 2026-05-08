@@ -51,14 +51,16 @@ MODEL_EMBEDDINGS: str = _required("MODEL_EMBEDDINGS")
 # Rates sourced from OpenRouter's public pricing page; refresh quarterly.
 
 MODEL_PRICING: dict[str, tuple[float, float]] = {
-    # Anthropic Claude family (2026-04-26 OpenRouter rates, $/1M tokens)
+    # Anthropic Claude family (2026-05-07 OpenRouter rates, $/1M tokens)
     "anthropic/claude-opus-4.7":   (15.00, 75.00),
     "anthropic/claude-sonnet-4.6": (3.00,  15.00),
     "anthropic/claude-haiku-4.5":  (1.00,  5.00),
     "anthropic/claude-3.5-haiku":  (0.80,  4.00),
     # OpenAI
-    "openai/gpt-5.4-mini":         (0.15,  0.60),
+    "openai/gpt-5.4-mini":         (0.75,  4.50),  # 400K context, 2026-05-07 corrected
     "openai/gpt-4o-mini":          (0.15,  0.60),
+    # DeepSeek
+    "deepseek/deepseek-r1":        (0.70,  2.50),  # cheaper but quirky; see ARCHITECTURE §12
     # Google
     "google/gemini-2.5-flash":     (0.075, 0.30),
     # Embeddings billed differently — nominal placeholder so dashboards

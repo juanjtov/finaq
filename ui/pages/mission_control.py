@@ -363,18 +363,20 @@ def render_state_db_panel() -> None:
 
     section_divider()
 
-    # Recent CIO actions (Step 11.14)
+    # Recent CIO actions (Step 11.14 + 11.19 telemetry columns)
     st.markdown("#### Recent CIO actions")
     st.caption(
         "Each row is one drill / reuse / dismiss decision the CIO made on a "
-        "heartbeat or `/cio` invocation. CIO meta-cycles roll up these "
-        "decisions on the cio_runs row above."
+        "heartbeat or `/cio` invocation. Model + cost + latency capture the "
+        "LLM call that produced the decision."
     )
-    cio_actions = state_db.recent_cio_actions(limit=20)
+    cio_actions = state_db.recent_cio_actions(limit=25)
     if cio_actions:
         action_rows = []
         for a in cio_actions:
             decision_run = a.get("drill_run_id") or a.get("reuse_run_id") or "—"
+            cost = float(a.get("cost_usd") or 0.0)
+            lat = float(a.get("latency_s") or 0.0)
             action_rows.append(
                 {
                     "ts": str(a.get("ts") or "")[:19].replace("T", " "),
@@ -383,7 +385,12 @@ def render_state_db_panel() -> None:
                     "thesis": str(a.get("thesis") or "—"),
                     "action": str(a.get("action") or ""),
                     "confidence": str(a.get("confidence") or "—"),
-                    "rationale": str(a.get("rationale") or "")[:120],
+                    "model": str(a.get("model_used") or "—"),
+                    "tok_in": int(a.get("tokens_in") or 0),
+                    "tok_out": int(a.get("tokens_out") or 0),
+                    "cost_$": f"${cost:.4f}" if cost > 0 else "—",
+                    "lat_s": f"{lat:.2f}" if lat > 0 else "—",
+                    "rationale": str(a.get("rationale") or "")[:100],
                     "run_id": str(decision_run)[:8],
                 }
             )
@@ -394,21 +401,24 @@ def render_state_db_panel() -> None:
             "for the heartbeat (5am + 1pm PT)."
         )
 
-    # Recent CIO cycles (the meta-rollup row).
+    # Recent CIO cycles (the meta-rollup row, now with model + total cost).
     st.markdown("#### Recent CIO cycles")
     cio_runs = state_db.recent_cio_runs(limit=10)
     if cio_runs:
         cycle_rows = []
         for r in cio_runs:
+            total_cost = float(r.get("total_cost_usd") or 0.0)
             cycle_rows.append(
                 {
                     "started": str(r.get("started_at") or "")[:19].replace("T", " "),
                     "trigger": str(r.get("trigger") or ""),
                     "status": str(r.get("status") or ""),
+                    "model": str(r.get("model_used") or "—"),
                     "actions": int(r.get("n_actions") or 0),
                     "drilled": int(r.get("n_drilled") or 0),
                     "reused": int(r.get("n_reused") or 0),
                     "dismissed": int(r.get("n_dismissed") or 0),
+                    "cost_$": f"${total_cost:.4f}" if total_cost > 0 else "—",
                     "duration_s": (
                         f"{r['duration_s']:.1f}" if r.get("duration_s") else "—"
                     ),
@@ -417,6 +427,45 @@ def render_state_db_panel() -> None:
         st.dataframe(pd.DataFrame(cycle_rows), use_container_width=True, hide_index=True)
     else:
         st.caption("No CIO cycles recorded yet.")
+
+    # Step 11.19 — Per-model performance rollup (the comparison panel
+    # the user wants for "which model gave me the best decisions for the
+    # least money over the last 30 days").
+    st.markdown("#### CIO model performance — last 30 days")
+    st.caption(
+        "Compare models across the same per-(ticker, thesis) decision surface. "
+        "`parse_fail` counts deterministic-fallback dismisses where the model's "
+        "JSON output was unparseable. Lower `parse_fail` and lower `cost / call` "
+        "is better, all else equal."
+    )
+    perf = state_db.cio_model_performance(days=30)
+    if perf:
+        perf_rows = []
+        for p in perf:
+            n_calls = int(p.get("n_calls") or 0)
+            tot = float(p.get("total_cost_usd") or 0.0)
+            avg_lat = float(p.get("avg_latency_s") or 0.0)
+            n_fail = int(p.get("n_parse_fails") or 0)
+            fail_rate = (n_fail / n_calls * 100.0) if n_calls else 0.0
+            cost_per_call = (tot / n_calls) if n_calls else 0.0
+            perf_rows.append(
+                {
+                    "model": p.get("model_used") or "—",
+                    "calls": n_calls,
+                    "drills": int(p.get("n_drills") or 0),
+                    "reuses": int(p.get("n_reuses") or 0),
+                    "dismisses": int(p.get("n_dismisses") or 0),
+                    "parse_fail %": f"{fail_rate:.1f}",
+                    "avg lat s": f"{avg_lat:.2f}",
+                    "tot $": f"${tot:.4f}",
+                    "$ / call": f"${cost_per_call:.5f}",
+                    "avg tok_in": int(p.get("avg_tokens_in") or 0),
+                    "avg tok_out": int(p.get("avg_tokens_out") or 0),
+                }
+            )
+        st.dataframe(pd.DataFrame(perf_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No CIO LLM calls recorded in the last 30 days.")
 
     section_divider()
 
