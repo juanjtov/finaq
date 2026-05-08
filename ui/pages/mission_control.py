@@ -363,6 +363,63 @@ def render_state_db_panel() -> None:
 
     section_divider()
 
+    # Recent CIO actions (Step 11.14)
+    st.markdown("#### Recent CIO actions")
+    st.caption(
+        "Each row is one drill / reuse / dismiss decision the CIO made on a "
+        "heartbeat or `/cio` invocation. CIO meta-cycles roll up these "
+        "decisions on the cio_runs row above."
+    )
+    cio_actions = state_db.recent_cio_actions(limit=20)
+    if cio_actions:
+        action_rows = []
+        for a in cio_actions:
+            decision_run = a.get("drill_run_id") or a.get("reuse_run_id") or "—"
+            action_rows.append(
+                {
+                    "ts": str(a.get("ts") or "")[:19].replace("T", " "),
+                    "trigger": str(a.get("trigger") or ""),
+                    "ticker": str(a.get("ticker") or ""),
+                    "thesis": str(a.get("thesis") or "—"),
+                    "action": str(a.get("action") or ""),
+                    "confidence": str(a.get("confidence") or "—"),
+                    "rationale": str(a.get("rationale") or "")[:120],
+                    "run_id": str(decision_run)[:8],
+                }
+            )
+        st.dataframe(pd.DataFrame(action_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption(
+            "No CIO actions recorded. Run `/cio` from Telegram or wait "
+            "for the heartbeat (5am + 1pm PT)."
+        )
+
+    # Recent CIO cycles (the meta-rollup row).
+    st.markdown("#### Recent CIO cycles")
+    cio_runs = state_db.recent_cio_runs(limit=10)
+    if cio_runs:
+        cycle_rows = []
+        for r in cio_runs:
+            cycle_rows.append(
+                {
+                    "started": str(r.get("started_at") or "")[:19].replace("T", " "),
+                    "trigger": str(r.get("trigger") or ""),
+                    "status": str(r.get("status") or ""),
+                    "actions": int(r.get("n_actions") or 0),
+                    "drilled": int(r.get("n_drilled") or 0),
+                    "reused": int(r.get("n_reused") or 0),
+                    "dismissed": int(r.get("n_dismissed") or 0),
+                    "duration_s": (
+                        f"{r['duration_s']:.1f}" if r.get("duration_s") else "—"
+                    ),
+                }
+            )
+        st.dataframe(pd.DataFrame(cycle_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No CIO cycles recorded yet.")
+
+    section_divider()
+
     # Recent errors table
     st.markdown("#### Recent errors")
     errs = state_db.recent_errors(limit=20)

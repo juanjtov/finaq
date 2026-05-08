@@ -202,6 +202,7 @@ def test_main_dashboard_renders_without_exception(_no_query_params):
         "mission_control.py",
         "direct_agent.py",
         "new_thesis.py",
+        "theses_admin.py",
     ],
 )
 def test_each_page_renders_without_exception(page_file):
@@ -441,6 +442,33 @@ def test_direct_agent_page_renders_agent_dropdown():
 
 
 # --- New Thesis form fields -----------------------------------------------
+
+
+def test_theses_admin_renders_three_sections_and_per_row_buttons():
+    """Theses admin page must show:
+      - "Curated theses" / "Ad-hoc theses" / "Archive" subheaders
+      - At least one curated thesis row + Demote button (real repo has ai_cake)
+      - At least one adhoc thesis row + Promote button (real repo has adhoc_*)
+    """
+    at = AppTest.from_file(
+        str(PAGES_DIR / "theses_admin.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+
+    subheaders = [s.value for s in at.subheader]
+    for expected in ("Curated theses", "Ad-hoc theses", "Archive"):
+        assert expected in subheaders, (
+            f"Theses admin missing '{expected}' subheader; saw: {subheaders}"
+        )
+
+    button_keys = {b.key for b in at.button if b.key}
+    # At least one Demote button for a curated slug AND one Promote button
+    # for an adhoc slug — otherwise the page isn't functional.
+    has_demote = any(k.startswith("demote_") for k in button_keys)
+    has_promote = any(k.startswith("promote_") for k in button_keys)
+    assert has_demote, f"no Demote buttons rendered; keys: {button_keys}"
+    assert has_promote, f"no Promote buttons rendered; keys: {button_keys}"
 
 
 def test_new_thesis_page_renders_thesis_name_input():

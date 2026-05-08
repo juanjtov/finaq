@@ -27,7 +27,10 @@ def test_init_db_creates_all_tables(tmp_path: Path):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-    expected = {"meta", "graph_runs", "node_runs", "alerts", "triage_runs", "errors"}
+    expected = {
+        "meta", "graph_runs", "node_runs", "alerts", "triage_runs", "errors",
+        "cio_runs", "cio_actions",  # Step 11.5
+    }
     assert expected.issubset(names), f"missing tables: {expected - names}"
 
 
@@ -503,3 +506,188 @@ def test_current_run_id_contextvar_set_and_get():
     finally:
         st.current_run_id.reset(token)
     assert st.current_run_id.get() is None
+
+
+# --- CIO cycle + action recording (Step 11.5) -----------------------------
+
+
+def test_start_cio_run_returns_uuid_and_inserts_running_row(tmp_path: Path):
+    db = tmp_path / "test.db"
+    run_id = st.start_cio_run("heartbeat", db_path=db)
+    assert run_id and len(run_id) == 36  # uuid4 string
+
+    with sqlite3.connect(db) as conn:
+        row = conn.execute(
+            "SELECT trigger, status, ended_at FROM cio_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "heartbeat"
+    assert row[1] == "running"
+    assert row[2] is None  # not yet finished
+
+
+def test_start_cio_run_rejects_unknown_trigger(tmp_path: Path):
+    with pytest.raises(ValueError, match="trigger"):
+        st.start_cio_run("scheduled", db_path=tmp_path / "test.db")
+
+
+def test_finish_cio_run_updates_counts_and_summary(tmp_path: Path):
+    db = tmp_path / "test.db"
+    run_id = st.start_cio_run("on_demand", db_path=db)
+    st.finish_cio_run(
+        run_id, "completed",
+        duration_s=12.4, n_actions=4, n_drilled=1, n_reused=2, n_dismissed=1,
+        summary="Reused MSFT, drilled NVDA, dismissed AAPL+GOOGL.",
+        db_path=db,
+    )
+    runs = st.recent_cio_runs(db_path=db)
+    assert len(runs) == 1
+    r = runs[0]
+    assert r["status"] == "completed"
+    assert r["n_actions"] == 4 and r["n_drilled"] == 1
+    assert r["n_reused"] == 2 and r["n_dismissed"] == 1
+    assert r["duration_s"] == 12.4
+    assert "MSFT" in (r["summary"] or "")
+
+
+def test_finish_cio_run_rejects_unknown_status(tmp_path: Path):
+    db = tmp_path / "test.db"
+    run_id = st.start_cio_run("heartbeat", db_path=db)
+    with pytest.raises(ValueError, match="status"):
+        st.finish_cio_run(run_id, "in_progress", db_path=db)
+
+
+def test_record_cio_action_round_trip_with_drill(tmp_path: Path):
+    db = tmp_path / "test.db"
+    cio_run_id = st.start_cio_run("heartbeat", db_path=db)
+    drill_run_id = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+
+    aid = st.record_cio_action(
+        cio_run_id=cio_run_id,
+        ticker="NVDA",
+        thesis="ai_cake",
+        action="drill",
+        rationale="Latest 10-Q lands tomorrow; refresh now",
+        drill_run_id=drill_run_id,
+        confidence="high",
+        decision_json='{"action":"drill","ticker":"NVDA"}',
+        db_path=db,
+    )
+    assert aid > 0
+
+    actions = st.recent_cio_actions(db_path=db)
+    assert len(actions) == 1
+    a = actions[0]
+    assert a["ticker"] == "NVDA"
+    assert a["action"] == "drill"
+    assert a["confidence"] == "high"
+    assert a["drill_run_id"] == drill_run_id
+    assert a["cio_run_id"] == cio_run_id
+
+
+def test_record_cio_action_rejects_unknown_action(tmp_path: Path):
+    db = tmp_path / "test.db"
+    with pytest.raises(ValueError, match="action"):
+        st.record_cio_action(
+            ticker="NVDA", action="postpone",  # not allowed
+            db_path=db,
+        )
+
+
+def test_record_cio_action_rejects_unknown_confidence(tmp_path: Path):
+    db = tmp_path / "test.db"
+    with pytest.raises(ValueError, match="confidence"):
+        st.record_cio_action(
+            ticker="NVDA", action="dismiss", confidence="strong",  # not allowed
+            db_path=db,
+        )
+
+
+def test_recent_cio_actions_filters_by_ticker_and_thesis(tmp_path: Path):
+    db = tmp_path / "test.db"
+    for ticker, thesis in (
+        ("NVDA", "ai_cake"),
+        ("MSFT", "ai_cake"),
+        ("NVDA", "nvda_halo"),
+    ):
+        st.record_cio_action(
+            ticker=ticker, thesis=thesis, action="reuse", db_path=db,
+        )
+
+    only_nvda = st.recent_cio_actions(ticker="NVDA", db_path=db)
+    assert {a["thesis"] for a in only_nvda} == {"ai_cake", "nvda_halo"}
+
+    only_pair = st.recent_cio_actions(ticker="NVDA", thesis="ai_cake", db_path=db)
+    assert len(only_pair) == 1
+    assert only_pair[0]["thesis"] == "ai_cake"
+
+
+def test_last_drill_for_returns_most_recent_completed(tmp_path: Path):
+    db = tmp_path / "test.db"
+    # Two completed graph_runs for NVDA on ai_cake — older first.
+    rid_old = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    st.finish_graph_run(rid_old, "completed", db_path=db)
+    time.sleep(0.01)  # ensures distinct timestamps
+    rid_new = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    st.finish_graph_run(rid_new, "completed", db_path=db)
+
+    # And one failed run that must NOT be returned.
+    rid_failed = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    st.finish_graph_run(rid_failed, "failed", db_path=db)
+
+    last = st.last_drill_for("NVDA", "ai_cake", db_path=db)
+    assert last is not None
+    assert last["run_id"] == rid_new
+    assert last["status"] == "completed"
+
+
+def test_last_drill_for_thesis_optional(tmp_path: Path):
+    """Without a thesis arg, returns the most recent completed run for
+    the ticker across all theses."""
+    db = tmp_path / "test.db"
+    rid = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    st.finish_graph_run(rid, "completed", db_path=db)
+
+    last = st.last_drill_for("NVDA", db_path=db)
+    assert last is not None and last["run_id"] == rid
+
+
+def test_last_drill_for_returns_none_when_no_run(tmp_path: Path):
+    db = tmp_path / "test.db"
+    st.init_db(db)
+    assert st.last_drill_for("NVDA", "ai_cake", db_path=db) is None
+
+
+def test_last_successful_cio_run_at_returns_iso_or_none(tmp_path: Path):
+    db = tmp_path / "test.db"
+    st.init_db(db)
+    assert st.last_successful_cio_run_at(db_path=db) is None
+
+    cio_run_id = st.start_cio_run("heartbeat", db_path=db)
+    # Still 'running' → not counted.
+    assert st.last_successful_cio_run_at(db_path=db) is None
+
+    st.finish_cio_run(cio_run_id, "completed", db_path=db)
+    ts = st.last_successful_cio_run_at(db_path=db)
+    assert isinstance(ts, str)
+    assert ts.startswith("20")  # ISO-like
+
+
+def test_recent_cio_runs_orders_most_recent_first(tmp_path: Path):
+    db = tmp_path / "test.db"
+    rids: list[str] = []
+    for trigger in ("heartbeat", "on_demand", "catchup"):
+        rids.append(st.start_cio_run(trigger, db_path=db))
+        time.sleep(0.01)
+    runs = st.recent_cio_runs(limit=10, db_path=db)
+    assert [r["run_id"] for r in runs] == list(reversed(rids))
+
+
+def test_recent_cio_runs_empty_when_db_missing(tmp_path: Path):
+    """No DB on disk → empty list, no exception. Mirrors recent_runs."""
+    assert st.recent_cio_runs(db_path=tmp_path / "nope.db") == []
+
+
+def test_recent_cio_actions_empty_when_db_missing(tmp_path: Path):
+    assert st.recent_cio_actions(db_path=tmp_path / "nope.db") == []

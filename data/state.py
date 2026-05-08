@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 DB_PATH = Path("data_cache/state.db")
-SCHEMA_VERSION = 2  # bumped when node_runs got tokens_in/tokens_out/cost_usd/n_calls
+SCHEMA_VERSION = 3  # bumped when cio_runs + cio_actions tables landed (Step 11.5)
 
 # Contextvars propagated across asyncio tasks within a single graph invocation.
 # Set by `invoke_with_telemetry`; read by `_safe_node` to attach node rows to
@@ -132,6 +132,47 @@ CREATE TABLE IF NOT EXISTS errors (
     message   TEXT NOT NULL,
     run_id    TEXT
 );
+
+-- CIO heartbeat / on-demand cycles (Step 11.5).
+-- Each `cio_runs` row is one CIO cycle (heartbeat firing or `/cio` invocation).
+-- Each `cio_actions` row is one (ticker, thesis) decision the CIO made
+-- during that cycle: drill / reuse / dismiss. The dispatcher writes one
+-- cio_runs row per cycle; the planner writes one cio_actions row per
+-- decision. Mission Control reads both to render "last 20 actions".
+CREATE TABLE IF NOT EXISTS cio_runs (
+    run_id        TEXT PRIMARY KEY,
+    trigger       TEXT NOT NULL,                -- heartbeat | on_demand | catchup
+    started_at    TEXT NOT NULL,
+    ended_at      TEXT,
+    duration_s    REAL,
+    status        TEXT NOT NULL,                -- running | completed | failed
+    error         TEXT,
+    n_actions     INTEGER NOT NULL DEFAULT 0,
+    n_drilled     INTEGER NOT NULL DEFAULT 0,
+    n_reused      INTEGER NOT NULL DEFAULT 0,
+    n_dismissed   INTEGER NOT NULL DEFAULT 0,
+    summary       TEXT                          -- exec summary markdown sent to user
+);
+
+CREATE TABLE IF NOT EXISTS cio_actions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    cio_run_id     TEXT,                        -- parent cio_runs.run_id (NULL for ad-hoc tests)
+    ts             TEXT NOT NULL,
+    trigger        TEXT NOT NULL,               -- heartbeat | on_demand | catchup
+    ticker         TEXT NOT NULL,
+    thesis         TEXT,                        -- thesis slug
+    action         TEXT NOT NULL,               -- drill | reuse | dismiss
+    rationale      TEXT,                        -- short LLM rationale
+    drill_run_id   TEXT,                        -- graph_runs.run_id when action=drill
+    reuse_run_id   TEXT,                        -- graph_runs.run_id when action=reuse
+    confidence     TEXT,                        -- low | medium | high
+    decision_json  TEXT,                        -- full CIODecision Pydantic serialised
+    FOREIGN KEY (cio_run_id) REFERENCES cio_runs(run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cio_actions_ts ON cio_actions(ts);
+CREATE INDEX IF NOT EXISTS idx_cio_actions_cio_run_id ON cio_actions(cio_run_id);
+CREATE INDEX IF NOT EXISTS idx_cio_actions_ticker_thesis ON cio_actions(ticker, thesis, ts);
 """
 
 
@@ -574,3 +615,213 @@ def get_graph_run(run_id: str, *, db_path: Path | None = None) -> dict | None:
             "SELECT * FROM graph_runs WHERE run_id = ?", (run_id,)
         ).fetchone()
     return dict(row) if row else None
+
+
+# --- CIO cycle + action recording (Step 11.5) -----------------------------
+
+
+_CIO_TRIGGER_VALUES = ("heartbeat", "on_demand", "catchup")
+_CIO_ACTION_VALUES = ("drill", "reuse", "dismiss")
+_CIO_STATUS_VALUES = ("running", "completed", "failed")
+_CIO_CONFIDENCE_VALUES = ("low", "medium", "high")
+
+
+def start_cio_run(
+    trigger: str,
+    *,
+    db_path: Path | None = None,
+) -> str:
+    """Open a new cio_runs row in 'running' state. Returns the run_id.
+
+    Caller must call `finish_cio_run` to finalise (status, counts, summary).
+    `trigger` ∈ {heartbeat, on_demand, catchup}.
+    """
+    if trigger not in _CIO_TRIGGER_VALUES:
+        raise ValueError(f"trigger must be one of {_CIO_TRIGGER_VALUES}, got {trigger!r}")
+    init_db(db_path)
+    run_id = _new_run_id()
+    started_at = _now_iso()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO cio_runs (run_id, trigger, started_at, status)
+            VALUES (?, ?, ?, 'running')
+            """,
+            (run_id, trigger, started_at),
+        )
+    return run_id
+
+
+def finish_cio_run(
+    run_id: str,
+    status: str,
+    *,
+    error: str | None = None,
+    duration_s: float | None = None,
+    n_actions: int = 0,
+    n_drilled: int = 0,
+    n_reused: int = 0,
+    n_dismissed: int = 0,
+    summary: str | None = None,
+    db_path: Path | None = None,
+) -> None:
+    """Close a cio_runs row at completion. `status` ∈ {completed, failed}."""
+    if status not in ("completed", "failed"):
+        raise ValueError(f"status must be 'completed' or 'failed', got {status!r}")
+    ended_at = _now_iso()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE cio_runs
+               SET ended_at = ?, status = ?, error = ?, duration_s = ?,
+                   n_actions = ?, n_drilled = ?, n_reused = ?, n_dismissed = ?,
+                   summary = ?
+             WHERE run_id = ?
+            """,
+            (
+                ended_at, status, error, duration_s,
+                int(n_actions), int(n_drilled), int(n_reused), int(n_dismissed),
+                summary, run_id,
+            ),
+        )
+
+
+def record_cio_action(
+    *,
+    ticker: str,
+    action: str,
+    cio_run_id: str | None = None,
+    trigger: str = "heartbeat",
+    thesis: str | None = None,
+    rationale: str | None = None,
+    drill_run_id: str | None = None,
+    reuse_run_id: str | None = None,
+    confidence: str | None = None,
+    decision_json: str | None = None,
+    db_path: Path | None = None,
+) -> int:
+    """Append a cio_actions row. Returns the row id.
+
+    `action` ∈ {drill, reuse, dismiss}. `confidence` ∈ {low, medium, high}.
+    `cio_run_id` is the parent cycle id from `start_cio_run` (None ok for
+    standalone unit tests).
+    """
+    if action not in _CIO_ACTION_VALUES:
+        raise ValueError(f"action must be one of {_CIO_ACTION_VALUES}, got {action!r}")
+    if trigger not in _CIO_TRIGGER_VALUES:
+        raise ValueError(f"trigger must be one of {_CIO_TRIGGER_VALUES}, got {trigger!r}")
+    if confidence is not None and confidence not in _CIO_CONFIDENCE_VALUES:
+        raise ValueError(
+            f"confidence must be one of {_CIO_CONFIDENCE_VALUES} or None, got {confidence!r}"
+        )
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO cio_actions (
+                cio_run_id, ts, trigger, ticker, thesis, action, rationale,
+                drill_run_id, reuse_run_id, confidence, decision_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cio_run_id, _now_iso(), trigger, ticker, thesis, action, rationale,
+                drill_run_id, reuse_run_id, confidence, decision_json,
+            ),
+        )
+        return cur.lastrowid or 0
+
+
+def recent_cio_runs(limit: int = 20, *, db_path: Path | None = None) -> list[dict]:
+    """Most-recent-first list of CIO cycles (heartbeat / on-demand / catchup)."""
+    if not Path(db_path or DB_PATH).exists():
+        return []
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM cio_runs ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def recent_cio_actions(
+    limit: int = 20,
+    *,
+    ticker: str | None = None,
+    thesis: str | None = None,
+    db_path: Path | None = None,
+) -> list[dict]:
+    """Most-recent-first list of CIO decisions. Optionally scope to a
+    specific (ticker, thesis) pair — used by the planner's cooldown gate."""
+    if not Path(db_path or DB_PATH).exists():
+        return []
+    sql = "SELECT * FROM cio_actions"
+    args: list[Any] = []
+    conds: list[str] = []
+    if ticker is not None:
+        conds.append("ticker = ?")
+        args.append(ticker)
+    if thesis is not None:
+        conds.append("thesis = ?")
+        args.append(thesis)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    sql += " ORDER BY ts DESC LIMIT ?"
+    args.append(limit)
+    with _connect(db_path) as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def last_drill_for(
+    ticker: str,
+    thesis: str | None = None,
+    *,
+    db_path: Path | None = None,
+) -> dict | None:
+    """Most-recent COMPLETED graph_run for (ticker, thesis), or None.
+
+    The CIO planner uses this to evaluate the cooldown gate: if the most
+    recent drill for the pair landed within the cooldown window, the
+    planner prefers reuse / dismiss over a fresh drill.
+
+    Note: looks at `graph_runs` regardless of trigger — a manual user
+    drill counts toward the cooldown too, since fresh evidence is fresh
+    evidence whoever produced it.
+    """
+    if not Path(db_path or DB_PATH).exists():
+        return None
+    sql = """
+        SELECT * FROM graph_runs
+        WHERE ticker = ? AND status = 'completed'
+        """
+    args: list[Any] = [ticker]
+    if thesis is not None:
+        sql += " AND thesis = ?"
+        args.append(thesis)
+    sql += " ORDER BY started_at DESC LIMIT 1"
+    with _connect(db_path) as conn:
+        row = conn.execute(sql, args).fetchone()
+    return dict(row) if row else None
+
+
+def last_successful_cio_run_at(*, db_path: Path | None = None) -> str | None:
+    """ISO timestamp of the most-recent COMPLETED CIO cycle, or None.
+
+    Used by the dispatcher's catch-up gate at boot (RunAtLoad=true): if
+    `now - last_successful > 8h`, fire one catchup cycle so a missed
+    heartbeat (Mac was off / droplet was rebooted) doesn't go unnoticed.
+    """
+    if not Path(db_path or DB_PATH).exists():
+        return None
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT ended_at FROM cio_runs
+            WHERE status = 'completed'
+            ORDER BY ended_at DESC LIMIT 1
+            """
+        ).fetchone()
+    if row is None or row["ended_at"] is None:
+        return None
+    return str(row["ended_at"])

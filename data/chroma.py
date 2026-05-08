@@ -38,6 +38,14 @@ from utils.openrouter import get_client
 
 CHROMA_DIR = Path("data_cache/chroma")
 COLLECTION_NAME = "filings"
+"""Default collection name. The chunks-of-SEC-filings RAG corpus.
+
+Other corpora (e.g. `synthesis_reports` for the CIO planner's RAG over
+past drill-in reports) live in their own collections in the same on-disk
+ChromaDB instance — `_get_collection(name="synthesis_reports")` opens or
+creates them. The embedding function + cosine distance config are shared
+across collections; only `where`-clause schema differs."""
+
 DISTANCE_SPACE = "cosine"  # explicit — ChromaDB's default is l2
 TARGET_CHUNK_TOKENS = 800
 CHUNK_OVERLAP_TOKENS = 100
@@ -265,13 +273,17 @@ class OpenRouterEmbedding(EmbeddingFunction[Documents]):
         return cls(model=config.get("model", MODEL_EMBEDDINGS))
 
 
-def _get_collection():
-    """Open (or create) the persistent `filings` collection with cosine distance.
+def _get_collection(name: str = COLLECTION_NAME):
+    """Open (or create) a persistent ChromaDB collection with cosine distance.
+
+    `name` defaults to `COLLECTION_NAME` ("filings") so all existing call
+    sites are unchanged. The CIO planner (Step 11.8) opens
+    `name="synthesis_reports"` to RAG over past drill-in reports.
 
     Note: ChromaDB applies the `configuration` parameter only on collection
     creation. If the on-disk collection was created with a different space
     (e.g., the legacy l2 default), this function returns it unchanged — wipe
-    `data_cache/chroma` and re-ingest to pick up the cosine config.
+    `data_cache/chroma/<collection>` and re-ingest to pick up the cosine config.
     """
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(
@@ -279,7 +291,7 @@ def _get_collection():
         settings=Settings(anonymized_telemetry=False),
     )
     return client.get_or_create_collection(
-        name=COLLECTION_NAME,
+        name=name,
         embedding_function=OpenRouterEmbedding(),
         configuration={"hnsw": {"space": DISTANCE_SPACE}},
     )

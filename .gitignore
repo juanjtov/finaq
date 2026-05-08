@@ -59,6 +59,9 @@ data_cache/
 *.dll
 !docs/**
 
+# Ephemeral Claude Code session state (settings.local.json is fine to commit).
+.claude/scheduled_tasks.lock
+
 # OS
 .DS_Store
 Thumbs.db

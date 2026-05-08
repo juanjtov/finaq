@@ -1156,6 +1156,190 @@ FINAQ, why it was chosen, and any later revisions.
 
 ---
 
+## §12 Autonomous CIO meta-layer (Step 11)
+
+The Phase 1 plan originally called for a "Triage" agent — a Haiku-class
+LLM that polls EDGAR + Tavily, scores items against material thresholds,
+and pushes alerts. We replaced it before building with the **CIO** —
+a meta-layer above the existing graph that decides per `(ticker, thesis)`
+pair whether to **drill** (run the graph), **reuse** (surface a recent
+report with a "still applies" qualifier), or **dismiss** (skip).
+
+The graph itself is unchanged; the CIO is a pure consumer of it.
+
+### 12.1 Why a CIO instead of Triage
+
+- **Decision:** The continuous-monitoring layer is a *decision-making*
+  agent, not a *signal-extraction* agent. The job isn't "find news that
+  passes a threshold" — that's the Phase 0 fixture's job. The job is
+  "given prior drill-ins, recent filings, recent news, user notes, and
+  the thesis, decide whether to spend ~$0.30 of fund credits on a fresh
+  drill, surface an existing one, or do nothing."
+- **Why:** Triage as originally specced would have produced a stream of
+  alerts that the user has to triage *themselves*. The user's actual
+  ask was "tell me when something material happened AND tell me what to
+  do about it." A planner-level decide step (drill / reuse / dismiss)
+  is the cheapest mechanism that produces an actionable output.
+- **Why not both:** Two agents, two LLM costs, two log streams, two
+  schedules — all to do roughly one thing. A single CIO that decides
+  AND optionally drills covers the same surface with one cycle.
+- **Revised because:** The original Phase 1 plan in CLAUDE.md §15.2
+  scoped a Triage agent. Before any code, the user and assistant
+  reframed: "what does the agent OUTPUT" pulled the design from a
+  signal-extraction agent toward a decision-making agent.
+
+### 12.2 Per-pair decision schema (`CIODecision`)
+
+```python
+class CIODecision(BaseModel):
+    action: Literal["drill", "reuse", "dismiss"]
+    ticker: str
+    thesis: str | None = None
+    rationale: str
+    reuse_run_id: str | None = None
+    confidence: Literal["low", "medium", "high"] = "medium"
+    followup_at: str | None = None  # ISO date when to revisit
+```
+
+- **Decision:** A single Pydantic shape for every CIO call output, with
+  a literal `action` enum.
+- **Why:** Same reason RouterDecision is structured: the orchestrator
+  needs a deterministic shape to dispatch on. A free-text "I think we
+  should drill NVDA because..." would require regex + tolerance for the
+  LLM hedging.
+- **Reject path:** If the LLM returns malformed JSON or fails the
+  Pydantic schema, the planner logs the raw output and falls back to a
+  deterministic `dismiss` — the cycle never blocks on a flaky model.
+
+### 12.3 Gates (deterministic shortcuts) before the LLM
+
+`cio.planner.evaluate_gates(ticker, thesis)` runs three cheap checks
+before any LLM call:
+
+1. **Cooldown status** — when did this pair last drill? Used as evidence
+   for the LLM, not a blocking gate (a Q3 surprise should override
+   cooldown).
+2. **Recent CIO actions** — last 5 actions for the pair, given to the
+   LLM as context so it doesn't yo-yo.
+3. **Yo-yo guard** — ≥3 dismissals for the pair in the last 7 days
+   short-circuits the LLM with a deterministic `dismiss`. Saves a
+   per-pair LLM call AND prevents the planner from drifting into
+   contradictory decisions on a quiet pair.
+
+- **Decision:** Gates short-circuit only on the yo-yo case; cooldown
+  is *evidence*, not a gate.
+- **Why:** Cooldown should bias toward reuse, but a Q3 surprise is
+  exactly the case where we want to override cooldown. Folding cooldown
+  into the prompt lets the LLM weigh it; making it a hard gate would
+  block legitimate refreshes.
+
+### 12.4 Drill budget cap (post-LLM, pre-execute)
+
+`cio.planner.apply_drill_budget(decisions, drill_budget=3)` sorts
+proposed drills by confidence (high → medium → low; stable on ties),
+keeps the top-`drill_budget` drills as `drill`, and demotes excess
+drills to `reuse` (when a recent completed run exists) or `dismiss`.
+The demoted decision's rationale preserves the original LLM rationale
+and prefixes with `[budget cap]`.
+
+- **Decision:** Hard cap of 3 drills per heartbeat. On-demand
+  `/cio TICKER` is exempt (the user explicitly asked).
+- **Why:** Bounds the worst-case heartbeat cost. Without a cap, a
+  quarterly-earnings week could fire 10+ drills.
+- **Why post-LLM, not pre:** The LLM has the context to rank pairs by
+  confidence. Capping pre-LLM (e.g. by ticker count alphabetical) would
+  be blind.
+
+### 12.5 RAG over past synthesis reports (`synthesis_reports` collection)
+
+- **Decision:** Reports are chunked by H2 section and indexed in a
+  separate ChromaDB collection (`synthesis_reports`), not the filings
+  corpus. The CIO planner queries it via the same hybrid pipeline
+  (semantic + BM25 + RRF) as filings — just with a different metadata
+  schema (`{run_id, ticker, thesis, section, date}`).
+- **Why separate collection:** Filings and reports have different
+  metadata fields and different optimal section sizes. Mixing them
+  would force a lowest-common-denominator metadata schema and surprise
+  the planner with "Item 1A" results when it asked for "what does the
+  bull case say".
+- **Why RAG, not just last-report:** A planner sometimes wants
+  cross-report context ("did we flag this risk in any prior NVDA
+  drill, ever?"). RAG handles both the latest-report case (via metadata
+  pre-filter) and the cross-report case naturally.
+- **Backfill:** `scripts.index_existing_reports` walks
+  `data_cache/demos/*.json`, splits each report on H2 headers, and
+  upserts. Idempotent — safe to re-run.
+
+### 12.6 Telemetry: `cio_runs` + `cio_actions` tables
+
+- **Decision:** Add two tables to `state.db`:
+  - `cio_runs` (one row per cycle: trigger, status,
+    n_drilled/reused/dismissed, duration_s, summary).
+  - `cio_actions` (one row per decision: cio_run_id FK, ticker, thesis,
+    action, rationale, drill_run_id / reuse_run_id, confidence,
+    decision_json).
+- **Why two tables, not one:** Mission Control wants both rollups
+  ("how many cycles fired this week, how many drills did they queue?")
+  and per-decision audits ("why did the CIO drill NVDA on April 26?").
+  A normalised schema serves both without expensive group-bys.
+- **Drill linkage:** When `action=drill`, `drill_run_id` points at the
+  graph_runs row the CIO triggered — letting Run Inspector cross-link
+  "this drill was a CIO decision" without duplicating telemetry into
+  the graph_runs row itself.
+
+### 12.7 Catch-up via `RunAtLoad=true` + freshness check
+
+- **Decision:** The launchd plist sets `RunAtLoad=true` AND schedules
+  5am+1pm PT slots. The dispatcher's `--mode auto` reads
+  `last_successful_cio_run_at()` and picks `heartbeat` (recent) vs
+  `catchup` (>8h old).
+- **Why:** The user's Mac may be asleep at the scheduled time (lid
+  closed). RunAtLoad fires on next wake; the freshness gate ensures we
+  produce ONE catchup cycle (not N stacked retries) and that the cycle
+  is *tagged* `catchup` so Mission Control surfaces "this was a
+  recovery".
+- **Why 8h:** Matches the natural gap between the two heartbeat slots,
+  so a single missed slot produces exactly one catchup. The threshold
+  is a constant in `cio.dispatcher`; bump it if heartbeat cadence
+  changes.
+
+### 12.8 Notification path: HTML Telegram + Notion mirror
+
+- **Decision:** `cio.notify` formats decisions as HTML for Telegram
+  (groups by action emoji: 📈 Drilled / ♻️ Reused / 🪦 Dismissed) and
+  POSTs directly to `api.telegram.org/bot{TOKEN}/sendMessage` via
+  httpx. The bot's long-poll listener stays untouched.
+- **Why direct REST and not the bot's send:** The bot is built around
+  `python-telegram-bot.Application` running a polling loop. There's
+  no clean "push from a separate process" hook without coordinating
+  application instances or running an HTTP webhook. A direct REST POST
+  is two lines of code and works whether the bot listener is running
+  or not.
+- **Notion mirror:** Soft-fail — writes to the existing Notion Alerts
+  DB if `NOTION_DB_ALERTS` is set, no-ops otherwise. The cio_runs row
+  in state.db is canonical.
+
+### 12.9 Curated vs ad-hoc theses + lifecycle primitives
+
+- **Decision:** Add a thin lifecycle module (`data.theses`) with
+  `promote_thesis(adhoc_slug)`, `demote_thesis(slug)`,
+  `archive_thesis(slug)`. Heartbeat sweeps only curated theses
+  (`/theses/*.json` without the `adhoc_` prefix). On-demand
+  `/cio TICKER` works against either.
+- **Why a lifecycle:** `/analyze` produces ad-hoc theses; some prove
+  worth monitoring continuously, most don't. A formal promote step
+  (with Pydantic schema validation pre-promotion) keeps the curated
+  set clean. Demote → archive (not delete) preserves history for the
+  cases when "we used to monitor this and stopped — why?".
+- **No deletion:** archive moves the JSON to
+  `theses/archive/{ts}__{slug}.json`. Recovery is a manual `mv` —
+  rare enough not to warrant a Restore button.
+- **Telegram + Streamlit symmetry:** Both `/promote` `/demote` and
+  the `theses_admin` page drive the same lifecycle primitives.
+  Behaviour is identical regardless of entry point.
+
+---
+
 ## How to update this doc
 
 When a new architectural decision is made (in any step):

@@ -321,12 +321,24 @@ _HELP_TEXT = (
     "/analyze TOPIC            Synthesize an ad-hoc thesis &amp; drill-in\n"
     "  e.g. <code>/analyze defense semis</code>\n"
     "\n"
+    "🤖 <b>CIO meta-layer</b>\n"
+    "/cio                       Run the CIO planner across curated theses\n"
+    "/cio TICKER                Single-ticker plan (auto-resolves thesis)\n"
+    "/cio TICKER thesis         Forced explicit (TICKER, thesis) pair\n"
+    "  e.g. <code>/cio NVDA ai_cake</code>\n"
+    "\n"
     "📡 <b>Monitoring</b>\n"
     "/scan                     Surface alerts caught since the last check\n"
     "/theses                   List all available theses (slugs + universe)\n"
     "/thesis NAME              Show a thesis's tickers + recent activity\n"
     "/note TICKER text         Drop a note future Triage will weigh\n"
     "  e.g. <code>/note NVDA trim 20% if Q3 misses $42B</code>\n"
+    "\n"
+    "🗂️ <b>Lifecycle</b>\n"
+    "/promote SLUG             Promote an ad-hoc thesis to curated\n"
+    "  e.g. <code>/promote adhoc_defense_semis</code>\n"
+    "/demote SLUG              Archive a curated thesis (stops CIO sweeps)\n"
+    "  e.g. <code>/demote nvda_halo</code>\n"
     "\n"
     "🔧 <b>System</b>\n"
     "/status                   Triage last-run, alerts in 24h, recent errors\n"
@@ -2103,6 +2115,188 @@ async def theses_command(
     )
 
 
+# --- /promote SLUG  +  /demote SLUG  (Step 11.2) -------------------------
+#
+# Lifecycle commands for moving theses between adhoc, curated, and archive.
+# Curated theses are what the CIO heartbeat sweeps continuously — adhoc
+# theses (from /analyze) are inert until promoted. The Streamlit admin
+# page (Step 11.3) drives the same primitives via toggle / archive button.
+
+
+@require_allowlist
+async def promote_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/promote SLUG` — promote an ad-hoc thesis to curated.
+
+    Accepts both the prefixed (`adhoc_defense_semis`) and unprefixed
+    (`defense_semis`) form — we normalise to the `adhoc_` prefix.
+    """
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/promote SLUG</code>\n"
+            "Example: <code>/promote adhoc_defense_semis</code>\n\n"
+            "Promotes an ad-hoc thesis to the curated set so the CIO "
+            "heartbeat sweeps it.",
+            parse_mode="HTML",
+        )
+        return
+
+    raw = args[0].strip().lower().replace(" ", "_").replace("-", "_")
+    slug = raw if raw.startswith("adhoc_") else f"adhoc_{raw}"
+
+    from data import theses as _theses
+
+    ok, msg = _theses.promote_thesis(slug)
+    if ok:
+        new_slug = slug[len("adhoc_") :]
+        await update.message.reply_text(
+            f"✅ Promoted <code>{_h(slug)}</code> → <code>{_h(new_slug)}</code>\n\n"
+            f"This thesis now appears in the curated set and will be "
+            f"swept by the CIO heartbeat.",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ Promote failed: {_h(msg)}",
+            parse_mode="HTML",
+        )
+
+
+# --- /cio  +  /cio TICKER  +  /cio TICKER thesis  (Step 11.11) ---------
+#
+# Three shapes:
+#   /cio                    → heartbeat across all curated theses
+#   /cio TICKER             → single-ticker plan (resolves thesis from universe;
+#                             multi-thesis tickers get one decision per thesis)
+#   /cio TICKER thesis      → forced explicit pair (e.g. /cio NVDA ai_cake)
+#
+# All paths drive `cio.cio.run_*` and then `cio.notify.notify_cycle` so the
+# user sees the same exec summary they'd get from the launchd cron path.
+
+
+@require_allowlist
+async def cio_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/cio [TICKER [thesis]]` — invoke the CIO planner.
+
+    No args        → run_heartbeat (sweeps every curated thesis universe).
+    TICKER         → run_on_demand(TICKER, None) — finds every thesis
+                      whose universe contains the ticker.
+    TICKER thesis  → run_on_demand(TICKER, thesis) — single forced pair.
+
+    The reply contains the same exec summary the cron heartbeat would
+    push (the bot doesn't run a faster/lighter version; both paths share
+    the orchestrator).
+    """
+    args = context.args or []
+    ticker = args[0].strip().upper() if args else ""
+    thesis_slug = (
+        args[1].strip().lower().replace("-", "_").replace(" ", "_")
+        if len(args) >= 2
+        else None
+    )
+
+    # Lazy imports keep startup snappy + avoid pulling LLM clients on
+    # bot-skeleton tests.
+    from cio import cio as cio_orchestrator
+    from cio import notify as cio_notify
+    from data import state as _state
+
+    # Acknowledge inbound — heartbeats can take 30-60s+ on a fresh sweep.
+    if ticker:
+        ack_subject = (
+            f"<code>{_h(ticker)}/{_h(thesis_slug)}</code>"
+            if thesis_slug
+            else f"<code>{_h(ticker)}</code>"
+        )
+    else:
+        ack_subject = "<i>heartbeat across all curated theses</i>"
+    await update.message.reply_text(
+        f"🤖 CIO running for {ack_subject} — this can take a minute on a "
+        f"fresh sweep. I'll send the exec summary when it lands.",
+        parse_mode="HTML",
+    )
+
+    try:
+        if not ticker:
+            plan, summary = await cio_orchestrator.run_heartbeat()
+            trigger = "heartbeat"
+        else:
+            plan, summary = await cio_orchestrator.run_on_demand(
+                ticker, thesis_slug,
+            )
+            trigger = "on_demand"
+    except Exception as e:
+        logger.error(f"[telegram] /cio failed: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"⚠️ CIO failed: <code>{_h(str(e)[:200])}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    runs = _state.recent_cio_runs(limit=1)
+    duration_s = float((runs[0].get("duration_s") if runs else 0.0) or 0.0)
+
+    tg_text = cio_notify.format_for_telegram(
+        plan, trigger=trigger, duration_s=duration_s,
+    )
+    await update.message.reply_text(
+        tg_text, parse_mode="HTML", disable_web_page_preview=True,
+    )
+
+    # Side mirror to Notion if configured. Soft-fail — already logged
+    # by cio.notify if it doesn't land.
+    try:
+        cio_notify.write_to_notion_alert(
+            plan, trigger=trigger, summary=summary,
+        )
+    except Exception:
+        pass
+
+
+@require_allowlist
+async def demote_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """`/demote SLUG` — archive a curated thesis.
+
+    Moves the thesis JSON to `theses/archive/{ts}__{slug}.json`. The CIO
+    will stop sweeping it, the dashboard will stop listing it, but the
+    file is preserved and recoverable.
+    """
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/demote SLUG</code>\n"
+            "Example: <code>/demote nvda_halo</code>\n\n"
+            "Archives a curated thesis so it stops appearing in the "
+            "dashboard and CIO sweeps. The file is preserved in "
+            "<code>theses/archive/</code> and can be restored manually.",
+            parse_mode="HTML",
+        )
+        return
+
+    slug = args[0].strip().lower().replace(" ", "_").replace("-", "_")
+
+    from data import theses as _theses
+
+    ok, msg = _theses.demote_thesis(slug)
+    if ok:
+        await update.message.reply_text(
+            f"✅ Demoted <code>{_h(slug)}</code> → archive.\n\n"
+            f"The CIO heartbeat will skip it from the next cycle.",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ Demote failed: {_h(msg)}",
+            parse_mode="HTML",
+        )
+
+
 # --- Bot bootstrapping ------------------------------------------------------
 
 
@@ -2119,11 +2313,14 @@ async def theses_command(
 BOT_COMMANDS: list[tuple[str, str]] = [
     ("drill",   "Run a full drill-in (TICKER [thesis], 5 min)"),
     ("analyze", "Synthesize an ad-hoc thesis from a topic & drill"),
+    ("cio",     "Run the CIO planner (no args = heartbeat sweep)"),
     ("scan",    "Surface alerts caught since the last check"),
     ("status",  "System health: triage, alerts, errors"),
     ("note",    "Drop a note for Triage to weigh (TICKER text)"),
     ("thesis",  "Show one thesis's universe + recent activity"),
     ("theses",  "List all available theses"),
+    ("promote", "Promote an ad-hoc thesis to curated (CIO sweeps it)"),
+    ("demote",  "Archive a curated thesis (stops CIO sweeps)"),
     ("help",    "Show the welcome message"),
 ]
 
@@ -2197,6 +2394,9 @@ def build_app(*, token: str | None = None, allowlist: str | None = None) -> Appl
     app.add_handler(CommandHandler("theses", theses_command))
     app.add_handler(CommandHandler("thesis", thesis_command))
     app.add_handler(CommandHandler("note", note_command))
+    app.add_handler(CommandHandler("cio", cio_command))
+    app.add_handler(CommandHandler("promote", promote_command))
+    app.add_handler(CommandHandler("demote", demote_command))
     # Inline-keyboard callbacks for /drill's "ticker not in any thesis"
     # choice prompt. Must be registered before the catch-all handlers so
     # button taps reach this handler instead of the placeholder.

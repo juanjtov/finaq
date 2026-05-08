@@ -57,6 +57,8 @@ For a visual graph debugger, run `langgraph dev` (registered in `langgraph.json`
 
 ## Architecture
 
+The drill-in graph (always-on; the CIO calls it as a tool):
+
 ```mermaid
 graph TD
     start([__start__]) --> load_thesis
@@ -72,6 +74,30 @@ graph TD
     synthesis --> stop([__end__])
 ```
 
+The CIO meta-layer above the graph (heartbeat / on-demand / catch-up):
+
+```mermaid
+graph LR
+    schedule[launchd 5am+1pm PT<br/>+ RunAtLoad=true] --> dispatcher
+    telegram["/cio TICKER [thesis]"] --> dispatcher
+    dispatcher{cio.dispatcher} --> auto_check{last cycle &gt; 8h?}
+    auto_check -->|yes| catchup[catchup cycle]
+    auto_check -->|no| heartbeat[heartbeat cycle]
+    dispatcher -->|on-demand| ondemand[on_demand cycle]
+    catchup --> planner
+    heartbeat --> planner
+    ondemand --> planner
+    planner{cio.planner.decide} -->|drill| graph_call[invoke graph]
+    planner -->|reuse| reuse[surface prior report]
+    planner -->|dismiss| dismiss[record only]
+    graph_call --> notify
+    reuse --> notify
+    dismiss --> notify
+    notify[cio.notify] --> tg[Telegram]
+    notify --> notion[Notion alerts DB]
+    notify --> sql[(state.db cio_runs<br/>+ cio_actions)]
+```
+
 Every node is wrapped by `_safe_node` — exceptions become `state.errors` entries instead of crashing the graph, telemetry rows persist to SQLite (`data_cache/state.db`), and the Mission Control dashboard reads the same SQL directly.
 
 - **`load_thesis`** — validates and resolves the thesis JSON; parameterises every downstream prompt with anchor tickers, universe, halo relationships, and material thresholds.
@@ -81,6 +107,14 @@ Every node is wrapped by `_safe_node` — exceptions become `state.errors` entri
 - **`risk`** — synthesis-only, no external calls. Detects four risk types in priority order: convergent signals (≥2 agents agree), threshold breaches (your thesis's `material_thresholds` firing), divergent signals, and implicit gaps. The LLM picks a categorical level (`LOW`..`CRITICAL`); the numeric `score_0_to_10` is a **deterministic lookup** — sidestepping the known LLM weakness on numeric scales.
 - **`monte_carlo`** — runs in parallel with risk, not after. Hybrid Owner-Earnings DCF + secondary Multiple model, 10,000 simulations, lognormal exit multiples, truncated-normal operational params, shared parameter draws so the two models are directly comparable, and a `convergence_ratio` flag when DCF and Multiple disagree.
 - **`synthesis`** — final 9-section markdown report. Translates Monte Carlo distributions into plain language (banned-words list enforces no jargon: no "P10", no "DCF", no "FCF yield" in the **What this means** section). Confidence calibrated from agent convergence + MC `convergence_ratio` + risk level. Action recommendations are **sized and conditional** on thesis material thresholds, never "hold" or "monitor".
+
+The CIO meta-layer (replaces the Phase 0 Triage stub):
+
+- **`cio.planner`** — gates (cooldown, recent-dismissal velocity, drill budget) + persona-driven LLM decide per `(ticker, thesis)` pair → `CIODecision` (action: `drill | reuse | dismiss`, rationale, confidence, optional `reuse_run_id`). Gates can short-circuit to `dismiss` without touching the LLM (e.g. ≥3 dismissals in 7 days = yo-yo guard).
+- **`cio.rag`** — RAG over a separate `synthesis_reports` ChromaDB collection populated by `scripts/index_existing_reports.py` (each section of every prior drill-in is a chunk). Lets the planner cite specific past sections in its rationale.
+- **`cio.cio`** — orchestrator: builds candidate list (curated theses for heartbeat; ticker-resolved for on-demand), pulls news (Tavily, soft-fail), calls `planner.decide` per pair, applies the drill-budget cap (default 3 — over-budget drills demote to reuse when a recent run exists, else dismiss), executes drills via `agents.invoke_with_telemetry`, persists every decision to `cio_actions`.
+- **`cio.notify`** — composes an HTML exec summary, sends to Telegram via the Bot API REST `sendMessage` endpoint (the long-poll bot doesn't have a "push" hook), mirrors the cycle to the Notion Alerts DB. Both targets soft-fail.
+- **`cio.dispatcher`** — CLI wrapping the cycles. Mode `auto` is the cron path: freshness check on `last_successful_cio_run_at` picks `heartbeat` (recent) vs `catchup` (>8h old). Combined with `RunAtLoad=true` in the launchd plist, this catches missed slots (lid-closed Mac) without stacking N missed cycles.
 
 ---
 
@@ -195,9 +229,9 @@ Plus: PDF export with the brand palette (sage `#2D4F3A` / parchment `#F4ECDC`), 
 
 ## Roadmap
 
-- **Phase 1 — Personal MVP.** Notion memory (bidirectional sync of theses, reports, alerts, watchlist), Telegram bot mirroring the Direct Agent panel (`/fundamentals NVDA "..."`, `/filings NVDA "..."`), continuous Triage agent watching material thresholds, DigitalOcean droplet deployment.
-- **Phase 2 — Discovery.** Discovery agent walking the halo graph for non-obvious adjacencies, pattern detection across theses, cycle-based Synthesis re-trigger when material thresholds fire repeatedly.
-- **Phase 3 — Routing.** Multi-thesis routing for ambiguous tickers, automated thesis revision proposals when reality drifts from the thesis.
+- **Phase 1 — Personal MVP** *(complete: drill-in graph, Notion memory, Telegram bot, CIO meta-layer with twice-daily heartbeat + on-demand `/cio`, launchd schedule with RunAtLoad catch-up).*
+- **Phase 2 — Discovery.** Discovery agent walking the halo graph for non-obvious adjacencies, pattern detection across theses, alternative-data sources (podcasts, curated-author X feeds — see `docs/POSTPONED.md`), cycle-based Synthesis re-trigger when material thresholds fire repeatedly.
+- **Phase 3 — Routing.** Multi-thesis routing for ambiguous tickers, automated thesis revision proposals when reality drifts from the thesis, CIO confidence-calibration learning loop.
 
 See [`docs/POSTPONED.md`](./docs/POSTPONED.md) for the full deferred list with explicit re-trigger conditions.
 
@@ -219,20 +253,23 @@ A README readers can trust is one that admits gaps:
 ## Project layout
 
 ```
-agents/        one file per agent — fundamentals, filings, news, risk, synthesis, qa, triage
+agents/        one file per agent — fundamentals, filings, news, risk, synthesis, qa, triage, adhoc_thesis, router
   prompts/     system prompts for each agent (.md), including qa_* per-agent variants
-data/          edgar.py, yfin.py, chroma.py, tavily.py, treasury.py, state.py, sector_multiples.json
-theses/        hand-written thesis JSONs — ai_cake, nvda_halo, construction
-ui/            Streamlit app + 5 pages (mission_control, new_thesis, direct_agent, methodology, architecture)
+cio/           CIO meta-layer — planner, rag, cio (orchestrator), notify, dispatcher, memory
+  prompts/     CIO persona prompt
+data/          edgar.py, yfin.py, chroma.py, tavily.py, treasury.py, state.py, telegram.py, notion.py, theses.py
+theses/        hand-written thesis JSONs — ai_cake, nvda_halo, construction, general (+ adhoc_*, archive/)
+ui/            Streamlit app + 7 pages (mission_control, new_thesis, direct_agent, methodology, architecture, run_inspector, theses_admin)
 utils/         schemas, monte_carlo, charts, pdf_export, models, openrouter, rag_eval, rag_ragas, live_eval
-tests/         9,829 lines across 13+ suites — Tier 1 (deterministic), Tier 2 (LLM-judge), Tier 3 (RAGAS)
-  eval/        golden query datasets — golden_queries.py, news_golden_queries.py
+tests/         12k+ lines — Tier 1 (deterministic), Tier 2 (LLM-judge), Tier 3 (RAGAS), CIO workflow + RAG eval
+  eval/        golden query datasets — golden_queries.py, news_golden_queries.py, cio_reports_golden_queries.py
 docs/          ARCHITECTURE.md (decisions), FINANCE_ASSUMPTIONS.md (math), POSTPONED.md (deferred)
   diagrams/    finaq_platform_v3.png (hero), graph.mmd, finaq_components.svg
-scripts/       ingest_universe.py — bulk SEC filing download + chunk + embed pipeline
-data_cache/    gitignored runtime cache (edgar/, yfin/, chroma/, demos/, eval/, state.db)
+scripts/       ingest_universe.py, index_existing_reports.py, bootstrap_notion.py, run_telegram_bot.py
+deploy/        launchd/com.finaq.cio.plist — twice-daily CIO heartbeat schedule for macOS
+data_cache/    gitignored runtime cache (edgar/, yfin/, chroma/, demos/, eval/, state.db, cio.log)
 .streamlit/    Streamlit theme — brand palette
-.env.example   API keys + per-agent MODEL_* env-var template
+.env.example   API keys + per-agent MODEL_* env-var template (incl. MODEL_CIO)
 langgraph.json LangGraph Studio config — `langgraph dev` to debug
 ```
 

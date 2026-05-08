@@ -305,5 +305,88 @@ def main() -> None:
     ):
         _render_agent_payload(state, agent)
 
+    section_divider()
+    _render_cio_cycles()
+
+
+# --- CIO cycles + actions (Step 11.15) -----------------------------------
+
+
+def _render_cio_action_row(a: dict) -> None:
+    """One CIO action row, with deep-link to the related drill if any."""
+    drill_id = a.get("drill_run_id") or ""
+    reuse_id = a.get("reuse_run_id") or ""
+    confidence = str(a.get("confidence") or "—")
+    action = str(a.get("action") or "?")
+    icon = {"drill": "📈", "reuse": "♻️", "dismiss": "🪦"}.get(action, "•")
+    ticker = str(a.get("ticker") or "?")
+    thesis = str(a.get("thesis") or "—")
+    rationale = str(a.get("rationale") or "")[:240]
+
+    line = (
+        f"{icon} **{ticker}** / `{thesis}` — {action.upper()} "
+        f"_(confidence: {confidence})_  \n"
+        f"  {rationale}"
+    )
+    if drill_id:
+        line += f"  \n  ↳ drill_run_id: `{drill_id[:8]}`"
+    elif reuse_id:
+        line += f"  \n  ↳ reuse_run_id: `{reuse_id[:8]}`"
+    st.markdown(line)
+
+
+def _render_cio_cycles() -> None:
+    """Render the last 10 CIO cycles with their actions inline.
+
+    The CIO planner LLM call doesn't go through `_safe_node` (it's a
+    standalone OpenRouter call inside `cio.planner.decide`), so it
+    doesn't write to `node_runs`. Its telemetry footprint is the
+    `cio_actions` row + the corresponding `cio_runs` rollup. This panel
+    surfaces both so the user can audit the CIO's reasoning history
+    next to the drill-in inspector they already use.
+    """
+    st.markdown("### 🤖 CIO Cycles")
+    st.caption(
+        "CIO heartbeat / on-demand cycles. Each cycle is one decision pass "
+        "across (ticker, thesis) candidates — drills you see in the run "
+        "picker above are typically *executed by* a CIO action below."
+    )
+    runs = state_db.recent_cio_runs(limit=10)
+    if not runs:
+        st.caption(
+            "No CIO cycles recorded yet. Run `/cio` from Telegram or wait "
+            "for the heartbeat (5am + 1pm PT)."
+        )
+        return
+
+    for run in runs:
+        run_id = run.get("run_id") or ""
+        started = str(run.get("started_at") or "")[:19].replace("T", " ")
+        trigger = str(run.get("trigger") or "")
+        status = str(run.get("status") or "")
+        duration = (
+            f"{run['duration_s']:.1f}s" if run.get("duration_s") else "—"
+        )
+        n_drilled = int(run.get("n_drilled") or 0)
+        n_reused = int(run.get("n_reused") or 0)
+        n_dismissed = int(run.get("n_dismissed") or 0)
+        title = (
+            f"{trigger} · {started} · {n_drilled}d / {n_reused}r / "
+            f"{n_dismissed}x · {duration} · {status}"
+        )
+        # Default-expand the most recent cycle so it's visible without a click.
+        is_first = run_id == (runs[0].get("run_id") or "")
+        with st.expander(title, expanded=is_first):
+            actions = state_db.recent_cio_actions(limit=200)
+            scoped = [a for a in actions if a.get("cio_run_id") == run_id]
+            if not scoped:
+                st.caption("No actions recorded for this cycle.")
+                continue
+            for a in scoped:
+                _render_cio_action_row(a)
+            if run.get("summary"):
+                st.markdown("**Summary**")
+                st.code(str(run["summary"])[:2000], language="text")
+
 
 main()

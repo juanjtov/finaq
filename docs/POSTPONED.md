@@ -26,7 +26,7 @@ Three categories:
 |---|---|---|
 | 9  | **Notion memory layer** | `data/notion.py`, 4 DBs (theses/reports/alerts/watchlist), one-way sync (read notes / write reports + alerts). |
 | 10 | **Telegram bot (bidirectional)** | Slash commands + LLM-driven NL routing (model resolved via `MODEL_ROUTER`). `/drill`, `/analyze` (ad-hoc thesis Discovery-lite), `/scan`, `/note`, `/thesis`, `/status`, `/help`. Allowlist enforced. |
-| 11 | **Triage agent + scheduling** | Real LLM-backed continuous Triage (model resolved via `MODEL_TRIAGE`). `launchd` first, droplet `systemd timer` after Step 12. Healthchecks.io ping after each run. |
+| ~~11~~ | ~~Triage agent + scheduling~~ | **Replaced by CIO meta-layer** — see ARCHITECTURE §12 + the CIO entries in §2 below. The CIO is decision-making (drill / reuse / dismiss) instead of signal-extraction (alert / no-alert), which fits the user's actual ask better. Heartbeat schedule (5am + 1pm PT) lives in `deploy/launchd/com.finaq.cio.plist`. |
 | 12 | **Droplet deployment** | DigitalOcean $6/mo droplet, Caddy HTTPS, three systemd units, `deploy/install.sh`. Supersedes the Cloudflare Tunnel option. |
 | 13 | **Backtest harness** | Plumb `as_of_date` through `data/{edgar,yfin,chroma,news}.py` + all 5 agents so a drill-in can be run "as of" a historical date. Pick 4–6 dates × 5–10 tickers (e.g. Sept 1 2024, Dec 1 2024, Mar 1 2025, Jun 1 2025, Sept 1 2025), drill at each, compare predicted P10/P50/P90 vs today's actual price. Surface metrics: hit rate (band coverage), bias (P50 − actual), calibration. **Critical:** switch backtest model strings to one whose training cutoff predates `as_of_date` (otherwise the LLM has forward-leaked knowledge — the user explicitly plans for this by picking 2025-09-01 and routing those runs through earlier models). Lands as `python -m scripts.backtest --as-of 2025-09-01 --tickers NVDA,DELL,…` + a JSON report + Mission Control panel. |
 | 14 | **Champion/challenger model harness** | For each LLM-driven agent (start with the agents whose `MODEL_*` env var resolves to the most expensive tier — typically `MODEL_SYNTHESIS`, `MODEL_FILINGS`, `MODEL_ADHOC_THESIS`), run a fixed prompt suite through 2-3 candidate models in parallel. Score on three axes: **quality** (LLM-judge grade reusing the tier-2 RAG eval pipeline; 5 runs per challenger, fixed seed where supported, temperature=0), **cost** ($/run from token counts × OpenRouter pricing), **latency** (wall-clock time per call). Output: scatter plot (cost vs quality) and radar chart per agent showing the trade-off frontier. Champion stays the current `MODEL_*` env var; challenger results land in `data_cache/eval/champion_challenger/{date}__{agent}.json`. Mission Control gets a "Model selection" panel that ranks candidates. Manual promotion (you flip the env var); no auto-switch. CLI: `python -m scripts.champion_challenger --agent synthesis --challengers <model_id_a>,<model_id_b>`. Lands LAST, after Step 13 — needs the eval pipeline + backtest harness to be stable so comparisons are meaningful. |
@@ -38,7 +38,9 @@ Three categories:
 | LangSmith tracing | 5z | Per-LLM-call latency, tokens, full prompt/response, replay. |
 | Streamlit Mission Control page | 8 | Graph-run history, daily-cost chart, freshness cards, recent alerts, errors. |
 | Telegram `/status` command | 10 | Triage last-run, alerts in last 24h, today's $ spend, open errors. |
-| Healthchecks.io ping | 11 | External liveness watcher. Fires if Triage stops emitting. |
+| Run Inspector CIO panel | 11 | Recent CIO cycles + per-cycle decisions (drill/reuse/dismiss) with rationale. |
+| Mission Control CIO rows | 11 | Last 20 CIO actions + last 10 cio_runs aggregate. |
+| `~ Healthchecks.io ping ~` | ~~11~~ | Replaced — the launchd `RunAtLoad=true` + dispatcher freshness gate produces a catchup cycle on the next wake; no external liveness watcher needed for a single-user Mac path. Re-add for droplet (Step 12) where boot-path catchup doesn't apply. |
 | `journalctl` on the droplet | 12 | SSH-time deep dive into systemd unit logs. |
 
 ---
@@ -113,6 +115,27 @@ revisit. If the trigger never fires, we never build it.
 | **Pattern detection** (cross-thesis multiplicity scoring) | Phase 3 | The `VRT/CEG/ANET/PWR` overlap is currently data only — automated weighting comes in Phase 3. |
 | **Threshold learning** | Phase 3 | Material thresholds are hand-set in JSON until then. The mechanism would observe which alerts you drilled in vs ignored. |
 | **Backtesting** | Phase 3 | Replay historical filings/news through the system to validate alert quality. |
+
+### CIO meta-layer enhancements (within Step 11 already shipped)
+
+| Item | Trigger | Effort |
+|---|---|---|
+| **CIO confidence calibration loop** | When you've corrected the CIO's call ≥10 times in a month (e.g. it dismissed but you /drill'd anyway, or it drilled but you found the report stale). The signal is "predicted confidence vs realised user action" — a small DB query over `cio_actions` joined with manual `/drill` follow-ups. Calibration would weight the persona prompt's confidence rubric or short-circuit low-confidence dismisses into "ask the user". | ~1–2 weeks: instrument the override signal, build the eval harness, A/B the prompt change. |
+| **CIO evidence retention** | Today the CIO's evidence bundle (RAG chunks + news + filings) is built fresh per call and not persisted. When you read a `cio_actions` rationale and want to know what the CIO *saw*, there's no record. Trigger to add a `cio_evidence` table: ≥3 times you wanted to audit a decision and couldn't reproduce the inputs. | ~3-4h: write evidence dict to a JSON column, surface it in Run Inspector. |
+| **Per-action LLM telemetry on cio_actions rows** | Today CIO planner LLM calls are not in `node_runs` (which has a FK to `graph_runs`). Cost / token tracking exists on graph drills triggered by the CIO but not on the planner's own calls. Trigger: monthly OpenRouter bill diverges from `state.db.daily_cost` by ≥$2. | ~2h: add `tokens_in/out/cost_usd` columns to `cio_actions`, wire planner to write them via the same ContextVar accumulator pattern. |
+| **CIO multi-thesis batching** | Today on-demand `/cio TICKER` decides per-thesis serially. For a ticker in 3 theses, that's 3 LLM calls. Could be one batched call. Trigger: a heartbeat regularly does ≥6 LLM calls for cross-thesis tickers (NVDA in ai_cake + nvda_halo). | ~1 day: design the batched prompt, validate it returns N decisions in one shot, update `decide()`. |
+
+### CIO alternative-data sources (Phase 2-aligned)
+
+User asked for these to be tracked for future addition. Each would
+plug into the planner's `_summarise_news`-style helper as a new
+evidence channel.
+
+| Item | Trigger / phase | Notes |
+|---|---|---|
+| **Podcast indexer** (transcribe via Whisper, chunk + embed into a `podcast_transcripts` ChromaDB collection, surface to the CIO planner) | Phase 2 — when the CIO consistently misses signals that landed in earnings podcasts / Acquired-style deep-dives that aren't yet in news. | ~1–2 weeks: pick a podcast list (e.g. Acquired, BG2, All-In, company-specific earnings calls), pipeline Whisper transcription (CPU is enough at 15-min/hour-of-audio), chunk + embed, add a `podcast_excerpts` field to `build_evidence_bundle`. |
+| **Curated-author social feed (X/Twitter)** — an allowlist of analyst handles whose posts the CIO should consider as evidence | Phase 2 — when the user identifies ≥10 specific authors whose takes shape thesis decisions today (Damodaran, Stratechery, individual sell-side names). | ~1 week: X/Twitter API access (rate-limited, may need paid tier in 2026), pull tweets per author per day, summarise via Haiku-class LLM, surface as `recent_signals` in the bundle. |
+| **Bloomberg / WSJ / FT paid-feed integration** | Phase 2+ — when the user pays for a terminal subscription that licenses programmatic access AND the CIO's news coverage is demonstrably missing market-moving stories the paid feeds catch. Today's Tavily covers free web; firewalled stories don't land. | ~2-3 days per source after license + API auth lands: same shape as Tavily — pulling top-N headlines per ticker per day. |
 
 ---
 

@@ -913,6 +913,339 @@ async def test_note_command_dropped_for_unallowed(monkeypatch):
     update.message.reply_text.assert_not_called()
 
 
+# --- /promote SLUG  +  /demote SLUG --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_promote_command_no_args_replies_with_usage(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/promote")
+    context = SimpleNamespace(args=[])
+    await tg.promote_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    assert "Usage" in args[0] and "/promote" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_promote_command_invokes_lifecycle(monkeypatch):
+    """Happy path: bot calls `data.theses.promote_thesis` with the
+    normalised `adhoc_*` slug and renders the success message."""
+    from data import theses as _theses
+
+    captured: dict = {}
+
+    def _fake_promote(slug: str) -> tuple[bool, str]:
+        captured["slug"] = slug
+        return True, "promoted adhoc_defense_semis → defense_semis"
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(_theses, "promote_thesis", _fake_promote)
+
+    update = _make_update(chat_id=111, text="/promote adhoc_defense_semis")
+    context = SimpleNamespace(args=["adhoc_defense_semis"])
+    await tg.promote_command(update, context)
+
+    assert captured.get("slug") == "adhoc_defense_semis"
+    args, _ = update.message.reply_text.call_args
+    assert "Promoted" in args[0] or "✅" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_promote_command_normalises_unprefixed_slug(monkeypatch):
+    """Calling `/promote defense_semis` (no prefix) must auto-add `adhoc_`
+    so the user can type either form."""
+    from data import theses as _theses
+
+    captured: dict = {}
+
+    def _fake_promote(slug: str) -> tuple[bool, str]:
+        captured["slug"] = slug
+        return True, "ok"
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(_theses, "promote_thesis", _fake_promote)
+
+    update = _make_update(chat_id=111, text="/promote defense_semis")
+    context = SimpleNamespace(args=["defense_semis"])
+    await tg.promote_command(update, context)
+    assert captured.get("slug") == "adhoc_defense_semis"
+
+
+@pytest.mark.asyncio
+async def test_promote_command_surfaces_failure(monkeypatch):
+    from data import theses as _theses
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(
+        _theses, "promote_thesis",
+        lambda slug: (False, "not found at theses/adhoc_x.json"),
+    )
+
+    update = _make_update(chat_id=111, text="/promote adhoc_x")
+    context = SimpleNamespace(args=["adhoc_x"])
+    await tg.promote_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    assert "fail" in args[0].lower() or "⚠️" in args[0]
+    assert "not found" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_promote_command_dropped_for_unallowed(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=999, text="/promote adhoc_x")
+    context = SimpleNamespace(args=["adhoc_x"])
+    await tg.promote_command(update, context)
+    update.message.reply_text.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_demote_command_no_args_replies_with_usage(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=111, text="/demote")
+    context = SimpleNamespace(args=[])
+    await tg.demote_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    assert "Usage" in args[0] and "/demote" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_demote_command_invokes_lifecycle(monkeypatch):
+    from data import theses as _theses
+
+    captured: dict = {}
+
+    def _fake_demote(slug: str) -> tuple[bool, str]:
+        captured["slug"] = slug
+        return True, "archived → 20260430_174812__nvda_halo.json"
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(_theses, "demote_thesis", _fake_demote)
+
+    update = _make_update(chat_id=111, text="/demote nvda_halo")
+    context = SimpleNamespace(args=["nvda_halo"])
+    await tg.demote_command(update, context)
+
+    assert captured.get("slug") == "nvda_halo"
+    args, _ = update.message.reply_text.call_args
+    assert "Demoted" in args[0] or "✅" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_demote_command_surfaces_failure(monkeypatch):
+    from data import theses as _theses
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    monkeypatch.setattr(
+        _theses, "demote_thesis",
+        lambda slug: (False, "is an adhoc slug — use archive_thesis() instead"),
+    )
+
+    update = _make_update(chat_id=111, text="/demote adhoc_x")
+    context = SimpleNamespace(args=["adhoc_x"])
+    await tg.demote_command(update, context)
+    args, _ = update.message.reply_text.call_args
+    assert "fail" in args[0].lower() or "⚠️" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_demote_command_dropped_for_unallowed(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=999, text="/demote nvda_halo")
+    context = SimpleNamespace(args=["nvda_halo"])
+    await tg.demote_command(update, context)
+    update.message.reply_text.assert_not_called()
+
+
+def test_bot_commands_includes_promote_and_demote():
+    """Both lifecycle commands must appear in BOT_COMMANDS so Telegram's
+    /-autocomplete surfaces them."""
+    names = {name for name, _ in tg.BOT_COMMANDS}
+    assert "promote" in names
+    assert "demote" in names
+
+
+# --- /cio (Step 11.11) ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cio_command_no_args_runs_heartbeat(monkeypatch):
+    """`/cio` with no args fires the heartbeat sweep."""
+    from cio import cio as cio_orchestrator
+    from cio import notify as cio_notify
+    from cio.planner import CIODecision, Plan
+    from data import state as _state
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    fake_plan = Plan(
+        decisions=[
+            CIODecision(action="drill", ticker="NVDA", thesis="ai_cake",
+                        rationale="x", confidence="high"),
+        ],
+        drill_budget=3,
+    )
+    captured: dict = {}
+
+    async def _heartbeat(**kw):
+        captured["mode"] = "heartbeat"
+        return fake_plan, "summary text"
+
+    async def _on_demand(*a, **kw):
+        captured["mode"] = "on_demand"
+        return fake_plan, "summary"
+
+    monkeypatch.setattr(cio_orchestrator, "run_heartbeat", _heartbeat)
+    monkeypatch.setattr(cio_orchestrator, "run_on_demand", _on_demand)
+    monkeypatch.setattr(cio_notify, "write_to_notion_alert", lambda *a, **k: None)
+    monkeypatch.setattr(_state, "recent_cio_runs", lambda *a, **k: [{"duration_s": 5.0}])
+
+    update = _make_update(chat_id=111, text="/cio")
+    context = SimpleNamespace(args=[])
+    await tg.cio_command(update, context)
+
+    assert captured.get("mode") == "heartbeat"
+    # Two reply_text calls: ack + exec summary.
+    assert update.message.reply_text.call_count == 2
+    second_call = update.message.reply_text.call_args_list[1]
+    assert "NVDA" in second_call.args[0]
+
+
+@pytest.mark.asyncio
+async def test_cio_command_ticker_runs_on_demand(monkeypatch):
+    """`/cio NVDA` resolves to run_on_demand(NVDA, None)."""
+    from cio import cio as cio_orchestrator
+    from cio import notify as cio_notify
+    from cio.planner import CIODecision, Plan
+    from data import state as _state
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    fake_plan = Plan(decisions=[
+        CIODecision(action="reuse", ticker="NVDA", thesis="ai_cake",
+                    rationale="still applies", confidence="medium",
+                    reuse_run_id="r1"),
+    ], drill_budget=3)
+    captured: dict = {}
+
+    async def _on_demand(ticker, thesis_slug=None, **kw):
+        captured["ticker"] = ticker
+        captured["thesis_slug"] = thesis_slug
+        return fake_plan, "summary"
+
+    monkeypatch.setattr(cio_orchestrator, "run_on_demand", _on_demand)
+    monkeypatch.setattr(cio_notify, "write_to_notion_alert", lambda *a, **k: None)
+    monkeypatch.setattr(_state, "recent_cio_runs", lambda *a, **k: [{"duration_s": 1.0}])
+
+    update = _make_update(chat_id=111, text="/cio NVDA")
+    context = SimpleNamespace(args=["NVDA"])
+    await tg.cio_command(update, context)
+
+    assert captured.get("ticker") == "NVDA"
+    assert captured.get("thesis_slug") is None
+
+
+@pytest.mark.asyncio
+async def test_cio_command_ticker_thesis_pair(monkeypatch):
+    """`/cio NVDA ai_cake` forces the explicit pair through to the orchestrator."""
+    from cio import cio as cio_orchestrator
+    from cio import notify as cio_notify
+    from cio.planner import CIODecision, Plan
+    from data import state as _state
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    fake_plan = Plan(decisions=[
+        CIODecision(action="dismiss", ticker="NVDA", thesis="ai_cake",
+                    rationale="quiet", confidence="medium"),
+    ], drill_budget=3)
+    captured: dict = {}
+
+    async def _on_demand(ticker, thesis_slug=None, **kw):
+        captured["ticker"] = ticker
+        captured["thesis_slug"] = thesis_slug
+        return fake_plan, "summary"
+
+    monkeypatch.setattr(cio_orchestrator, "run_on_demand", _on_demand)
+    monkeypatch.setattr(cio_notify, "write_to_notion_alert", lambda *a, **k: None)
+    monkeypatch.setattr(_state, "recent_cio_runs", lambda *a, **k: [{"duration_s": 1.0}])
+
+    update = _make_update(chat_id=111, text="/cio NVDA ai_cake")
+    context = SimpleNamespace(args=["NVDA", "ai_cake"])
+    await tg.cio_command(update, context)
+
+    assert captured.get("ticker") == "NVDA"
+    assert captured.get("thesis_slug") == "ai_cake"
+
+
+@pytest.mark.asyncio
+async def test_cio_command_normalises_thesis_slug(monkeypatch):
+    """User typing `/cio NVDA AI-Cake` should normalise the slug to
+    `ai_cake` before dispatch (same convention every other command uses)."""
+    from cio import cio as cio_orchestrator
+    from cio import notify as cio_notify
+    from cio.planner import CIODecision, Plan
+    from data import state as _state
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    fake_plan = Plan(decisions=[
+        CIODecision(action="dismiss", ticker="NVDA", thesis="ai_cake",
+                    rationale="x", confidence="low"),
+    ], drill_budget=3)
+
+    captured: dict = {}
+
+    async def _on_demand(ticker, thesis_slug=None, **kw):
+        captured["thesis_slug"] = thesis_slug
+        return fake_plan, "summary"
+
+    monkeypatch.setattr(cio_orchestrator, "run_on_demand", _on_demand)
+    monkeypatch.setattr(cio_notify, "write_to_notion_alert", lambda *a, **k: None)
+    monkeypatch.setattr(_state, "recent_cio_runs", lambda *a, **k: [{"duration_s": 1.0}])
+
+    update = _make_update(chat_id=111, text="/cio NVDA AI-Cake")
+    context = SimpleNamespace(args=["NVDA", "AI-Cake"])
+    await tg.cio_command(update, context)
+    assert captured.get("thesis_slug") == "ai_cake"
+
+
+@pytest.mark.asyncio
+async def test_cio_command_surfaces_orchestrator_failure(monkeypatch):
+    """When the cycle raises, the bot replies with a graceful error
+    instead of crashing the listener loop."""
+    from cio import cio as cio_orchestrator
+
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+
+    async def _explode(**kw):
+        raise RuntimeError("openrouter 503")
+
+    monkeypatch.setattr(cio_orchestrator, "run_heartbeat", _explode)
+
+    update = _make_update(chat_id=111, text="/cio")
+    context = SimpleNamespace(args=[])
+    await tg.cio_command(update, context)
+
+    # Two reply_text calls: ack + error.
+    assert update.message.reply_text.call_count == 2
+    second_args, _ = update.message.reply_text.call_args_list[1]
+    assert "CIO failed" in second_args[0]
+    assert "openrouter 503" in second_args[0]
+
+
+@pytest.mark.asyncio
+async def test_cio_command_dropped_for_unallowed(monkeypatch):
+    monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
+    update = _make_update(chat_id=999, text="/cio")
+    context = SimpleNamespace(args=[])
+    await tg.cio_command(update, context)
+    update.message.reply_text.assert_not_called()
+
+
+def test_bot_commands_includes_cio():
+    names = {name for name, _ in tg.BOT_COMMANDS}
+    assert "cio" in names
+
+
 # --- /thesis NAME --------------------------------------------------------
 
 

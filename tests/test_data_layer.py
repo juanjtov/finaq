@@ -232,6 +232,32 @@ def test_chroma_filing_meta_from_path_extracts_kind_and_accession():
     assert accession == "0001-25-000123"
 
 
+def test_chroma_get_collection_passes_name_through_to_client(monkeypatch):
+    """Step 11.4 — `_get_collection(name=...)` must request the named
+    collection from the chroma client. The CIO planner relies on this to
+    open `synthesis_reports` separately from the filings corpus."""
+    from data import chroma as ch
+
+    captured: dict = {}
+
+    class _FakeCollection:
+        pass
+
+    class _FakeClient:
+        def get_or_create_collection(self, *, name, embedding_function, configuration):
+            captured["name"] = name
+            return _FakeCollection()
+
+    monkeypatch.setattr(ch.chromadb, "PersistentClient", lambda **kwargs: _FakeClient())
+
+    coll = ch._get_collection()
+    assert isinstance(coll, _FakeCollection)
+    assert captured["name"] == "filings"  # default
+
+    coll = ch._get_collection(name="synthesis_reports")
+    assert captured["name"] == "synthesis_reports"
+
+
 def test_ingest_filing_batches_upsert_when_chunk_count_exceeds_chroma_limit(
     tmp_path, monkeypatch
 ):
