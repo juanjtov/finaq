@@ -242,6 +242,80 @@ def test_score_run_assembles_per_horizon_metrics(monkeypatch):
     assert out["horizons"]["h_30"]["abs_pct_err_vs_p50"] == pytest.approx(10 / 120)
 
 
+def test_score_run_prefers_structured_verdict_over_regex(monkeypatch):
+    """The synthesis agent emits `synthesis_verdict` as a side-channel.
+    When present and valid, the scorer must trust it — even if the prose
+    in the report would regex-parse to something else (e.g., the report
+    discusses both bull and bear with equal weight, so the heuristic
+    parser returns 'unknown')."""
+    from backtest import scorer
+
+    monkeypatch.setattr(
+        scorer,
+        "realised_prices",
+        lambda ticker, *, as_of_date, horizons: {
+            "as_of": {"date": as_of_date, "close": 100.0},
+            "h_30": {"date": "2025-10-05", "close": 90.0},
+        },
+    )
+
+    state = {
+        "monte_carlo": {
+            "dcf": {"p10": 60, "p25": 75, "p50": 90, "p75": 110, "p90": 130},
+            "current_price": 100.0,
+            "convergence_ratio": 0.8,
+        },
+        "synthesis_confidence": "high",
+        "risk": {"level": "MODERATE"},
+        # Prose contains neither cheap nor pricey words → regex would say "unknown"
+        "report": (
+            "## What this means\nThe company is a footwear and apparel company "
+            "operating globally. The thesis expects margin recovery."
+        ),
+        "synthesis_verdict": "overvalued",
+    }
+    out = scorer.score_run(
+        ticker="NKE", as_of_date="2025-09-05", horizons=[30], state=state,
+    )
+    # Structured field wins — verdict is overvalued, not unknown.
+    assert out["verdict"] == "overvalued"
+    # Direction match: overvalued + realised < as_of → True
+    assert out["horizons"]["h_30"]["direction_match"] is True
+
+
+def test_score_run_falls_back_to_regex_when_structured_verdict_missing(
+    monkeypatch,
+):
+    """Legacy runs that pre-date the structured-verdict field must still
+    score: scorer falls back to extract_verdict on the report prose."""
+    from backtest import scorer
+
+    monkeypatch.setattr(
+        scorer,
+        "realised_prices",
+        lambda ticker, *, as_of_date, horizons: {
+            "as_of": {"date": as_of_date, "close": 100.0},
+            "h_30": {"date": "2025-10-05", "close": 110.0},
+        },
+    )
+
+    state = {
+        "monte_carlo": {
+            "dcf": {"p10": 80, "p25": 95, "p50": 120, "p75": 140, "p90": 160},
+            "current_price": 100.0,
+            "convergence_ratio": 0.7,
+        },
+        "synthesis_confidence": "medium",
+        "risk": {"level": "ELEVATED"},
+        "report": "## What this means\nMeaningfully cheap. Add on dip.",
+        # No synthesis_verdict — legacy run
+    }
+    out = scorer.score_run(
+        ticker="INTC", as_of_date="2025-09-05", horizons=[30], state=state,
+    )
+    assert out["verdict"] == "undervalued"
+
+
 # --- aggregate report ------------------------------------------------------
 
 

@@ -86,6 +86,7 @@ async def run_backtest(
         "run_id": final.get("run_id"),
         "report": final.get("report") or "",
         "synthesis_confidence": final.get("synthesis_confidence"),
+        "synthesis_verdict": final.get("synthesis_verdict"),
         "risk": final.get("risk") or {},
         "monte_carlo": final.get("monte_carlo") or {},
         "score": score,

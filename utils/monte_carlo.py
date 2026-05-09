@@ -250,6 +250,14 @@ def simulate(
         else 0.0
     )
 
+    # Threshold probabilities from the DCF fair-value distribution. These
+    # translate the raw distribution into the actionable prose Synthesis
+    # writes: "high likelihood of >10% upside" etc. DCF (not multiple) is
+    # the primary spine, mirroring the dashboard's `dcf` percentiles.
+    p_up_10 = float((fair_value_dcf > current_price * 1.10).mean())
+    p_up_25 = float((fair_value_dcf > current_price * 1.25).mean())
+    p_down_10 = float((fair_value_dcf < current_price * 0.90).mean())
+
     return {
         "method": "dcf+multiple",
         "dcf": dcf_dist.to_dict(include_samples=False),
@@ -260,7 +268,52 @@ def simulate(
         "terminal_growth_used": float(g),
         "n_sims": int(n_sims),
         "n_years": int(n_years),
+        "thresholds": {
+            "prob_upside_10pct": p_up_10,
+            "prob_upside_25pct": p_up_25,
+            "prob_downside_10pct": p_down_10,
+        },
+        "verdict": verdict_from_distribution(current_price, dcf_dist.p25, dcf_dist.p75),
     }
+
+
+def verdict_from_distribution(
+    current_price: float | None, p25: float | None, p75: float | None,
+) -> str:
+    """Deterministic verdict from the DCF fair-value distribution.
+
+    Rule:
+        current_price < P25                → "undervalued"
+        current_price > P75                → "overvalued"
+        P25 ≤ current_price ≤ P75          → "fairly_priced"
+
+    Why this lives in the MC engine and not the synthesis prompt: real run
+    on NKE (as_of=2025-09-05, current=$73, P50=$38, P75≈$60) produced an
+    LLM verdict of "fairly_priced" because the prompt's verdict rule
+    co-mingled the percentile test with `convergence_ratio` ("…OR signals
+    conflict materially"). NKE's convergence was 0.39 (low — DCF and
+    Multiple disagreed) and the LLM read that as "signals conflict",
+    overriding the obvious overvaluation. Computing the verdict from
+    percentiles deterministically and overriding the LLM's choice in
+    `agents/synthesis.py` removes the failure mode entirely. Confidence
+    stays an LLM judgment — convergence-low can still pull confidence
+    down to "low" without flipping the verdict.
+
+    Returns "fairly_priced" as a safe default when any input is missing.
+    """
+    if current_price is None or p25 is None or p75 is None:
+        return "fairly_priced"
+    try:
+        cp = float(current_price)
+        lo = float(p25)
+        hi = float(p75)
+    except (TypeError, ValueError):
+        return "fairly_priced"
+    if cp < lo:
+        return "undervalued"
+    if cp > hi:
+        return "overvalued"
+    return "fairly_priced"
 
 
 def compute_discount_rate(treasury_10y: float, valuation: ValuationConfig) -> float:

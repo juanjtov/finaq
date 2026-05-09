@@ -19,6 +19,7 @@ from utils.monte_carlo import (
     _draw_truncated_normal,
     compute_discount_rate,
     simulate,
+    verdict_from_distribution,
 )
 from utils.schemas import Projections, ValuationConfig
 
@@ -275,8 +276,67 @@ def test_simulate_output_keys():
         "terminal_growth_used",
         "n_sims",
         "n_years",
+        "thresholds",
+        "verdict",
     }
     assert set(out.keys()) == expected_keys
     assert out["method"] == "dcf+multiple"
     assert out["n_sims"] == DEFAULT_N_SIMS
     assert out["n_years"] == DEFAULT_FORECAST_YEARS
+
+
+def test_simulate_thresholds_shape_and_bounds():
+    """The three threshold probabilities exposed for the synthesis prompt
+    must (a) be present, (b) be in [0, 1], and (c) be coherent: stricter
+    upside threshold (>25%) cannot have a higher probability than the
+    looser one (>10%)."""
+    out = _run_baseline()
+    th = out["thresholds"]
+    assert set(th.keys()) == {
+        "prob_upside_10pct",
+        "prob_upside_25pct",
+        "prob_downside_10pct",
+    }
+    for v in th.values():
+        assert 0.0 <= v <= 1.0
+    # Monotonicity: P(>10% upside) >= P(>25% upside)
+    assert th["prob_upside_10pct"] >= th["prob_upside_25pct"]
+
+
+def test_simulate_includes_deterministic_verdict_field():
+    """The MC engine emits a `verdict` derived from current_price vs P25/P75
+    so the synthesis agent doesn't have to redo the math."""
+    out = _run_baseline()
+    assert out.get("verdict") in ("undervalued", "fairly_priced", "overvalued")
+
+
+# --- verdict_from_distribution ---------------------------------------------
+
+
+def test_verdict_undervalued_when_price_below_p25():
+    assert verdict_from_distribution(20.0, 25.0, 60.0) == "undervalued"
+
+
+def test_verdict_overvalued_when_price_above_p75():
+    """The exact NKE failure case: current=$73, P25=$26, P75=$60.
+    Math says overvalued; LLM previously said fairly_priced."""
+    assert verdict_from_distribution(73.0, 26.0, 60.0) == "overvalued"
+
+
+def test_verdict_fairly_priced_when_inside_band():
+    assert verdict_from_distribution(40.0, 25.0, 60.0) == "fairly_priced"
+
+
+def test_verdict_inclusive_at_band_edges():
+    """P25 and P75 endpoints are inclusive (fairly_priced, not flipped)."""
+    assert verdict_from_distribution(25.0, 25.0, 60.0) == "fairly_priced"
+    assert verdict_from_distribution(60.0, 25.0, 60.0) == "fairly_priced"
+
+
+def test_verdict_safe_default_on_missing_inputs():
+    """Missing or non-numeric inputs default to 'fairly_priced' so the
+    pipeline never breaks on degenerate MC output."""
+    assert verdict_from_distribution(None, 25.0, 60.0) == "fairly_priced"
+    assert verdict_from_distribution(40.0, None, 60.0) == "fairly_priced"
+    assert verdict_from_distribution(40.0, 25.0, None) == "fairly_priced"
+    assert verdict_from_distribution("not a number", 25.0, 60.0) == "fairly_priced"

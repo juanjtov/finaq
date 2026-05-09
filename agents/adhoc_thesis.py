@@ -50,13 +50,13 @@ ADHOC_PREFIX = "adhoc_"
 without a separate directory or schema field. Removable: `theses/adhoc_*.json`
 can be deleted any time without breaking anything."""
 
-LLM_MAX_TOKENS = 4000
-"""Budget for the synthesis response. Bumped from 2000 → 4000 after a real
-"/analyze construction related companies, including materials vendors"
-got truncated mid-JSON: the LLM produced a verbose 15-ticker universe
-with 8 relationships and ran out of token room before closing the
-final brace, so the parser returned `{}` and the user saw "non-JSON
-response". 4000 tokens covers the prompt's worst-case (15 tickers,
+LLM_MAX_TOKENS = 6000
+"""Budget for the synthesis response. Bumped 2000 → 4000 → 6000 after
+backtest "/analyze coursera education tech" truncated COUR's adhoc
+thesis JSON at as_of=2025-09-05: the date-pinned mode + a longer
+horizon prose drove the LLM past 4000 tokens before closing the final
+brace, so the parser returned `{}` and the per-run JSON was empty.
+6000 tokens now covers the prompt's worst-case (15 tickers,
 8 relationships, 10 thresholds) with comfortable headroom."""
 
 _RAW_FAIL_DIR = Path("data_cache/eval/adhoc_failures")

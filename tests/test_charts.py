@@ -83,3 +83,57 @@ def test_mc_histogram_handles_various_sample_counts(size):
     samples = np.random.normal(loc=185, scale=40, size=size)
     data = mc_histogram_to_bytes(samples, current_price=200.0)
     assert len(data) > 500
+
+
+# --- backtest_price_path ---------------------------------------------------
+
+
+def test_backtest_price_path_returns_figure_for_full_input():
+    from utils.charts import backtest_price_path
+
+    fig = backtest_price_path(
+        as_of_date="2025-09-05",
+        as_of_close=21.85,
+        realised=[
+            (30, "2025-10-05", 22.10),
+            (90, "2025-12-04", 19.80),
+            (180, "2026-03-04", 24.90),
+        ],
+        mc_percentiles={"p10": 12, "p25": 16, "p50": 24, "p75": 32, "p90": 45},
+    )
+    assert fig is not None
+    import matplotlib.pyplot as plt
+
+    plt.close(fig)
+
+
+def test_backtest_price_path_handles_partial_data():
+    """Missing realised closes (yfinance gaps) → still renders, no crash."""
+    from utils.charts import backtest_price_path
+
+    fig = backtest_price_path(
+        as_of_date="2025-09-05",
+        as_of_close=None,
+        realised=[(30, "2025-10-05", None)],  # nothing realised
+        mc_percentiles=None,
+    )
+    assert fig is not None
+    import matplotlib.pyplot as plt
+
+    plt.close(fig)
+
+
+def test_backtest_price_path_handles_no_mc_percentiles():
+    """No MC bands → just the price markers, no fill_between."""
+    from utils.charts import backtest_price_path
+
+    fig = backtest_price_path(
+        as_of_date="2025-09-05",
+        as_of_close=21.85,
+        realised=[(30, "2025-10-05", 22.10)],
+        mc_percentiles=None,
+    )
+    assert fig is not None
+    import matplotlib.pyplot as plt
+
+    plt.close(fig)

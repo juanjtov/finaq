@@ -147,40 +147,74 @@ async def test_run_returns_empty_query_match_when_ticker_ingested_but_no_hits(
     assert not any("scripts.ingest_universe" in e for e in out.errors)
 
 
+def test_retrieve_for_subquery_falls_back_to_no_item_filter_on_empty(monkeypatch):
+    """Foreign-issuer compatibility: 20-F filings use Item 3.D for risk
+    factors and Item 5 for MD&A — different codes from 10-K's 1A/7. When
+    the primary `item_filter` returns 0 chunks, the retriever must retry
+    without the metadata filter so semantic search can still find the
+    matching content."""
+    from agents import filings as f
+
+    calls: list[dict] = []
+
+    def _stub_query(ticker, question, *, k, item_filter, candidate_pool, as_of):
+        calls.append({"item_filter": item_filter})
+        # First call (with filter "1A") returns empty; second (no filter) returns chunk.
+        if item_filter is not None:
+            return []
+        return [{"text": "Item 3.D Risk Factors prose", "metadata": {}, "score": 0.1}]
+
+    monkeypatch.setattr(f, "chroma_query", _stub_query)
+    sq = {"label": "risk_factors", "item_filter": "1A", "question": "principal risks"}
+
+    chunks = f._retrieve_for_subquery("NU", sq)
+
+    assert len(chunks) == 1
+    assert calls[0]["item_filter"] == "1A"
+    assert calls[1]["item_filter"] is None
+
+
+def test_retrieve_for_subquery_does_not_retry_when_filter_already_none(monkeypatch):
+    """Defensive: only the filtered subqueries fall back. If `item_filter` is
+    already None, a 0-result first call doesn't trigger an identical retry."""
+    from agents import filings as f
+
+    calls: list[dict] = []
+
+    def _stub_query(ticker, question, *, k, item_filter, candidate_pool, as_of):
+        calls.append({"item_filter": item_filter})
+        return []
+
+    monkeypatch.setattr(f, "chroma_query", _stub_query)
+    sq = {"label": "segment_performance", "item_filter": None, "question": "segments"}
+
+    chunks = f._retrieve_for_subquery("NU", sq)
+
+    assert chunks == []
+    assert len(calls) == 1
+
+
 @pytest.mark.asyncio
-async def test_run_returns_foreign_issuer_message_when_unsupported_kinds_present(
+async def test_run_emits_actionable_error_when_ticker_ingested_but_subqueries_miss(
     monkeypatch,
 ):
-    """Real failure mode: TSM + ASML file 20-F + 6-K, not 10-K + 10-Q. Our
-    pipeline only ingests the latter; ChromaDB stays empty even after a
-    successful download attempt. The agent should detect the EDGAR cache
-    HAS filings in 20-F/6-K dirs and emit a precise message — NOT prompt
-    the user to re-run scripts.ingest_universe (which won't help)."""
+    """Edge case after 20-F/6-K support: ticker IS ingested but the 3
+    subqueries all returned 0 (e.g., a 6-K-only ticker where item_filter
+    1A/7 fall through to no filter, and the Unstructured chunks don't
+    semantically match). Should emit `empty_query_match` and reference
+    foreign-issuer item codes in the hint."""
     from agents import filings as f
 
     monkeypatch.setattr(f, "_retrieve_for_subquery", lambda *a, **kw: [])
-    monkeypatch.setattr("data.chroma.has_ticker", lambda ticker: False)
-    monkeypatch.setattr(
-        "data.edgar.has_filings_in_unsupported_kinds",
-        lambda ticker: ["20-F", "6-K"] if ticker == "TSM" else [],
-    )
+    monkeypatch.setattr("data.chroma.has_ticker", lambda ticker: True)
 
-    state = {"ticker": "TSM", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "ABCD", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
     result = await run(state)
     out = FilingsOutput.model_validate(result["filings"])
 
-    # Foreign-issuer error path
-    assert any("foreign_issuer" in e for e in out.errors)
-    assert any("20-F" in e for e in out.errors)
-    assert any("6-K" in e for e in out.errors)
-
-    # Must NOT suggest re-running scripts.ingest_universe (won't help)
-    assert not any(
-        "scripts.ingest_universe" in e and "Run" in e for e in out.errors
-    ), f"foreign-issuer error should not prompt re-ingest: {out.errors}"
-    # Summary explains the situation
-    assert "20-F" in out.summary
-    assert "TSM" in out.summary
+    assert any("empty_query_match" in e for e in out.errors)
+    # Hint should mention 20-F item codes for the foreign-issuer case
+    assert any("3.D" in e or "Item 5" in e for e in out.errors)
 
 
 @pytest.mark.asyncio

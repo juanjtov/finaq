@@ -1,0 +1,101 @@
+{
+  "name": "Intel (single-name ad-hoc)",
+  "summary": "Single-name drill-in on Intel. Thesis focuses on competitive positioning in advanced semiconductor manufacturing against TSM and Samsung, CPU/GPU market share battles with AMD/NVIDIA, foundry service ambitions, and margin sustainability amid massive capex. Peers highlight competitive dynamics in fabless vs. IDM models.",
+  "anchor_tickers": [
+    "INTC"
+  ],
+  "universe": [
+    "INTC",
+    "AMD",
+    "NVDA",
+    "TSM",
+    "QCOM",
+    "MU",
+    "ASML",
+    "AMAT"
+  ],
+  "relationships": [
+    {
+      "from_": "INTC",
+      "to": "TSM",
+      "type": "competitor",
+      "note": "Direct competition in advanced foundry services and process node leadership"
+    },
+    {
+      "from_": "INTC",
+      "to": "AMD",
+      "type": "competitor",
+      "note": "Head-to-head in x86 CPU market for datacenter and client computing"
+    },
+    {
+      "from_": "INTC",
+      "to": "ASML",
+      "type": "supplier",
+      "note": "ASML's EUV lithography machines critical for Intel's process roadmap"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "foundry_revenue_growth_qoq",
+      "operator": ">",
+      "value": 15.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "datacenter_market_share",
+      "operator": "<",
+      "value": 70.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "gross_margin_ttm",
+      "operator": "<",
+      "value": 40.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "capex_to_revenue",
+      "operator": ">",
+      "value": 35.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "inventory_days",
+      "operator": ">",
+      "value": 110.0,
+      "unit": "days"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "process node delay",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "CHIPS Act funding",
+      "unit": "text"
+    },
+    {
+      "signal": "debt_to_ebitda",
+      "operator": ">",
+      "value": 3.0,
+      "unit": "x"
+    },
+    {
+      "signal": "free_cash_flow_yield",
+      "operator": "<",
+      "value": 0.0,
+      "unit": "percent"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.057,
+    "erp_basis": "S&P 500 ERP + 0.7pp for semiconductor capex cyclicality and node transition risks",
+    "terminal_growth_rate": 0.026,
+    "terminal_growth_basis": "Semiconductor industry long-term growth at GDP+1% given AI/cloud tailwinds",
+    "discount_rate_floor": 0.085,
+    "discount_rate_cap": 0.155
+  }
+}

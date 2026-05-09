@@ -1,0 +1,101 @@
+{
+  "name": "Coursera (single-name ad-hoc)",
+  "summary": "Single-name drill-in on Coursera (COUR). Thesis frame: monetization growth of online education platform via enterprise/government partnerships against competitive fragmentation, content acquisition costs, and free-to-paid conversion challenges. Peers triangulate platform scalability and margin sustainability in digital learning.",
+  "anchor_tickers": [
+    "COUR"
+  ],
+  "universe": [
+    "COUR",
+    "UDMY",
+    "CHGG",
+    "TWOU",
+    "LRN",
+    "DUOL",
+    "APEI",
+    "ZVO"
+  ],
+  "relationships": [
+    {
+      "from_": "COUR",
+      "to": "TWOU",
+      "type": "competitor",
+      "note": "Both compete for university degree program partnerships"
+    },
+    {
+      "from_": "COUR",
+      "to": "UDMY",
+      "type": "competitor",
+      "note": "Direct competition in B2B skill certification market"
+    },
+    {
+      "from_": "COUR",
+      "to": "CHGG",
+      "type": "competitor",
+      "note": "Overlap in student/user acquisition for career-relevant content"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "enterprise_revenue_growth_yoy",
+      "operator": "<",
+      "value": 15.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "gross_margin",
+      "operator": "<",
+      "value": 50.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "content_acquisition_costs_rev_share",
+      "operator": ">",
+      "value": 35.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "free_cash_flow_margin",
+      "operator": "<",
+      "value": -0.08,
+      "unit": "ratio"
+    },
+    {
+      "signal": "paid_learner_growth_yoy",
+      "operator": "<",
+      "value": 10.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_equity",
+      "operator": ">",
+      "value": 0.6,
+      "unit": "ratio"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "regulatory investigation",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "partner concentration",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.065,
+    "erp_basis": "Premium added for edtech monetization uncertainty and regulatory exposure",
+    "terminal_growth_rate": 0.028,
+    "terminal_growth_basis": "Online education adoption tailwinds offset by market saturation risk",
+    "discount_rate_floor": 0.085,
+    "discount_rate_cap": 0.15
+  }
+}

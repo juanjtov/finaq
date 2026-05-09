@@ -1,0 +1,97 @@
+{
+  "name": "Palantir Ecosystem",
+  "summary": "Drill-in on Palantir and its competitive landscape focusing on government and enterprise AI/data analytics platforms. Thesis centers on PLTR's unique position in classified government contracts versus commercial peers, with valuation hinging on growth sustainability, margin expansion from Foundry/AIP adoption, and competitive threats from hyperscalers and specialized AI players.",
+  "anchor_tickers": [
+    "PLTR"
+  ],
+  "universe": [
+    "PLTR",
+    "AI",
+    "SNOW",
+    "DDOG",
+    "MSFT",
+    "AMZN",
+    "GOOGL",
+    "BAH",
+    "CACI",
+    "IBM"
+  ],
+  "relationships": [
+    {
+      "from_": "PLTR",
+      "to": "MSFT",
+      "type": "competitor",
+      "note": "Azure competes with Palantir's government/enterprise AI platforms"
+    },
+    {
+      "from_": "PLTR",
+      "to": "BAH",
+      "type": "customer",
+      "note": "Booz Allen integrates Palantir tech in defense/intel solutions"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "commercial_revenue_growth_yoy",
+      "operator": ">",
+      "value": 25.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "government_revenue_share",
+      "operator": ">",
+      "value": 40.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "gross_margin",
+      "operator": "<",
+      "value": 70.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "free_cash_flow_yield",
+      "operator": "<",
+      "value": 1.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_equity",
+      "operator": ">",
+      "value": 0.6,
+      "unit": "ratio"
+    },
+    {
+      "signal": "gross_margin_change_yoy",
+      "operator": "abs >",
+      "value": 300.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "budget cut",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "competitive displacement",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.065,
+    "erp_basis": "Elevated 0.5pp premium for government contract volatility and AI execution risk",
+    "terminal_growth_rate": 0.027,
+    "terminal_growth_basis": "GDP+ for long-term AI adoption curve in government/enterprise markets",
+    "discount_rate_floor": 0.085,
+    "discount_rate_cap": 0.16
+  }
+}

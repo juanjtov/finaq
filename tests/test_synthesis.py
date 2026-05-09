@@ -495,6 +495,129 @@ async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
     assert "(filings)" in result["watchlist"][1]
 
 
+@pytest.mark.asyncio
+async def test_run_overrides_llm_verdict_with_mc_percentile_rule(
+    monkeypatch, caplog,
+):
+    """Real failure mode (NKE backtest 2025-09-05): current=$73,
+    P25=$26, P75=$60 — math says overvalued, but the LLM said
+    fairly_priced because the prompt's fuzzy verdict rule let it
+    treat low convergence_ratio as a hedge.
+
+    The fix: agents/synthesis.py overrides the LLM's verdict with
+    `monte_carlo.verdict` (computed deterministically from P25/P75/
+    current_price). Confidence is left untouched."""
+    import logging
+
+    from agents import synthesis as syn
+
+    fake_md = (
+        "# NKE — Test thesis update\n\n"
+        "**Date:** 2025-09-05 · **Confidence:** low\n\n"
+        "## What this means\nNike sells shoes. The bet is brand and innovation. The model says fairly priced. Hold. Watch DTC margins.\n\n"
+        "## Thesis statement\nView (Fund kpis).\n\n"
+        "## Bull case\n- A (Fund kpis)\n- B (Filings 10-K Item 1A)\n- C (News, 2025-08-01)\n\n"
+        "## Bear case\n- A (Fund kpis)\n- B (Risk top_risks)\n- C (News, 2025-08-15)\n\n"
+        "## Top risks\n1. Risk A — severity 4 — text.\n\n"
+        "## Monte Carlo fair value\nP50 $38 vs $73 current; convergence 0.39.\n\n"
+        "- **Bull:** scenario.\n- **Base:** scenario.\n- **Bear:** scenario.\n\n"
+        "## Probabilistic forecast\nThree thresholds.\n\n"
+        "- **>10% upside:** 16% — fundamentals.\n- **>25% upside:** 12% — risk.\n- **>10% downside:** 76% — risk.\n\n"
+        "## Action recommendation\nHold for now.\n\n"
+        "## Watchlist\n- Earnings (news)\n- Filing (filings)\n- Margin (fundamentals)\n\n"
+        "## Evidence\n- src\n"
+    )
+    # LLM says "fairly_priced" — the math says otherwise (73 > 60).
+    fake_llm = {
+        "report": fake_md,
+        "confidence": "low",
+        "verdict": "fairly_priced",
+        "gaps": [],
+        "watchlist": ["Earnings (news)", "Filing (filings)", "Margin (fundamentals)"],
+    }
+    monkeypatch.setattr(syn, "_call_llm", lambda state: fake_llm)
+
+    state = _full_state()
+    # Override MC fixture with NKE-style data: current > P75 ⇒ overvalued.
+    state["monte_carlo"] = {
+        "method": "dcf+multiple",
+        "current_price": 73.0,
+        "discount_rate_used": 0.095,
+        "terminal_growth_used": 0.03,
+        "convergence_ratio": 0.39,
+        "n_sims": 10000,
+        "n_years": 10,
+        "dcf": {"p10": 13.0, "p25": 26.0, "p50": 38.0, "p75": 60.0, "p90": 99.0},
+        "multiple": {"p10": 5.0, "p25": 12.0, "p50": 30.0, "p75": 60.0, "p90": 110.0},
+        "thresholds": {
+            "prob_upside_10pct": 0.16,
+            "prob_upside_25pct": 0.12,
+            "prob_downside_10pct": 0.76,
+        },
+        "verdict": "overvalued",
+    }
+    state["ticker"] = "NKE"
+
+    with caplog.at_level(logging.INFO):
+        result = await run(state)
+
+    # Override fired: verdict reflects the math, not the LLM.
+    assert result["synthesis_verdict"] == "overvalued"
+    # Confidence is still the LLM's choice (low).
+    assert result["synthesis_confidence"] == "low"
+    # Operator-visible warning so drift is surfaced.
+    assert any(
+        "verdict override for NKE" in m and "fairly_priced" in m and "overvalued" in m
+        for m in caplog.messages
+    ), f"expected override-log warning in {caplog.messages}"
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_log_override_when_llm_already_matches(
+    monkeypatch, caplog,
+):
+    """When the LLM's verdict already matches the percentile rule, the
+    override is a no-op and nothing is logged — keeps logs quiet on the
+    happy path."""
+    import logging
+
+    from agents import synthesis as syn
+
+    fake_md = (
+        "# NVDA — AI cake thesis update\n\n"
+        "**Date:** 2026-04-29 · **Confidence:** medium\n\n"
+        "## What this means\nNVIDIA does AI chips. The bet is data centers grow. Fairly priced. Hold. Watch capex.\n\n"
+        "## Thesis statement\nView.\n\n"
+        "## Bull case\n- A (Fund kpis)\n- B (Filings)\n- C (News)\n\n"
+        "## Bear case\n- A (Fund)\n- B (Risk)\n- C (News)\n\n"
+        "## Top risks\n1. R — severity 4 — t.\n\n"
+        "## Monte Carlo fair value\nP50 $185.\n\n"
+        "- **Bull:** s.\n- **Base:** s.\n- **Bear:** s.\n\n"
+        "## Probabilistic forecast\nT.\n\n"
+        "- **>10% upside:** 50% — f.\n- **>25% upside:** 30% — f.\n- **>10% downside:** 30% — r.\n\n"
+        "## Action recommendation\nHold.\n\n"
+        "## Watchlist\n- A (news)\n- B (filings)\n- C (fundamentals)\n\n"
+        "## Evidence\n- src\n"
+    )
+    fake_llm = {
+        "report": fake_md,
+        "confidence": "medium",
+        "verdict": "fairly_priced",  # already matches the fixture (200 inside [150, 220])
+        "gaps": [],
+        "watchlist": ["A (news)", "B (filings)", "C (fundamentals)"],
+    }
+    monkeypatch.setattr(syn, "_call_llm", lambda state: fake_llm)
+
+    state = _full_state()
+    state["monte_carlo"]["verdict"] = "fairly_priced"
+
+    with caplog.at_level(logging.INFO):
+        result = await run(state)
+
+    assert result["synthesis_verdict"] == "fairly_priced"
+    assert not any("verdict override" in m for m in caplog.messages)
+
+
 # --- Fallback report shape --------------------------------------------------
 
 
@@ -508,6 +631,7 @@ def test_fallback_report_includes_all_required_sections():
         "## Bear case",
         "## Top risks",
         "## Monte Carlo fair value",
+        "## Probabilistic forecast",
         "## Action recommendation",
         "## Watchlist",
         "## Evidence",
@@ -549,6 +673,13 @@ DCF P50 of $185 vs current price $200 implies 7% downside. Convergence 0.82, dis
 - **Bull (P75-P90):** Hyperscaler capex compounds 25%+ through 2028; NVDA holds share against ASIC competition.
 - **Base (P25-P75):** Capex grows 15-20%; NVDA ships per current backlog and Blackwell roadmap.
 - **Bear (P10-P25):** Hyperscaler digestion phase in 2027; multiple compresses to sector P/E.
+
+## Probabilistic forecast
+Across the 10000 simulations and a 10-year horizon, the model implies:
+
+- **>10% upside:** 42% — driven by Fundamentals' 14-18% revenue growth band combined with Filings' supply-constrained capacity language.
+- **>25% upside:** 28% — requires the News-flagged hyperscaler capex cycle to extend past FY27 with no Blackwell yield slip.
+- **>10% downside:** 19% — Risk's customer-concentration concern materialising as one of the top three hyperscalers cutting capex by ≥20%.
 
 ## Action recommendation
 Trim 20% if Q3 misses $42B guide. Hold otherwise; do not add until convergence_ratio rises.
@@ -690,6 +821,7 @@ REQUIRED_SECTIONS = (
     "## Bear case",
     "## Top risks",
     "## Monte Carlo fair value",
+    "## Probabilistic forecast",
     "## Action recommendation",
     "## Watchlist",
     "## Evidence",

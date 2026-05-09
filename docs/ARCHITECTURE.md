@@ -586,21 +586,49 @@ FINAQ, why it was chosen, and any later revisions.
   each report section pulls its primary input from a specific upstream agent,
   not from "all of state" generically. The mapping is documented in
   `agents/prompts/synthesis.md` and reproduced here so future maintainers can
-  audit drift. The §11 report has **9 sections** (expanded from 7 in late
-  Step 7 to add an amateur summary at the top and a forward-looking
-  watchlist near the bottom):
+  audit drift. The §11 report has **10 sections** (expanded from 9 in B7 to
+  add a Probabilistic forecast section between MC and Action; previously
+  expanded from 7 in late Step 7 to add the amateur summary at the top and
+  a forward-looking watchlist near the bottom):
 
   | Report section | Primary spine | Secondary inputs |
   |---|---|---|
-  | What this means | full state, but plain language only (no jargon) | — |
+  | What this means | full state, but plain language only (no jargon) | monte_carlo.thresholds (one-line probability sentence) |
   | Thesis statement | thesis.summary + ticker context | — |
   | Bull case | fundamentals.kpis + projections + filings.mdna_quotes + news.catalysts | — |
   | Bear case | risk.top_risks (severity ≥ 3) + news.concerns + filings.risk_themes | — |
   | Top risks | risk.top_risks (verbatim list, possibly reordered) | risk.threshold_breaches |
   | Monte Carlo | monte_carlo.dcf + multiple + convergence_ratio + discount_rate_used | — |
-  | Action | MC vs current_price + risk.level + thesis.material_thresholds | — |
+  | Probabilistic forecast | monte_carlo.thresholds (3 probabilities) | fundamentals/filings/news/risk attribution |
+  | Action | MC vs current_price + risk.level + thesis.material_thresholds | monte_carlo.thresholds |
   | Watchlist | thesis.material_thresholds + gaps in upstream coverage | — |
   | Evidence | union of all upstream evidence lists | — |
+
+- **Why a separate Probabilistic forecast section (B7)**: P10/P50/P90
+  numbers are visible in the MC section but their actionability for an
+  amateur reader is low. The user's question — "if you ship the fair
+  value, that's DCF; how do the other agents enter the picture?" — is
+  answered by translating the MC distribution into three actionable
+  probability statements: P(>10% upside), P(>25% upside), P(>10% downside).
+  These are computed in `utils.monte_carlo.simulate()` from the DCF sample
+  array (`monte_carlo.thresholds.{prob_upside_10pct, prob_upside_25pct,
+  prob_downside_10pct}`) and Synthesis is required to **attribute each
+  threshold to upstream agent inputs** — e.g. ">25% upside requires the
+  News-flagged AI capex cycle to extend past FY27." Each agent's
+  contribution is now visible in prose, not just baked into the MC
+  inputs invisibly. The amateur "What this means" section also lands one
+  rounded probability sentence (e.g. "roughly a 65% chance of >10% upside
+  over our 5-year window") so the lay reader gets the punchline without
+  jargon.
+
+- **Why a `synthesis_verdict` structured field (B10)**: the backtest
+  scorer originally regex-parsed the markdown for "undervalued / overvalued
+  / fairly priced" via `_UNDERVALUED_RE / _OVERVALUED_RE / _FAIR_RE`. NKE's
+  real LLM run produced "Hold; we'd want a clearer catalyst" — the regex
+  matched neither, returned `unknown`, direction-accuracy unscoreable.
+  Synthesis now emits `verdict` as a structured side-channel (same pattern
+  as `confidence`); the scorer prefers the structured field and falls back
+  to regex only for legacy runs that pre-date B10.
 
 - **Why an amateur "What this means" section** (added late Step 7): the
   rest of the report is institutional-grade and unreadable for a non-finance

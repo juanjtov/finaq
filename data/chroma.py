@@ -356,6 +356,16 @@ def _filing_meta_from_path(path: Path) -> tuple[str, str]:
 # We chunk the upsert into batches well below the cap.
 _UPSERT_BATCH_SIZE = 4000
 
+# Hard cap on chunks per filing. NU's first 20-F produced 19,423 chunks
+# (35MB of XBRL-inflated text), which blew through 84GB of disk space on
+# the HNSW index before being killed mid-ingest. The cap protects against
+# pathological filings — a typical 10-K runs 1,500-3,000 chunks; SMCI's
+# big-cap 10-K runs ~7,200; so 6,000 leaves the body intact for normal
+# filings while preventing runaway 20-Fs (19k+ chunks) from eating the
+# disk. When the cap fires we keep the FIRST N chunks (the body of the
+# filing — exhibits and XBRL-noise sections come later in the SGML).
+_MAX_CHUNKS_PER_FILING = 6000
+
 
 def ingest_filing(ticker: str, filing_path: Path) -> int:
     """Chunk a filing, embed via OpenRouter, upsert into the `filings` collection.
@@ -366,6 +376,12 @@ def ingest_filing(ticker: str, filing_path: Path) -> int:
     Large filings (typically big-cap 10-Ks like SMCI / DELL) can produce more
     chunks than ChromaDB's per-call max_batch_size (~5461). We batch the
     upsert in `_UPSERT_BATCH_SIZE`-sized chunks to stay well below the cap.
+
+    Chunk count is also capped at `_MAX_CHUNKS_PER_FILING` per filing to
+    protect against XBRL-inflated 20-F filings (NU's first 20-F generated
+    19,423 chunks and ate 84GB of disk before being killed). If the cap
+    fires we log a warning and keep the head of the filing (where the
+    Items 1-7 prose sits; exhibits and XBRL sections come at the tail).
     """
     text = _extract_text(filing_path)
     if not text:
@@ -383,8 +399,15 @@ def ingest_filing(ticker: str, filing_path: Path) -> int:
     chunk_idx = 0  # global per-filing index — keeps IDs unique even when an Item header
     # appears twice (e.g., once in the TOC and once in the body)
 
+    capped = False
     for code, label, body in _split_into_items(text):
+        if chunk_idx >= _MAX_CHUNKS_PER_FILING:
+            capped = True
+            break
         for chunk in _chunk_tokens(body, encoder):
+            if chunk_idx >= _MAX_CHUNKS_PER_FILING:
+                capped = True
+                break
             ids.append(f"{ticker}-{accession}-{chunk_idx}")
             docs.append(chunk)
             metas.append(
@@ -401,6 +424,14 @@ def ingest_filing(ticker: str, filing_path: Path) -> int:
 
     if not docs:
         return 0
+
+    if capped:
+        logger.warning(
+            f"{ticker} {filing_type} {accession}: hit chunk cap "
+            f"({_MAX_CHUNKS_PER_FILING}); body sections beyond the cap "
+            f"(typically exhibits / XBRL) are not indexed. This is the "
+            f"defensive behaviour after the NU 20-F disk-fill incident."
+        )
 
     # Batched upsert — stays under ChromaDB's max_batch_size limit.
     for i in range(0, len(docs), _UPSERT_BATCH_SIZE):
@@ -454,27 +485,51 @@ def _reciprocal_rank_fusion(ranked_lists: list[list[int]], k: int = RRF_K) -> li
 def _build_where_clause(
     ticker: str | None,
     item_filter: str | None,
-    *,
-    as_of: str | None = None,
 ) -> dict | None:
     """Compose the metadata pre-filter that ChromaDB applies BEFORE similarity scan.
 
-    Backtest mode: when `as_of="YYYY-MM-DD"` is set, restrict to chunks whose
-    `filed_date <= as_of`. ChromaDB's `$lte` operator works on string columns
-    too because ISO dates are lexicographically ordered.
+    Note: backtest's `as_of` filter is NOT applied here. ChromaDB's `$lte`
+    operator rejects string operands with "Expected operand value to be an
+    int or a float for operator $lte" (verified 2026-05-08 against the
+    chromadb version pinned in requirements.txt). The historical-cutoff
+    filter is applied in Python via `_filter_by_as_of` after retrieval.
+    The cost is retrieving slightly more candidates than strictly needed
+    (post-as_of chunks land in the candidate pool then get dropped) — at
+    DEFAULT_CANDIDATE_POOL = 60 this is negligible, especially since
+    backtest is a single-user offline workflow.
     """
     conditions: list[dict] = []
     if ticker:
         conditions.append({"ticker": ticker})
     if item_filter:
         conditions.append({"item_code": _normalize_item_filter(item_filter)})
-    if as_of:
-        conditions.append({"filed_date": {"$lte": as_of}})
     if len(conditions) == 0:
         return None
     if len(conditions) == 1:
         return conditions[0]
     return {"$and": conditions}
+
+
+def _filter_by_as_of(chunks: list[dict], as_of: str | None) -> list[dict]:
+    """Backtest mode post-filter: drop chunks whose `filed_date > as_of`.
+
+    Operates on the in-memory chunks returned by ChromaDB instead of the
+    `where` clause because ChromaDB's `$lte` requires numeric operands but
+    `filed_date` is stored as ISO strings. ISO dates are lexicographically
+    ordered, so a string comparison preserves calendar order. Chunks with
+    missing or unparseable `filed_date` are DROPPED in backtest mode (same
+    conservative posture as `data/edgar._existing_filings`)."""
+    if not as_of:
+        return chunks
+    kept: list[dict] = []
+    for c in chunks:
+        meta = c.get("metadata") or {}
+        filed = (meta.get("filed_date") or "").strip()
+        if not filed:
+            continue  # conservative: drop undated chunks in backtest
+        if filed <= as_of:
+            kept.append(c)
+    return kept
 
 
 def _unpack_chroma_query(results: dict) -> list[dict]:
@@ -510,11 +565,13 @@ def query(
     `metadata` includes `filed_date` so downstream agents can reason about freshness.
 
     Backtest mode (`as_of="YYYY-MM-DD"`): only chunks from filings dated ≤ as_of
-    are eligible. The cutoff is exclusive of post-as_of evidence, ensuring no
-    forward leakage into Filings agent retrieval.
+    are eligible. The cutoff is enforced via `_filter_by_as_of` after the
+    candidate pool is retrieved (ChromaDB's `$lte` requires numeric operands;
+    our `filed_date` is an ISO string). No forward leakage — post-as_of
+    chunks are dropped before BM25 / RRF run.
     """
     coll = _get_collection()
-    where = _build_where_clause(ticker, item_filter, as_of=as_of)
+    where = _build_where_clause(ticker, item_filter)
 
     # Step 1+2 — pre-filter + semantic candidate pool.
     # ChromaDB internally: (a) embeds the query via our OpenRouterEmbedding,
@@ -522,8 +579,15 @@ def query(
     # against every candidate's stored embedding, (d) returns the top-N sorted
     # by distance ascending (closest first). The `score` field on each chunk
     # is the cosine distance — lower = more similar.
-    sem_results = coll.query(query_texts=[question], n_results=candidate_pool, where=where)
+    # Backtest mode: pull a wider candidate pool so the post-filter has
+    # enough headroom — many of the top-N pre-as_of-filter chunks may be
+    # newer than as_of and get dropped. 3x is conservative; doesn't matter
+    # for production (as_of=None bypasses _filter_by_as_of entirely).
+    n_results = candidate_pool * 3 if as_of else candidate_pool
+    sem_results = coll.query(query_texts=[question], n_results=n_results, where=where)
     candidates = _unpack_chroma_query(sem_results)
+    if as_of:
+        candidates = _filter_by_as_of(candidates, as_of)[:candidate_pool]
     if not candidates:
         return []
 

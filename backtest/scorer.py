@@ -201,7 +201,13 @@ def score_run(
     confidence = state.get("synthesis_confidence")
     risk_level = (state.get("risk") or {}).get("level")
     report = state.get("report") or ""
-    verdict = extract_verdict(report)
+    # Prefer the structured verdict synthesis emits as a side-channel; fall
+    # back to regex-parsing the prose for legacy runs that pre-date the field.
+    structured = state.get("synthesis_verdict")
+    if structured in ("undervalued", "fairly_priced", "overvalued"):
+        verdict = structured
+    else:
+        verdict = extract_verdict(report)
 
     prices = realised_prices(ticker, as_of_date=as_of_date, horizons=horizons)
     p_as_of = prices["as_of"]["close"]

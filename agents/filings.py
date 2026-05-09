@@ -80,7 +80,16 @@ def _retrieve_for_subquery(
     *,
     as_of: str | None = None,
 ) -> list[dict]:
-    return chroma_query(
+    """Retrieve chunks for a single subquery.
+
+    Foreign-issuer fallback: if the primary `item_filter` returns zero chunks,
+    re-query without the item filter. Domestic 10-Ks use "Item 1A. Risk
+    Factors" and "Item 7. MD&A" (codes 1A/7) but 20-F uses "Item 3.D" and
+    "Item 5" — different codes for the same content. Rather than maintain
+    per-filing-type code mappings, we let semantic search find the right
+    sections when the metadata pre-filter excludes everything.
+    """
+    chunks = chroma_query(
         ticker,
         subquery["question"],
         k=SUBQUERY_K,
@@ -88,6 +97,16 @@ def _retrieve_for_subquery(
         candidate_pool=CANDIDATE_POOL,
         as_of=as_of,
     )
+    if not chunks and subquery.get("item_filter"):
+        chunks = chroma_query(
+            ticker,
+            subquery["question"],
+            k=SUBQUERY_K,
+            item_filter=None,
+            candidate_pool=CANDIDATE_POOL,
+            as_of=as_of,
+        )
+    return chunks
 
 
 # --- Prompt assembly ---------------------------------------------------------
@@ -195,41 +214,20 @@ async def run(state: FinaqState) -> dict:
 
     total_chunks = sum(len(c) for _, c in subqueries_with_chunks)
     if total_chunks == 0:
-        # Three failure modes that look the same on the wire:
-        #   (a) Foreign issuer — files 20-F/6-K, not 10-K/10-Q. Our pipeline
-        #       only ingests the latter two, so the corpus is empty AND the
-        #       fix is NOT to re-run scripts.ingest_universe (won't help).
-        #       Detected when the EDGAR cache shows other-kind directories.
-        #   (b) Ticker not yet ingested → empty corpus, actionable: run script.
-        #   (c) Ticker IS ingested but the 3 subqueries all returned 0
-        #       (rare; would mean the subquery is poorly matched to content).
+        # Two failure modes:
+        #   (a) Ticker not yet ingested → empty corpus, actionable: run script.
+        #   (b) Ticker IS ingested but the 3 subqueries all returned 0
+        #       (rare; would mean the subquery is poorly matched to content,
+        #       or the ticker filed only 6-K interim reports which our
+        #       chunker treats as Unstructured and the item_filter="1A"/"7"
+        #       subqueries skip).
         # The Mission Control "Recent errors" panel + dashboard banner key
         # off these messages, so they need to be precise.
         from data.chroma import has_ticker
-        from data.edgar import has_filings_in_unsupported_kinds
 
         ticker_ingested = await asyncio.to_thread(has_ticker, ticker)
-        unsupported_kinds = await asyncio.to_thread(
-            has_filings_in_unsupported_kinds, ticker
-        )
 
-        if not ticker_ingested and unsupported_kinds:
-            # (a) Foreign issuer / wrong filing kinds present
-            kinds_str = ", ".join(unsupported_kinds)
-            specific_error = (
-                f"foreign_issuer: {ticker} files {kinds_str} (not 10-K/10-Q). "
-                f"Our pipeline only ingests 10-K + 10-Q today — see "
-                f"docs/POSTPONED.md for 20-F/6-K support roadmap. "
-                f"Re-running scripts.ingest_universe will NOT help."
-            )
-            summary = (
-                f"{ticker} is a foreign-issuer or non-standard-kind filer "
-                f"({kinds_str}). The current pipeline ingests 10-K + 10-Q only, "
-                f"so {ticker}'s SEC filings are NOT in ChromaDB. This is a "
-                f"known limitation tracked in `docs/POSTPONED.md`."
-            )
-        elif not ticker_ingested:
-            # (b) Ticker just hasn't been ingested yet
+        if not ticker_ingested:
             specific_error = (
                 f"ticker_not_ingested: {ticker} has zero chunks in ChromaDB. "
                 f"Run `python -m scripts.ingest_universe {ticker}` "
@@ -241,11 +239,12 @@ async def run(state: FinaqState) -> dict:
                 f"{ticker}` to populate, then re-run the drill-in."
             )
         else:
-            # (c) Ingested, but subqueries all missed
             specific_error = (
                 f"empty_query_match: {ticker} is ingested but the subqueries "
                 "matched no chunks. Check the subquery templates against "
-                "the actual filing content."
+                "the actual filing content (foreign-issuer 20-F uses Item 3.D "
+                "for risk factors and Item 5 for MD&A — different from "
+                "domestic 10-K Items 1A/7)."
             )
             summary = (
                 f"{ticker} is ingested but the 3 thesis-aware subqueries "

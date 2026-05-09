@@ -203,6 +203,7 @@ def test_main_dashboard_renders_without_exception(_no_query_params):
         "direct_agent.py",
         "new_thesis.py",
         "theses_admin.py",
+        "backtest.py",
     ],
 )
 def test_each_page_renders_without_exception(page_file):

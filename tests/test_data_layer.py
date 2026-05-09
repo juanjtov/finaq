@@ -281,7 +281,10 @@ def test_ingest_filing_batches_upsert_when_chunk_count_exceeds_chroma_limit(
     # Synthesize a fake "extracted text" that produces >5461 chunks. Bypass
     # the SEC-filing parser by stubbing _extract_text + _split_into_items +
     # _chunk_tokens to return a known number of chunks directly.
-    n_chunks_total = 7200  # SMCI's actual size in production
+    # 5500 sits above the 4000 batch limit (so we can verify batching) but
+    # below the 6000 chunk cap (so the cap doesn't fire and obscure the
+    # batched-upsert behaviour we're checking here).
+    n_chunks_total = 5500
     monkeypatch.setattr(ch, "_extract_text", lambda p: "x")  # non-empty short-circuits the bail
     monkeypatch.setattr(
         ch,
@@ -355,6 +358,59 @@ def test_ingest_filing_single_upsert_when_chunk_count_below_limit(tmp_path, monk
 
     ch.ingest_filing("CRDO", fake_path)
     assert upsert_calls == [500]
+
+
+def test_ingest_filing_caps_chunks_when_filing_is_pathologically_large(
+    tmp_path, monkeypatch, caplog
+):
+    """Real failure mode (NU 20-F): a single filing produced 19,423 chunks
+    because the 35MB filing included full XBRL inline content. ChromaDB's
+    HNSW index then ate 84GB of disk before the ingest was killed.
+
+    The cap caps each filing at `_MAX_CHUNKS_PER_FILING` so a pathological
+    20-F can no longer take the system out. The test simulates a 20,000-
+    chunk filing and asserts only `_MAX_CHUNKS_PER_FILING` land."""
+    import logging
+
+    from data import chroma as ch
+
+    upsert_calls: list[int] = []
+
+    class _FakeCollection:
+        def upsert(self, ids, documents, metadatas):
+            upsert_calls.append(len(ids))
+
+    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
+    monkeypatch.setattr(ch, "_extract_text", lambda p: "x")
+    monkeypatch.setattr(
+        ch,
+        "_split_into_items",
+        lambda text: [("MISC", "Unstructured", "stub body")],
+    )
+    # 20,000 chunks — well above the cap.
+    monkeypatch.setattr(
+        ch,
+        "_chunk_tokens",
+        lambda body, encoder: [f"chunk-{i}" for i in range(20_000)],
+    )
+    monkeypatch.setattr(
+        ch, "_filing_meta_from_path", lambda path: ("20-F", "0001292814-25-001517"),
+    )
+    monkeypatch.setattr(ch, "parse_filed_date", lambda path: "2025-03-15")
+    monkeypatch.setattr(ch.tiktoken, "get_encoding", lambda name: object())
+
+    fake_path = tmp_path / "full-submission.txt"
+    fake_path.write_text("ignored")
+
+    with caplog.at_level(logging.WARNING):
+        written = ch.ingest_filing("NU", fake_path)
+
+    assert written == ch._MAX_CHUNKS_PER_FILING
+    assert sum(upsert_calls) == ch._MAX_CHUNKS_PER_FILING
+    # Warning log fired so the operator knows the filing was truncated.
+    assert any("hit chunk cap" in m for m in caplog.messages), (
+        f"expected chunk-cap warning in logs: {caplog.messages}"
+    )
 
 
 # --- Hybrid retrieval: BM25 + RRF -------------------------------------------

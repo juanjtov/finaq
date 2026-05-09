@@ -156,6 +156,138 @@ def mc_histogram_to_bytes(
     return buf.getvalue()
 
 
+# --- Backtest time-series chart --------------------------------------------
+
+
+def backtest_price_path(
+    as_of_date: str,
+    as_of_close: float | None,
+    realised: list[tuple[int, str, float | None]],
+    mc_percentiles: dict[str, float] | None = None,
+    *,
+    title: str = "Realised price vs Monte Carlo fair-value bands",
+    figsize: tuple[float, float] = (8.0, 4.0),
+) -> plt.Figure:
+    """Render a backtest time-series chart: as-of price + realised closes at
+    each horizon, overlaid against horizontal bands of the MC fair-value
+    distribution.
+
+    Args:
+      as_of_date:    ISO date string the drill-in was anchored to.
+      as_of_close:   price the day of the drill-in (= mc.current_price).
+      realised:      list of (horizon_days, target_date_iso, close) tuples
+                     for each scoring horizon (30 / 90 / 180 d).
+      mc_percentiles: dict like {"p10": .., "p25": .., "p50": .., "p75":
+                     .., "p90": ..} from the DCF distribution. Drawn as
+                     horizontal reference bands. Optional.
+
+    Visualises:
+      - Sage P50 horizontal line.
+      - Parchment-filled P10-P90 band, eggshell-filled P25-P75 band.
+      - Ink dashed line for the as-of close.
+      - Markers (sage circles) for each realised horizon close, with text
+        labels showing %-return from as-of.
+    """
+    from datetime import datetime as _dt
+
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.patch.set_facecolor(WHITE)
+    ax.set_facecolor(WHITE)
+
+    # Convert dates to datetimes for matplotlib's date-axis.
+    try:
+        x_as_of = _dt.fromisoformat(as_of_date)
+    except ValueError:
+        x_as_of = None
+
+    realised_points: list[tuple[_dt, float, int]] = []
+    for days, iso, close in realised:
+        if close is None:
+            continue
+        try:
+            xt = _dt.fromisoformat(iso)
+        except ValueError:
+            continue
+        realised_points.append((xt, float(close), int(days)))
+
+    # Horizontal bands first (so they sit behind the price markers).
+    # Sage is the brand accent — using two opacities of sage as a single-hue
+    # gradient gives strong visual distinction between the outer P10-P90
+    # band and the inner P25-P75 band while staying inside the warm-neutral
+    # palette. Earlier attempt with parchment/eggshell was too low-contrast
+    # to read at small chart sizes.
+    if mc_percentiles:
+        p10 = mc_percentiles.get("p10")
+        p25 = mc_percentiles.get("p25")
+        p50 = mc_percentiles.get("p50")
+        p75 = mc_percentiles.get("p75")
+        p90 = mc_percentiles.get("p90")
+        # X-extent: as-of through last realised horizon (or +30 fallback)
+        x_left = x_as_of
+        x_right = realised_points[-1][0] if realised_points else x_as_of
+        if x_left is not None and x_right is not None and x_right >= x_left:
+            if p10 is not None and p90 is not None:
+                ax.fill_between(
+                    [x_left, x_right], [p10, p10], [p90, p90],
+                    color=SAGE, alpha=0.10, label="MC P10-P90",
+                )
+            if p25 is not None and p75 is not None:
+                ax.fill_between(
+                    [x_left, x_right], [p25, p25], [p75, p75],
+                    color=SAGE, alpha=0.30, label="MC P25-P75",
+                )
+            if p50 is not None:
+                ax.hlines(
+                    p50, x_left, x_right, colors=SAGE, linestyles="-",
+                    linewidth=1.8, label=f"MC P50 = ${p50:,.0f}",
+                )
+
+    # As-of price line (ink dashed)
+    if x_as_of is not None and as_of_close is not None:
+        ax.axhline(
+            float(as_of_close), color=INK, linestyle="--", linewidth=1.2,
+            alpha=0.55,
+        )
+        ax.scatter(
+            [x_as_of], [float(as_of_close)], color=INK, s=55, zorder=5,
+            label=f"as-of {as_of_date} = ${as_of_close:,.2f}",
+        )
+
+    # Realised horizon closes (sage circles + return labels)
+    if realised_points:
+        xs = [p[0] for p in realised_points]
+        ys = [p[1] for p in realised_points]
+        ax.plot(xs, ys, color=SAGE, marker="o", linewidth=1.4, zorder=4)
+        for xt, close, days in realised_points:
+            if as_of_close:
+                pct = (close - float(as_of_close)) / float(as_of_close) * 100
+                lbl = f"+{days}d  ${close:,.2f}\n{pct:+.1f}%"
+            else:
+                lbl = f"+{days}d  ${close:,.2f}"
+            ax.annotate(
+                lbl, xy=(xt, close),
+                xytext=(6, 8), textcoords="offset points",
+                color=INK, fontsize=8, fontweight="bold",
+            )
+
+    # Strip distracting spines/ticks
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    ax.spines["bottom"].set_color(BONE)
+    ax.spines["left"].set_color(BONE)
+    ax.tick_params(axis="x", colors=INK, labelsize=9)
+    ax.tick_params(axis="y", colors=INK, labelsize=9)
+    ax.set_xlabel("Date", color=INK, fontsize=10)
+    ax.set_ylabel("Price ($)", color=INK, fontsize=10)
+    ax.set_title(title, color=INK, fontsize=12, loc="left", pad=10)
+    if mc_percentiles or realised_points:
+        ax.legend(loc="best", frameon=False, fontsize=8)
+
+    fig.autofmt_xdate(rotation=0, ha="center")
+    fig.tight_layout()
+    return fig
+
+
 # --- Sample resolution (shared between dashboard + Telegram bot) ----------
 
 

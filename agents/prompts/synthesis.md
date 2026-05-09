@@ -49,13 +49,14 @@ Z." That is rejected. You must:
 
 | Section | Primary spine | Secondary inputs |
 |---|---|---|
-| What this means | full state, but in plain language only | — |
+| What this means | full state, but in plain language only | monte_carlo.thresholds (one-line probability sentence) |
 | Thesis statement | thesis.summary + ticker context | — |
 | Bull case | fundamentals.kpis + projections + filings.mdna_quotes + news.catalysts | — |
 | Bear case | risk.top_risks (severity ≥ 3) + news.concerns + filings.risk_themes | — |
 | Top risks | risk.top_risks (verbatim list, possibly reordered) | risk.threshold_breaches |
 | Monte Carlo fair value | monte_carlo.dcf + multiple + convergence_ratio + discount_rate_used | — |
-| Action recommendation | MC vs current_price + risk.level + thesis.material_thresholds | — |
+| Probabilistic forecast | monte_carlo.thresholds (3 probabilities) | fundamentals/filings/news/risk attribution |
+| Action recommendation | MC vs current_price + risk.level + thesis.material_thresholds | monte_carlo.thresholds |
 | Watchlist | thesis.material_thresholds + gaps in upstream coverage | — |
 | Evidence | union of all upstream evidence lists | — |
 
@@ -73,7 +74,13 @@ This section is for an amateur investor. Hard constraints:
 - Five-sentence structure (in order):
   1. What the company does (one sentence, plain language).
   2. What the thesis is betting on (one sentence).
-  3. What the model says about price (in plain language).
+  3. What the model says about price (in plain language) PLUS one
+     probability statement that translates `monte_carlo.thresholds` into
+     plain English. Example: "Even with a hold call, our model gives a
+     roughly 65% chance the stock could be at least 10% higher over the
+     next five years, with a 30% chance of >25% upside." Round
+     probabilities to the nearest 5%. NEVER write a literal "P50" /
+     "P90" / "DCF" — these are for `## Monte Carlo fair value`.
   4. What we'd do (sized: trim, hold, add — and why in one phrase).
   5. One thing to watch over the next 1–2 quarters.
 - No citations in this section — citations belong in `Bull case`, `Bear
@@ -89,7 +96,7 @@ filings.mdna_quotes or news catalysts/concerns.
 
 # Strict report template (CLAUDE.md §11)
 
-These exact 9 H2 headers, in this order. Do not rename or reorder. Do not
+These exact 10 H2 headers, in this order. Do not rename or reorder. Do not
 add extra sections. Do not skip sections — if you have nothing for a
 section, say so explicitly inside the section.
 
@@ -121,6 +128,27 @@ scenario bullets:
 - **Bull (P75-P90):** one sentence — what world produces this upside.
 - **Base (P25-P75):** one sentence — the central case.
 - **Bear (P10-P25):** one sentence — what world produces this downside.
+
+## Probabilistic forecast
+Lead sentence: "Across the {n_sims} simulations and a {n_years}-year
+horizon, the model implies:" (substitute the actual values from the MC
+output). Then exactly three bullets — one per threshold from
+`monte_carlo.thresholds`:
+
+- **>10% upside:** {prob_upside_10pct as %} — {one-sentence attribution
+  naming which agent inputs drive this scenario; e.g., "carried by the
+  Fundamentals revenue band of X-Y% combined with Filings' supply-side
+  language"}.
+- **>25% upside:** {prob_upside_25pct as %} — {requires what stretch
+  inputs to clear; cite the specific agent / catalyst}.
+- **>10% downside:** {prob_downside_10pct as %} — {what would have to
+  break; cite Risk's top concerns or News' bear catalysts}.
+
+Round percentages to the nearest 1%. The attribution clauses are
+non-negotiable — every bullet must name ≥1 upstream agent (Fundamentals,
+Filings, News, or Risk) so the reader sees which evidence drives each
+scenario. Do NOT cite `(MC P50)` here — these probabilities ARE the MC,
+attribution is to the *inputs*.
 
 ## Action recommendation
 One paragraph. What changes (if any) to thesis or position size, with
@@ -181,16 +209,37 @@ STRICT JSON, NO MARKDOWN FENCES, NO PROSE BEFORE OR AFTER. Schema:
 {
   "report":     "<full markdown report — see template above>",
   "confidence": "<low|medium|high — same value used inside the report>",
+  "verdict":    "<undervalued|fairly_priced|overvalued — directional read>",
   "gaps":       ["<retrospective gap 1>", "<retrospective gap 2>", ...],
   "watchlist":  ["<prospective item 1 (agent)>", "<prospective item 2 (agent)>", ...]
 }
 ```
 
-Rationale and HARD requirements on the four fields:
+Rationale and HARD requirements on the five fields:
 
 - `confidence` is duplicated outside the report so downstream code can read
   it without parsing markdown. Its value MUST equal the `Confidence:` label
   inside the markdown header.
+- `verdict` is a structured side-channel for the directional read. MUST be
+  exactly one of `undervalued`, `fairly_priced`, `overvalued` (snake_case,
+  underscore not space). The verdict is **deterministic from the DCF
+  distribution and current price** — apply the rule below verbatim. Do NOT
+  let convergence_ratio or signal conflict change the verdict; those affect
+  `confidence` only. Drives:
+    - the backtest scorer's direction-accuracy metric;
+    - the dashboard's compact valuation badge.
+
+  **Verdict rule (HARD, no exceptions):**
+    - `current_price < dcf.P25` → `undervalued`
+    - `current_price > dcf.P75` → `overvalued`
+    - `dcf.P25 ≤ current_price ≤ dcf.P75` → `fairly_priced`
+
+  Match the prose in `## What this means` and `## Action recommendation` to
+  this verdict. If the upstream signals conflict with what the percentiles
+  imply, document the tension in prose and lower `confidence` accordingly
+  — but the verdict still follows the rule. The system computes the same
+  rule downstream and overrides any drift, so misalignment will be visible
+  in logs as a "verdict override" warning.
 - `gaps` is for observability — never blocks the report.
 - **`watchlist` MUST mirror the `## Watchlist` section line-by-line.** This
   is non-negotiable: Phase 1 Triage parses the JSON `watchlist` field

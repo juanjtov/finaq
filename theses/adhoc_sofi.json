@@ -1,0 +1,89 @@
+{
+  "name": "SoFi (single-name ad-hoc)",
+  "summary": "Single-name drill-in on SoFi Technologies as a digital financial services disruptor. Thesis frame: growth trajectory of the multi-product fintech platform against traditional banking peers, with focus on member acquisition costs, net interest margin sustainability, and regulatory capital requirements. Peers include neobanks, traditional banks, and lending platforms for comparative analysis.",
+  "anchor_tickers": [
+    "SOFI"
+  ],
+  "universe": [
+    "SOFI",
+    "UPST",
+    "LC",
+    "ALLY",
+    "JPM",
+    "COIN",
+    "SQ",
+    "WFC"
+  ],
+  "relationships": [
+    {
+      "from_": "SOFI",
+      "to": "JPM",
+      "type": "competitor",
+      "note": "Direct competition in student/personal lending and digital banking services"
+    },
+    {
+      "from_": "SOFI",
+      "to": "UPST",
+      "type": "competitor",
+      "note": "Competing AI-driven lending platforms with different underwriting models"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "member_growth_yoy",
+      "operator": "<",
+      "value": 25.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "net_interest_margin",
+      "operator": "<",
+      "value": 4.5,
+      "unit": "percent"
+    },
+    {
+      "signal": "loan_loss_provision_ratio",
+      "operator": ">",
+      "value": 2.5,
+      "unit": "percent"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "capital adequacy",
+      "unit": "text"
+    },
+    {
+      "signal": "gross_margin_change_yoy",
+      "operator": "abs >",
+      "value": 300.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "debt_to_equity",
+      "operator": ">",
+      "value": 0.8,
+      "unit": "ratio"
+    },
+    {
+      "signal": "sbc_revenue_share",
+      "operator": ">",
+      "value": 15.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.065,
+    "erp_basis": "Fintech premium added to base ERP for regulatory and execution risks",
+    "terminal_growth_rate": 0.03,
+    "terminal_growth_basis": "Above-GDP growth assumption for successful digital banking disruptors",
+    "discount_rate_floor": 0.095,
+    "discount_rate_cap": 0.175
+  }
+}

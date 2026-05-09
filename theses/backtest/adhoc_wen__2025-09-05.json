@@ -1,0 +1,89 @@
+{
+  "name": "Wendy's Company (single-name ad-hoc)",
+  "summary": "Single-name drill-in on Wendy's. Thesis frame: QSR burger chain navigating digital sales growth, franchise-heavy model efficiency, and breakfast daypart expansion against commodity inflation and labor cost pressures. Peers provide context on menu innovation, unit economics, and international growth optionality.",
+  "anchor_tickers": [
+    "WEN"
+  ],
+  "universe": [
+    "WEN",
+    "MCD",
+    "QSR",
+    "DNUT",
+    "JACK",
+    "YUM",
+    "CMG",
+    "SHAK"
+  ],
+  "relationships": [
+    {
+      "from_": "WEN",
+      "to": "MCD",
+      "type": "competitor",
+      "note": "Direct burger QSR competition in US breakfast/lunch dayparts"
+    },
+    {
+      "from_": "WEN",
+      "to": "QSR",
+      "type": "competitor",
+      "note": "Burger King (QSR) competes directly in value-menu positioning"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "same_store_sales_growth",
+      "operator": "<",
+      "value": 2.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "digital_sales_penetration",
+      "operator": "<",
+      "value": 20.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "franchise_margin",
+      "operator": "<",
+      "value": 45.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "commodity_inflation_yoy",
+      "operator": ">",
+      "value": 8.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_ebitda",
+      "operator": ">",
+      "value": 4.5,
+      "unit": "x"
+    },
+    {
+      "signal": "gross_margin_change_yoy",
+      "operator": "abs >",
+      "value": 300.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "labor shortage",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.055,
+    "erp_basis": "S&P 500 base ERP plus 0.5pp for restaurant industry commodity/labor volatility",
+    "terminal_growth_rate": 0.023,
+    "terminal_growth_basis": "US QSR nominal growth ≈ GDP + 0.3pp, offset by saturation headwinds",
+    "discount_rate_floor": 0.075,
+    "discount_rate_cap": 0.135
+  }
+}

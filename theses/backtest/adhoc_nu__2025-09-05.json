@@ -1,0 +1,89 @@
+{
+  "name": "Nu Holdings (single-name ad-hoc)",
+  "summary": "Single-name drill-in on Nu Holdings (NU), a leading Latin American digital banking platform. Thesis focuses on hypergrowth in Brazil/Mexico/Colombia markets, net interest margin sustainability, and customer acquisition efficiency versus regulatory headwinds and competition from incumbents. Peers include LatAm-focused fintechs and traditional banks.",
+  "anchor_tickers": [
+    "NU"
+  ],
+  "universe": [
+    "NU",
+    "PAGS",
+    "STNE",
+    "ITUB",
+    "BBD",
+    "BSBR",
+    "MELI",
+    "BBVA"
+  ],
+  "relationships": [
+    {
+      "from_": "NU",
+      "to": "ITUB",
+      "type": "competitor",
+      "note": "Competition in Brazilian digital banking services"
+    },
+    {
+      "from_": "NU",
+      "to": "BBVA",
+      "type": "competitor",
+      "note": "Overlap in Mexican banking market"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "customer_growth_yoy",
+      "operator": "<",
+      "value": 20.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "net_interest_margin",
+      "operator": "abs >",
+      "value": 50.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "marketing_expense_ratio",
+      "operator": ">",
+      "value": 25.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "brazil_revenue_share",
+      "operator": "<",
+      "value": 70.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "roe_ttm",
+      "operator": "<",
+      "value": 15.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_equity",
+      "operator": ">",
+      "value": 0.7,
+      "unit": "ratio"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "BCB sanction",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.065,
+    "erp_basis": "S&P 500 ERP plus 1.5pp for LatAm emerging market volatility",
+    "terminal_growth_rate": 0.028,
+    "terminal_growth_basis": "Above-US-GDP reflecting LatAm financial inclusion runway",
+    "discount_rate_floor": 0.085,
+    "discount_rate_cap": 0.16
+  }
+}

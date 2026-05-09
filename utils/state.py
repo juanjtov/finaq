@@ -21,6 +21,8 @@ class FinaqState(TypedDict, total=False):
     monte_carlo: dict[str, Any]
     report: str
     synthesis_confidence: str  # low|medium|high — duplicated from inside the markdown
+    synthesis_verdict: str  # undervalued|fairly_priced|overvalued — structured side-channel
+    # for the backtest scorer; preferred over a regex parse of the report prose.
     gaps: list[str]  # upstream content Synthesis wished it had (retrospective observability)
     watchlist: list[str]  # forward-looking events to track before next drill-in (per-agent suffix)
     run_id: str  # set by invoke_with_telemetry; lets the dashboard key cached files by run

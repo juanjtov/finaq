@@ -241,7 +241,7 @@ See [`docs/POSTPONED.md`](./docs/POSTPONED.md) for the full deferred list with e
 
 A README readers can trust is one that admits gaps:
 
-- **Filing scope.** Only 10-K and 10-Q. No 8-K (current reports), no foreign-issuer (20-F / 6-K). The Filings agent **detects** unsupported filings and returns precise errors distinguishing `foreign_issuer` / `ticker_not_ingested` / `empty_query_match`.
+- **Filing scope.** 10-K + 10-Q (domestic) and 20-F + 6-K (foreign-issuer) supported. No 8-K (current reports) yet. Each filing is hard-capped at 6,000 chunks during ingest — pathological 20-Fs (NU's first was 19k chunks of XBRL bloat) get truncated to keep ChromaDB sane. The Filings agent's three subqueries fall back to no-item-filter retrieval when the primary item codes don't match (10-K's 1A/7 vs 20-F's 3.D/5).
 - **Sector multiples.** `data/sector_multiples.json` is hand-curated from Damodaran NYU Stern and refreshed quarterly (next refresh due 2026-07-28). No live feed yet.
 - **Cross-encoder re-ranking** is intentionally excluded — adds latency and cost beyond what RRF already buys you.
 - **Risk does not feed back into Monte Carlo.** Phase 0 simplification — Risk and MC are independent, both feeding Synthesis side-by-side. Future work could let MC tail-risk calibrate risk thresholds.

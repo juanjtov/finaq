@@ -33,6 +33,7 @@ REQUIRED_SECTIONS = (
     "## Bear case",
     "## Top risks",
     "## Monte Carlo fair value",
+    "## Probabilistic forecast",
     "## Action recommendation",
     "## Watchlist",
     "## Evidence",

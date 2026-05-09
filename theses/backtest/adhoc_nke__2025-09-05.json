@@ -1,0 +1,90 @@
+{
+  "name": "Nike (single-name ad-hoc)",
+  "summary": "Single-name drill-in on Nike. Thesis focuses on brand premium sustainability amid direct-to-consumer transition, inventory normalization challenges, and competitive pressures in athletic footwear/apparel. Peer analysis examines wholesale-retail dynamics, innovation cycles, and margin profiles across sportswear leaders and key retail partners.",
+  "anchor_tickers": [
+    "NKE"
+  ],
+  "universe": [
+    "NKE",
+    "UAA",
+    "LULU",
+    "DKS",
+    "FL",
+    "ADDYY",
+    "ONON",
+    "VFC",
+    "SKX"
+  ],
+  "relationships": [
+    {
+      "from_": "NKE",
+      "to": "DKS",
+      "type": "customer",
+      "note": "Dick's Sporting Goods is major wholesale partner for Nike products"
+    },
+    {
+      "from_": "NKE",
+      "to": "FL",
+      "type": "customer",
+      "note": "Foot Locker historically key retailer though DTC shift reduces dependence"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "direct_to_consumer_revenue_share",
+      "operator": ">",
+      "value": 45.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "china_revenue_growth_yoy",
+      "operator": "<",
+      "value": 0.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "inventory_growth_yoy",
+      "operator": ">",
+      "value": 15.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "gross_margin_change_yoy",
+      "operator": "abs >",
+      "value": 250.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "roe_ttm",
+      "operator": "<",
+      "value": 15.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_ebitda",
+      "operator": ">",
+      "value": 2.5,
+      "unit": "x"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "inventory impairment",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.055,
+    "erp_basis": "Broad market ERP plus 0.5pp for consumer discretionary cyclicality",
+    "terminal_growth_rate": 0.027,
+    "terminal_growth_basis": "Global sportswear growth above GDP given athleisure penetration tailwinds",
+    "discount_rate_floor": 0.075,
+    "discount_rate_cap": 0.135
+  }
+}

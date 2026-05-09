@@ -264,6 +264,7 @@ class RiskOutput(BaseModel):
 
 
 SynthesisConfidence = Literal["low", "medium", "high"]
+SynthesisVerdict = Literal["undervalued", "fairly_priced", "overvalued"]
 
 
 class AgentAnswer(BaseModel):
@@ -323,6 +324,7 @@ class SynthesisOutput(BaseModel):
 
     report: str
     confidence: SynthesisConfidence = "medium"
+    verdict: SynthesisVerdict = "fairly_priced"
     gaps: list[str] = []
     watchlist: list[str] = []
     errors: list[str] = []

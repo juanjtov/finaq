@@ -1,9 +1,15 @@
 """SEC EDGAR filing fetcher.
 
 Wraps `sec-edgar-downloader` with an idempotent `download_filings` that always
-fetches the 2 most recent 10-Ks and 4 most recent 10-Qs per ticker by default.
-Also exposes `parse_filed_date` which extracts the SEC-reported filing date
-from a submission's SGML header — used by ChromaDB metadata for freshness.
+fetches the 2 most recent annual reports and 4 most recent interim reports per
+ticker by default — covering both domestic filers (10-K + 10-Q) and foreign
+private issuers (20-F + 6-K). Also exposes `parse_filed_date` which extracts
+the SEC-reported filing date from a submission's SGML header — used by
+ChromaDB metadata for freshness.
+
+For tickers that file only one of the two (e.g. NVDA has no 20-Fs, NU has
+no 10-Ks), `dl.get(kind, ticker)` is a no-op when no filings exist of that
+kind. Cost is one wasted API call per missing kind, which EDGAR handles fine.
 """
 
 from __future__ import annotations
@@ -18,7 +24,11 @@ from sec_edgar_downloader import Downloader
 from utils import logger, tenacity_retry
 
 EDGAR_DIR = Path("data_cache/edgar")
-DEFAULT_LIMITS: dict[str, int] = {"10-K": 2, "10-Q": 4}
+# Domestic filers (10-K + 10-Q) and foreign private issuers (20-F + 6-K) are
+# both covered. 6-K filings are press releases / interim disclosures attached
+# as exhibits — they don't follow Item-X structure so each lands as one
+# "misc" chunk pile via the fallback in data/chroma.py:_split_into_items.
+DEFAULT_LIMITS: dict[str, int] = {"10-K": 2, "10-Q": 4, "20-F": 2, "6-K": 4}
 
 # SEC SGML headers contain a "FILED AS OF DATE:	YYYYMMDD" line within the first
 # ~50 lines of full-submission.txt.
@@ -62,21 +72,20 @@ def _filings_dir(ticker: str, kind: str) -> Path:
 
 def has_filings_in_unsupported_kinds(ticker: str) -> list[str]:
     """Return any filing-kind directories on disk for this ticker that AREN'T
-    in our supported set (currently 10-K, 10-Q).
+    in our supported set.
 
-    Used by the Filings agent to detect foreign issuers (TSM/ASML file 20-F
-    + 6-K, no 10-K/10-Q) so it can emit a precise error rather than the
-    generic "not ingested" message. The dashboard's ingest banner reads
-    this too — for foreign issuers it should NOT prompt for re-ingest
-    (won't help) but should explain the corpus gap.
+    Used by the Filings agent / dashboard ingest banner to detect cases where
+    EDGAR returned only filing kinds we don't ingest — historically that meant
+    foreign-issuer 20-F/6-K, but those are now first-class. Today the function
+    is mostly a future hook for kinds we may still skip (8-K, S-1, etc).
 
-    Returns e.g. `["20-F", "6-K"]` for ASML, or `[]` if the ticker either
-    has no EDGAR cache OR has only-supported kinds.
+    Returns the unsupported kinds present, or `[]` if the ticker either has
+    no EDGAR cache OR has only-supported kinds.
     """
     ticker_root = EDGAR_DIR / "sec-edgar-filings" / ticker.upper()
     if not ticker_root.exists():
         return []
-    supported = set(DEFAULT_LIMITS.keys())  # currently {"10-K", "10-Q"}
+    supported = set(DEFAULT_LIMITS.keys())
     return sorted(
         p.name
         for p in ticker_root.iterdir()

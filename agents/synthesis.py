@@ -186,6 +186,14 @@ def _format_monte_carlo(payload: dict) -> str:
             f"P75={mult.get('p75', '?'):.2f} "
             f"P90={mult.get('p90', '?'):.2f}"
         )
+    thresholds = payload.get("thresholds") or {}
+    if thresholds:
+        parts.append(
+            f"thresholds (DCF samples vs current_price={payload.get('current_price', '?')}):"
+            f" P(>10% upside)={thresholds.get('prob_upside_10pct', '?'):.3f}"
+            f"  P(>25% upside)={thresholds.get('prob_upside_25pct', '?'):.3f}"
+            f"  P(>10% downside)={thresholds.get('prob_downside_10pct', '?'):.3f}"
+        )
     return "\n".join(parts)
 
 
@@ -303,6 +311,11 @@ def _coerce_to_synthesis_output(raw: dict) -> dict:
     when missing; non-list values are coerced to []. If `watchlist` is empty
     but the markdown has a `## Watchlist` section with bullets, recover from
     the markdown — Phase 1 Triage relies on the structured field.
+
+    `verdict` is the directional read (undervalued / fairly_priced /
+    overvalued). The backtest scorer prefers this structured field over a
+    regex parse of the markdown — keeps direction-accuracy honest when
+    synthesis prose drifts away from the canonical phrasings.
     """
     report = raw.get("report") or ""
     if not isinstance(report, str) or not report.strip():
@@ -311,6 +324,12 @@ def _coerce_to_synthesis_output(raw: dict) -> dict:
     if confidence not in ("low", "medium", "high"):
         logger.warning(f"[synthesis] LLM returned unknown confidence {confidence!r}; → medium")
         confidence = "medium"
+    verdict = str(raw.get("verdict", "fairly_priced")).strip().lower()
+    if verdict not in ("undervalued", "fairly_priced", "overvalued"):
+        logger.warning(
+            f"[synthesis] LLM returned unknown verdict {verdict!r}; → fairly_priced"
+        )
+        verdict = "fairly_priced"
     watchlist = _coerce_string_list(raw.get("watchlist"))
     if not watchlist:
         recovered = _extract_watchlist_from_markdown(report)
@@ -323,6 +342,7 @@ def _coerce_to_synthesis_output(raw: dict) -> dict:
     return {
         "report": report,
         "confidence": confidence,
+        "verdict": verdict,
         "gaps": _coerce_string_list(raw.get("gaps")),
         "watchlist": watchlist,
     }
@@ -356,6 +376,13 @@ The system could not write a final summary for this stock today. The raw data fr
 - **Bull (P75-P90):** unavailable — Synthesis failed.
 - **Base (P25-P75):** unavailable — Synthesis failed.
 - **Bear (P10-P25):** unavailable — Synthesis failed.
+
+## Probabilistic forecast
+[Synthesis failed — see `state.monte_carlo.thresholds` directly for raw probabilities.]
+
+- **>10% upside:** unavailable — Synthesis failed.
+- **>25% upside:** unavailable — Synthesis failed.
+- **>10% downside:** unavailable — Synthesis failed.
 
 ## Action recommendation
 No action recommended. The Synthesis step failed; do not act on a partial brief.
@@ -414,9 +441,32 @@ async def run(state: FinaqState) -> dict:
                 errors=errors,
             )
 
+    # Deterministic verdict override: the LLM's `verdict` is REPLACED by the
+    # percentile-derived value from MC. Real failure mode (NKE backtest at
+    # as_of=2025-09-05): current=$73, P50=$38, P75≈$60 — clearly overvalued
+    # by the math, but the LLM picked "fairly_priced" because the prompt's
+    # rule co-mingled the percentile test with `convergence_ratio` and NKE's
+    # convergence (0.39) was low, which the LLM read as "signals conflict".
+    # The override keeps prose and structured field separable: prose can
+    # narrate uncertainty, the verdict reflects the math. Confidence stays
+    # an LLM judgment per user direction.
+    mc = state.get("monte_carlo") or {}
+    mc_verdict = mc.get("verdict")
+    if mc_verdict in ("undervalued", "fairly_priced", "overvalued"):
+        if mc_verdict != out.verdict:
+            logger.info(
+                f"[synthesis] verdict override for {ticker}: LLM said "
+                f"{out.verdict!r}, percentile rule says {mc_verdict!r} "
+                f"(current_price={mc.get('current_price')}, "
+                f"P25={mc.get('dcf', {}).get('p25')}, "
+                f"P75={mc.get('dcf', {}).get('p75')})"
+            )
+        out.verdict = mc_verdict
+
     return {
         "report": out.report,
         "synthesis_confidence": out.confidence,
+        "synthesis_verdict": out.verdict,
         "gaps": out.gaps,
         "watchlist": out.watchlist,
         "messages": [

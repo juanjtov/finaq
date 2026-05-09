@@ -183,38 +183,56 @@ def test_edgar_existing_filings_drops_undated_in_backtest_mode(tmp_path, monkeyp
 # --- ChromaDB ---------------------------------------------------------------
 
 
-def test_chroma_where_clause_includes_filed_date_lte_when_as_of_set():
-    """`_build_where_clause(as_of=...)` must produce a ChromaDB filter that
-    restricts to chunks with `filed_date <= as_of`."""
-    from data.chroma import _build_where_clause
-
-    where = _build_where_clause("INTC", "1A", as_of="2025-09-05")
-    # Three conditions: ticker + item_code + filed_date
-    assert "$and" in where
-    conds = where["$and"]
-    assert {"ticker": "INTC"} in conds
-    assert {"item_code": "1A"} in conds
-    assert {"filed_date": {"$lte": "2025-09-05"}} in conds
-
-
-def test_chroma_where_clause_no_as_of_unchanged():
-    """Production path (`as_of=None`) must NOT include any filed_date filter."""
+def test_chroma_where_clause_no_filed_date_filter():
+    """`_build_where_clause` no longer takes `as_of` — ChromaDB rejects
+    `$lte` on string operands. The cutoff is enforced post-query via
+    `_filter_by_as_of`. The where-clause builder produces only the
+    ticker + item_code filter (or None if both empty)."""
     from data.chroma import _build_where_clause
 
     where = _build_where_clause("INTC", "1A")
     assert "$and" in where
+    conds = where["$and"]
+    assert {"ticker": "INTC"} in conds
+    assert {"item_code": "1A"} in conds
     serialised = json.dumps(where)
     assert "filed_date" not in serialised
     assert "$lte" not in serialised
 
 
-def test_chroma_where_clause_only_as_of_returns_single_filter():
-    """With ticker=None and item_filter=None but as_of set, the clause is
-    just the date filter — no $and wrapper."""
+def test_chroma_where_clause_returns_none_when_no_filters():
+    """No ticker + no item_filter → no where clause."""
     from data.chroma import _build_where_clause
 
-    where = _build_where_clause(None, None, as_of="2025-09-05")
-    assert where == {"filed_date": {"$lte": "2025-09-05"}}
+    assert _build_where_clause(None, None) is None
+
+
+def test_chroma_filter_by_as_of_drops_post_cutoff_chunks():
+    """The Python-side post-filter drops chunks whose filed_date > as_of
+    and chunks with no filed_date (conservative posture in backtest)."""
+    from data.chroma import _filter_by_as_of
+
+    chunks = [
+        {"text": "old", "metadata": {"filed_date": "2024-12-01"}},
+        {"text": "edge", "metadata": {"filed_date": "2025-09-05"}},  # equal — kept
+        {"text": "post", "metadata": {"filed_date": "2025-11-12"}},  # dropped
+        {"text": "undated", "metadata": {}},  # dropped
+    ]
+    kept = _filter_by_as_of(chunks, as_of="2025-09-05")
+    texts = [c["text"] for c in kept]
+    assert texts == ["old", "edge"]
+
+
+def test_chroma_filter_by_as_of_passthrough_when_as_of_none():
+    """Production path (`as_of=None`) returns the chunks unchanged — even
+    chunks with malformed or missing filed_date metadata."""
+    from data.chroma import _filter_by_as_of
+
+    chunks = [
+        {"text": "a", "metadata": {"filed_date": "2025-01-01"}},
+        {"text": "b", "metadata": {}},
+    ]
+    assert _filter_by_as_of(chunks, as_of=None) == chunks
 
 
 # --- Treasury ---------------------------------------------------------------
