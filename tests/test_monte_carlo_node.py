@@ -110,7 +110,7 @@ async def test_node_runs_simulate_when_inputs_complete(monkeypatch):
     actually runs and produces a complete dcf+multiple result."""
     import data.treasury
 
-    monkeypatch.setattr(data.treasury, "get_10y_treasury_yield", lambda: 0.045)
+    monkeypatch.setattr(data.treasury, "get_10y_treasury_yield", lambda **kw: 0.045)
 
     state = _full_state()
     result = await monte_carlo(state)
@@ -137,7 +137,8 @@ async def test_node_uses_treasury_fallback_on_fetch_failure(monkeypatch):
 
     # The treasury module has its own fallback — simulate that the fallback is used
     monkeypatch.setattr(
-        data.treasury, "get_10y_treasury_yield", lambda: data.treasury.DEFAULT_FALLBACK
+        data.treasury, "get_10y_treasury_yield",
+        lambda **kw: data.treasury.DEFAULT_FALLBACK,
     )
 
     state = _full_state()
@@ -153,12 +154,12 @@ async def test_node_clips_extreme_treasury_to_thesis_band(monkeypatch):
     import data.treasury
 
     # Ridiculously high: treasury 20% + ERP 5% = 25%, capped at ai_cake 13%
-    monkeypatch.setattr(data.treasury, "get_10y_treasury_yield", lambda: 0.20)
+    monkeypatch.setattr(data.treasury, "get_10y_treasury_yield", lambda **kw: 0.20)
     state = _full_state()
     result = await monte_carlo(state)
     assert result["monte_carlo"]["discount_rate_used"] == pytest.approx(0.13)
 
     # Ridiculously low: treasury 0% + ERP 5% = 5%, floored at ai_cake 7.5%
-    monkeypatch.setattr(data.treasury, "get_10y_treasury_yield", lambda: 0.0)
+    monkeypatch.setattr(data.treasury, "get_10y_treasury_yield", lambda **kw: 0.0)
     result = await monte_carlo(state)
     assert result["monte_carlo"]["discount_rate_used"] == pytest.approx(0.075)

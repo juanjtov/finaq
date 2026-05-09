@@ -157,12 +157,15 @@ def _coerce_to_risk_output(raw: dict) -> dict:
 
 
 def _call_llm(ticker: str, thesis: dict, state: FinaqState) -> dict:
+    from utils.as_of import maybe_inject_as_of
+
     client = get_client()
     user = _build_user_prompt(ticker, thesis, state)
+    system = maybe_inject_as_of(SYSTEM_PROMPT, state.get("as_of_date"))
     resp = client.chat.completions.create(
         model=MODEL_RISK,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         max_tokens=LLM_MAX_TOKENS,

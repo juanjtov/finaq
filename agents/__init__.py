@@ -161,7 +161,9 @@ async def monte_carlo(state: FinaqState) -> dict[str, Any]:
         }
 
     projections = Projections.model_validate(projections_dict)
-    treasury = get_10y_treasury_yield()
+    # Backtest mode: pass as_of through so the discount rate reflects the
+    # 10y yield AS OF the historical date, not today's.
+    treasury = get_10y_treasury_yield(as_of=state.get("as_of_date"))
     discount_rate = compute_discount_rate(treasury, thesis.valuation)
 
     mc = simulate(

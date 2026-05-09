@@ -207,16 +207,31 @@ def _build_user_prompt(*, topic: str | None, ticker: str | None) -> str:
     )
 
 
-def _call_llm(*, topic: str | None, ticker: str | None) -> tuple[dict, str]:
+def _call_llm(
+    *,
+    topic: str | None,
+    ticker: str | None,
+    as_of_date: str | None = None,
+) -> tuple[dict, str]:
     """Single LLM call (model resolved via `MODEL_ADHOC_THESIS`).
     Returns `(parsed_dict, raw_response)` — the raw string is preserved
     so the caller can stash it on parse failure for offline inspection.
-    Raises on network failure; caller wraps in try/except."""
+    Raises on network failure; caller wraps in try/except.
+
+    Backtest mode (`as_of_date="YYYY-MM-DD"`): the as-of context block is
+    prepended to the system prompt so the synthesizer doesn't shape the
+    universe / material_thresholds with hindsight knowledge of post-as_of
+    events. The model used (`MODEL_ADHOC_THESIS`) must have a training
+    cutoff ≤ as_of_date — caller's responsibility to verify.
+    """
+    from utils.as_of import maybe_inject_as_of
+
     client = get_client()
+    system = maybe_inject_as_of(_SYSTEM_PROMPT, as_of_date)
     resp = client.chat.completions.create(
         model=MODEL_ADHOC_THESIS,
         messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": _build_user_prompt(topic=topic, ticker=ticker)},
         ],
         max_tokens=LLM_MAX_TOKENS,
@@ -225,6 +240,7 @@ def _call_llm(*, topic: str | None, ticker: str | None) -> tuple[dict, str]:
     logger.info(
         f"[adhoc_thesis] LLM response received: {len(raw)} chars "
         f"(max_tokens={LLM_MAX_TOKENS})"
+        f"{f' [as_of={as_of_date}]' if as_of_date else ''}"
     )
     return _parse_thesis_response(raw), raw
 
@@ -232,10 +248,17 @@ def _call_llm(*, topic: str | None, ticker: str | None) -> tuple[dict, str]:
 # --- Persistence ----------------------------------------------------------
 
 
-def _save_to_disk(slug: str, thesis: Thesis) -> Path:
-    """Write the validated thesis to `theses/{slug}.json`. Caller passes
-    the full slug including the `adhoc_` prefix."""
-    path = THESES_DIR / f"{slug}.json"
+def _save_to_disk(slug: str, thesis: Thesis, *, as_of_date: str | None = None) -> Path:
+    """Write the validated thesis to disk.
+
+    Production: `theses/{slug}.json` (next to curated theses).
+    Backtest: `theses/backtest/{slug}__{as_of}.json` (segregated so
+    production thesis listings aren't polluted by date-pinned variants).
+    """
+    if as_of_date:
+        path = THESES_DIR / "backtest" / f"{slug}__{as_of_date}.json"
+    else:
+        path = THESES_DIR / f"{slug}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     # Pydantic's `.model_dump_json()` produces a stable, schema-valid
     # serialisation. Pretty-print with indent=2 so the file is
@@ -285,6 +308,7 @@ async def synthesize_adhoc_thesis(
     topic: str | None = None,
     ticker: str | None = None,
     force_refresh: bool = False,
+    as_of_date: str | None = None,
 ) -> AdhocThesisResult:
     """Synthesize an ad-hoc thesis. Caches per (topic|ticker) on disk so
     repeat invocations within a session don't re-pay the synthesis-LLM cost.
@@ -295,6 +319,11 @@ async def synthesize_adhoc_thesis(
     failure (vague input, LLM refused, JSON unparseable, schema validation
     failed). Callers should check `result.error` before dispatching a
     drill-in.
+
+    Backtest mode (`as_of_date="YYYY-MM-DD"`): synthesizes the thesis with
+    the as-of context block injected, and caches under
+    `theses/backtest/adhoc_{slug}__{as_of}.json` so production adhoc theses
+    aren't polluted by date-pinned variants.
     """
     if (topic and ticker) or (not topic and not ticker):
         return AdhocThesisResult(
@@ -305,14 +334,19 @@ async def synthesize_adhoc_thesis(
         )
 
     slug = adhoc_slug(topic=topic, ticker=ticker)
-    cached_path = THESES_DIR / f"{slug}.json"
+    if as_of_date:
+        # Backtest cache: separate directory + as_of-keyed filename so
+        # the production thesis list (`theses/*.json`) isn't polluted.
+        cached_path = THESES_DIR / "backtest" / f"{slug}__{as_of_date}.json"
+    else:
+        cached_path = THESES_DIR / f"{slug}.json"
 
     # Cache hit — return the existing on-disk thesis unless the caller
     # explicitly asked for a refresh.
     if cached_path.exists() and not force_refresh:
         try:
             cached = Thesis.model_validate_json(cached_path.read_text())
-            logger.info(f"[adhoc_thesis] cache hit: {slug}")
+            logger.info(f"[adhoc_thesis] cache hit: {cached_path.name}")
             return AdhocThesisResult(
                 slug=slug, thesis=cached, path=cached_path, cached=True
             )
@@ -324,7 +358,9 @@ async def synthesize_adhoc_thesis(
 
     # Synthesize.
     try:
-        parsed, raw_response = _call_llm(topic=topic, ticker=ticker)
+        parsed, raw_response = _call_llm(
+            topic=topic, ticker=ticker, as_of_date=as_of_date,
+        )
     except Exception as e:
         logger.error(f"[adhoc_thesis] LLM call failed: {e}")
         return AdhocThesisResult(
@@ -376,9 +412,10 @@ async def synthesize_adhoc_thesis(
             error=f"thesis schema validation failed: {e.errors()[:2]}",
         )
 
-    # Persist (disk + optional Notion mirror).
-    path = _save_to_disk(slug, thesis)
-    notion_url = _maybe_save_to_notion(slug, thesis)
+    # Persist (disk + optional Notion mirror; Notion mirror skipped in
+    # backtest mode — those are research artefacts, not user-facing).
+    path = _save_to_disk(slug, thesis, as_of_date=as_of_date)
+    notion_url = _maybe_save_to_notion(slug, thesis) if not as_of_date else None
     logger.info(f"[adhoc_thesis] synthesized + saved: {slug} → {path}")
     return AdhocThesisResult(
         slug=slug, thesis=thesis, path=path, notion_url=notion_url

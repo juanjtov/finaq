@@ -84,11 +84,38 @@ def has_filings_in_unsupported_kinds(ticker: str) -> list[str]:
     )
 
 
-def _existing_filings(ticker: str, kind: str) -> list[Path]:
+def _existing_filings(ticker: str, kind: str, *, as_of: str | None = None) -> list[Path]:
+    """Return on-disk filing paths for (ticker, kind), most-recent-first.
+
+    Backtest mode: when `as_of="YYYY-MM-DD"` is set, drop any filing whose
+    SGML-header `FILED AS OF DATE` is AFTER `as_of`. A filing the SEC accepted
+    on 2025-11-12 wasn't visible to investors on 2025-09-05 — including it
+    would leak future information into the backtest.
+
+    Filings without parseable filed_dates are kept in production mode but
+    DROPPED in backtest mode (better to err on the side of completeness for
+    live runs and on the side of safety for backtest).
+    """
     folder = _filings_dir(ticker, kind)
     if not folder.exists():
         return []
-    return sorted(folder.glob("*/full-submission.txt"))
+    paths = sorted(folder.glob("*/full-submission.txt"))
+    if as_of is None:
+        return paths
+
+    cutoff = as_of  # ISO YYYY-MM-DD; lexicographic compare matches calendar order
+    kept: list[Path] = []
+    for p in paths:
+        filed = parse_filed_date(p)
+        if filed is None:
+            # Conservative for backtest: skip filings we can't date-stamp.
+            logger.debug(f"[edgar] skipping {p} in backtest mode — no parseable filed_date")
+            continue
+        if filed <= cutoff:
+            kept.append(p)
+        else:
+            logger.debug(f"[edgar] excluding {p} (filed {filed} > as_of {cutoff})")
+    return kept
 
 
 @tenacity_retry
@@ -99,28 +126,67 @@ def _fetch_kind(ticker: str, kind: str, limit: int) -> None:
     dl.get(kind, ticker, limit=limit)
 
 
-def _download_sync(ticker: str, limits: dict[str, int]) -> list[Path]:
+def _download_sync(
+    ticker: str,
+    limits: dict[str, int],
+    *,
+    as_of: str | None = None,
+) -> list[Path]:
     paths: list[Path] = []
     for kind, limit in limits.items():
-        existing = _existing_filings(ticker, kind)
+        # Production: count any on-disk filings toward `limit`. Backtest:
+        # only count filings dated ≤ as_of toward `limit` so we don't
+        # short-circuit out early when post-as_of filings exist on disk.
+        existing = _existing_filings(ticker, kind, as_of=as_of)
         if len(existing) >= limit:
-            logger.info(f"{ticker} {kind}: {len(existing)} on disk (>= {limit}), skipping fetch")
+            mode = f" (as_of={as_of})" if as_of else ""
+            logger.info(
+                f"{ticker} {kind}: {len(existing)} on disk{mode} (>= {limit}), "
+                f"skipping fetch"
+            )
             paths.extend(existing[:limit])
             continue
-        try:
-            logger.info(f"{ticker} {kind}: fetching {limit} from EDGAR")
-            _fetch_kind(ticker, kind, limit)
-        except Exception as e:
-            logger.error(f"{ticker} {kind}: fetch failed after retries: {e}")
-        # Always re-scan disk: even on partial failure we want what landed.
-        paths.extend(_existing_filings(ticker, kind)[:limit])
+        if as_of is None:
+            try:
+                logger.info(f"{ticker} {kind}: fetching {limit} from EDGAR")
+                _fetch_kind(ticker, kind, limit)
+            except Exception as e:
+                logger.error(f"{ticker} {kind}: fetch failed after retries: {e}")
+            # Always re-scan disk: even on partial failure we want what landed.
+            paths.extend(_existing_filings(ticker, kind)[:limit])
+        else:
+            # Backtest mode: never fetch fresh from EDGAR. Doing so would
+            # download filings that exist TODAY which by definition include
+            # post-as_of content. We use whatever pre-as_of filings already
+            # landed on disk via earlier production runs — and warn loudly
+            # if there aren't enough.
+            if len(existing) < limit:
+                logger.warning(
+                    f"{ticker} {kind}: only {len(existing)} pre-as_of {as_of} filings "
+                    f"on disk (wanted {limit}). Backtest will run with reduced "
+                    f"corpus. Re-run a production drill BEFORE the as_of date "
+                    f"if you need more historical coverage."
+                )
+            paths.extend(existing[:limit])
     return paths
 
 
-async def download_filings(ticker: str, limits: dict[str, int] | None = None) -> list[Path]:
+async def download_filings(
+    ticker: str,
+    limits: dict[str, int] | None = None,
+    *,
+    as_of: str | None = None,
+) -> list[Path]:
     """Download recent SEC filings. Idempotent: skips if already on disk.
 
     Returns a list of paths to `full-submission.txt` files actually present on disk.
     Errors are logged, not raised — caller gets whatever was successfully fetched.
+
+    Backtest mode (`as_of="YYYY-MM-DD"`): never fetches fresh from EDGAR (any
+    fetch today returns post-as_of filings). Returns only filings whose
+    SGML-header `FILED AS OF DATE` ≤ as_of. Logs a warning when corpus is
+    thinner than `limits` requests.
     """
-    return await asyncio.to_thread(_download_sync, ticker, limits or DEFAULT_LIMITS)
+    return await asyncio.to_thread(
+        _download_sync, ticker, limits or DEFAULT_LIMITS, as_of=as_of,
+    )

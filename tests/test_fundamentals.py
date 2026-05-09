@@ -370,7 +370,7 @@ async def test_run_returns_null_hypothesis_when_no_kpis(monkeypatch):
     the generic-mediocre-business baseline."""
     from agents import fundamentals as f
 
-    monkeypatch.setattr(f, "get_financials", lambda t: {})
+    monkeypatch.setattr(f, "get_financials", lambda t, **kw: {})
     state = {"ticker": "ZZZZ", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
     result = await run(state)
     out = FundamentalsOutput.model_validate(result["fundamentals"])
@@ -422,7 +422,7 @@ async def test_run_preserves_deterministic_kpis_when_llm_drops_them(monkeypatch)
     }
 
     monkeypatch.setattr(f, "compute_kpis", lambda financials: deterministic_kpis)
-    monkeypatch.setattr(f, "get_financials", lambda t: {"info": {"longName": "NVDA"}})
+    monkeypatch.setattr(f, "get_financials", lambda t, **kw: {"info": {"longName": "NVDA"}})
     monkeypatch.setattr(f, "_call_llm", lambda *args, **kwargs: llm_payload)
 
     state = {"ticker": "NVDA", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
@@ -469,7 +469,7 @@ async def test_run_deterministic_kpis_override_llm_hallucinations(monkeypatch):
         "evidence": [],
     }
     monkeypatch.setattr(f, "compute_kpis", lambda financials: deterministic_kpis)
-    monkeypatch.setattr(f, "get_financials", lambda t: {"info": {"longName": "NVDA"}})
+    monkeypatch.setattr(f, "get_financials", lambda t, **kw: {"info": {"longName": "NVDA"}})
     monkeypatch.setattr(f, "_call_llm", lambda *args, **kwargs: llm_payload)
 
     state = {"ticker": "NVDA", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
@@ -496,7 +496,7 @@ async def test_run_uses_history_derived_fallback_on_llm_failure(monkeypatch):
         info={"marketCap": 50e9, "trailingPE": 30, "sharesOutstanding": 1e9},
         price=120.0,
     )
-    monkeypatch.setattr(f, "get_financials", lambda t: fixture)
+    monkeypatch.setattr(f, "get_financials", lambda t, **kw: fixture)
     monkeypatch.setattr(
         f, "_call_llm", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
     )
@@ -535,7 +535,7 @@ async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
         info={"marketCap": 50e9, "sharesOutstanding": 1e9},
         price=120.0,
     )
-    monkeypatch.setattr(f, "get_financials", lambda t: fixture)
+    monkeypatch.setattr(f, "get_financials", lambda t, **kw: fixture)
 
     fake_response = {
         "summary": "Fake thesis-aware NVDA take.",

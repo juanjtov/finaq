@@ -341,13 +341,22 @@ def _check_freshness(financials: dict) -> str | None:
     return None
 
 
-def _call_llm(ticker: str, thesis: dict, kpis: dict) -> dict:
+def _call_llm(
+    ticker: str,
+    thesis: dict,
+    kpis: dict,
+    *,
+    as_of_date: str | None = None,
+) -> dict:
+    from utils.as_of import maybe_inject_as_of
+
     client = get_client()
     user = _build_user_prompt(ticker, thesis, kpis)
+    system = maybe_inject_as_of(SYSTEM_PROMPT, as_of_date)
     resp = client.chat.completions.create(
         model=MODEL_FUNDAMENTALS,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         max_tokens=LLM_MAX_TOKENS,
@@ -363,11 +372,12 @@ async def run(state: FinaqState) -> dict:
     started_at = time.perf_counter()
     ticker = state.get("ticker", "")
     thesis = state.get("thesis") or {}
+    as_of_date = state.get("as_of_date")  # backtest mode if non-None
     errors: list[str] = []
 
     # Step 1 — yfinance fetch (sync, off-loop)
     try:
-        financials = await asyncio.to_thread(get_financials, ticker)
+        financials = await asyncio.to_thread(get_financials, ticker, as_of=as_of_date)
     except Exception as e:
         logger.error(f"[fundamentals] yfinance fetch failed for {ticker}: {e}")
         errors.append(f"yfinance: {e}")
@@ -393,7 +403,9 @@ async def run(state: FinaqState) -> dict:
         )
     else:
         try:
-            llm_out = await asyncio.to_thread(_call_llm, ticker, thesis, kpis)
+            llm_out = await asyncio.to_thread(
+                _call_llm, ticker, thesis, kpis, as_of_date=as_of_date,
+            )
             # Insurance: deterministic compute_kpis() is the source of truth
             # for yfinance-derived KPIs. The LLM is supposed to ECHO + ADD,
             # not replace — but in practice it sometimes drops one-off keys

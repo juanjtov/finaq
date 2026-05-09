@@ -251,12 +251,15 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _call_llm(state: FinaqState) -> dict:
+    from utils.as_of import maybe_inject_as_of
+
     client = get_client()
     user = _build_user_prompt(state)
+    system = maybe_inject_as_of(SYSTEM_PROMPT, state.get("as_of_date"))
     resp = client.chat.completions.create(
         model=MODEL_SYNTHESIS,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         max_tokens=LLM_MAX_TOKENS,

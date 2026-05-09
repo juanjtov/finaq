@@ -24,5 +24,12 @@ class FinaqState(TypedDict, total=False):
     gaps: list[str]  # upstream content Synthesis wished it had (retrospective observability)
     watchlist: list[str]  # forward-looking events to track before next drill-in (per-agent suffix)
     run_id: str  # set by invoke_with_telemetry; lets the dashboard key cached files by run
+    # Backtest mode (Step B1). When set to an ISO date string like "2025-09-05",
+    # every agent treats data dated AFTER as_of_date as unavailable — yfinance
+    # bars stop at as_of, EDGAR filings are filtered by filed_date, ChromaDB
+    # chunks are filtered by metadata, news date-range queries cap at as_of,
+    # and each agent's prompt gets an as-of context block. None (the default)
+    # = production mode, behaviour is unchanged.
+    as_of_date: str | None
     messages: Annotated[list[dict[str, Any]], operator.add]
     errors: Annotated[list[str], operator.add]

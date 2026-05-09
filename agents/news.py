@@ -90,13 +90,23 @@ def _strip_code_fences(text: str) -> str:
     return text
 
 
-def _call_llm(ticker: str, company_name: str, thesis: dict, articles: list[dict]) -> dict:
+def _call_llm(
+    ticker: str,
+    company_name: str,
+    thesis: dict,
+    articles: list[dict],
+    *,
+    as_of_date: str | None = None,
+) -> dict:
+    from utils.as_of import maybe_inject_as_of
+
     client = get_client()
     user = _build_user_prompt(ticker, company_name, thesis, articles)
+    system = maybe_inject_as_of(SYSTEM_PROMPT, as_of_date)
     resp = client.chat.completions.create(
         model=MODEL_NEWS,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         max_tokens=LLM_MAX_TOKENS,
@@ -108,11 +118,11 @@ def _call_llm(ticker: str, company_name: str, thesis: dict, articles: list[dict]
 # --- Helpers -----------------------------------------------------------------
 
 
-def _company_name_for(ticker: str) -> str:
+def _company_name_for(ticker: str, *, as_of: str | None = None) -> str:
     """Pull a friendly company name from the yfinance cache. Falls back to the
     ticker itself if `info.longName` isn't available."""
     try:
-        financials = get_financials(ticker)
+        financials = get_financials(ticker, as_of=as_of)
         info = financials.get("info") or {}
         return info.get("longName") or info.get("shortName") or ticker
     except Exception as e:
@@ -127,13 +137,16 @@ async def run(state: FinaqState) -> dict:
     started_at = time.perf_counter()
     ticker = state.get("ticker", "")
     thesis = state.get("thesis") or {}
+    as_of_date = state.get("as_of_date")  # backtest mode if non-None
     errors: list[str] = []
 
     # Step 1 — resolve company name (cached yfinance call) + Tavily search
-    company_name = await asyncio.to_thread(_company_name_for, ticker)
+    company_name = await asyncio.to_thread(_company_name_for, ticker, as_of=as_of_date)
     try:
         articles = await asyncio.to_thread(
-            search_news, ticker, company_name, days=NEWS_DAYS, max_results=NEWS_MAX_RESULTS
+            search_news, ticker, company_name,
+            days=NEWS_DAYS, max_results=NEWS_MAX_RESULTS,
+            as_of=as_of_date,
         )
     except Exception as e:
         logger.error(f"[news] Tavily search failed for {ticker}: {e}")
@@ -151,7 +164,10 @@ async def run(state: FinaqState) -> dict:
         )
     else:
         try:
-            llm_out = await asyncio.to_thread(_call_llm, ticker, company_name, thesis, articles)
+            llm_out = await asyncio.to_thread(
+                _call_llm, ticker, company_name, thesis, articles,
+                as_of_date=as_of_date,
+            )
             out = NewsOutput.model_validate(llm_out)
             out.errors = errors
         except Exception as e:

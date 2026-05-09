@@ -100,7 +100,7 @@ def test_strip_code_fences(raw, expected):
 def test_company_name_falls_back_to_ticker_when_yfinance_fails(monkeypatch):
     from agents import news as n
 
-    def boom(_):
+    def boom(_, **kw):
         raise RuntimeError("yfinance outage")
 
     monkeypatch.setattr(n, "get_financials", boom)
@@ -110,14 +110,14 @@ def test_company_name_falls_back_to_ticker_when_yfinance_fails(monkeypatch):
 def test_company_name_uses_long_name_when_present(monkeypatch):
     from agents import news as n
 
-    monkeypatch.setattr(n, "get_financials", lambda _: {"info": {"longName": "NVIDIA Corporation"}})
+    monkeypatch.setattr(n, "get_financials", lambda _, **kw: {"info": {"longName": "NVIDIA Corporation"}})
     assert _company_name_for("NVDA") == "NVIDIA Corporation"
 
 
 def test_company_name_falls_back_to_short_name(monkeypatch):
     from agents import news as n
 
-    monkeypatch.setattr(n, "get_financials", lambda _: {"info": {"shortName": "NVIDIA"}})
+    monkeypatch.setattr(n, "get_financials", lambda _, **kw: {"info": {"shortName": "NVIDIA"}})
     assert _company_name_for("NVDA") == "NVIDIA"
 
 
@@ -129,7 +129,7 @@ async def test_run_returns_stale_news_message_when_tavily_empty(monkeypatch):
     """Tavily returned no articles — output is schema-valid with a clear staleness flag."""
     from agents import news as n
 
-    monkeypatch.setattr(n, "_company_name_for", lambda t: "Stub Co.")
+    monkeypatch.setattr(n, "_company_name_for", lambda t, **kw: "Stub Co.")
     monkeypatch.setattr(n, "search_news", lambda *a, **kw: [])
 
     state = {"ticker": "ZZZZ", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
@@ -144,7 +144,7 @@ async def test_run_falls_back_when_llm_fails(monkeypatch):
     """LLM raises but Tavily succeeded — output must still be schema-valid."""
     from agents import news as n
 
-    monkeypatch.setattr(n, "_company_name_for", lambda t: "Stub Co.")
+    monkeypatch.setattr(n, "_company_name_for", lambda t, **kw: "Stub Co.")
     monkeypatch.setattr(n, "search_news", lambda *a, **kw: [_fake_article(1)])
 
     def boom(*a, **kw):
@@ -164,7 +164,7 @@ async def test_run_falls_back_when_llm_fails(monkeypatch):
 async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
     from agents import news as n
 
-    monkeypatch.setattr(n, "_company_name_for", lambda t: "Stub Co.")
+    monkeypatch.setattr(n, "_company_name_for", lambda t, **kw: "Stub Co.")
     monkeypatch.setattr(n, "search_news", lambda *a, **kw: [_fake_article(1)])
 
     fake_response = {

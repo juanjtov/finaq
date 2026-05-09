@@ -451,13 +451,25 @@ def _reciprocal_rank_fusion(ranked_lists: list[list[int]], k: int = RRF_K) -> li
     return sorted(scores.keys(), key=lambda i: scores[i], reverse=True)
 
 
-def _build_where_clause(ticker: str | None, item_filter: str | None) -> dict | None:
-    """Compose the metadata pre-filter that ChromaDB applies BEFORE similarity scan."""
+def _build_where_clause(
+    ticker: str | None,
+    item_filter: str | None,
+    *,
+    as_of: str | None = None,
+) -> dict | None:
+    """Compose the metadata pre-filter that ChromaDB applies BEFORE similarity scan.
+
+    Backtest mode: when `as_of="YYYY-MM-DD"` is set, restrict to chunks whose
+    `filed_date <= as_of`. ChromaDB's `$lte` operator works on string columns
+    too because ISO dates are lexicographically ordered.
+    """
     conditions: list[dict] = []
     if ticker:
         conditions.append({"ticker": ticker})
     if item_filter:
         conditions.append({"item_code": _normalize_item_filter(item_filter)})
+    if as_of:
+        conditions.append({"filed_date": {"$lte": as_of}})
     if len(conditions) == 0:
         return None
     if len(conditions) == 1:
@@ -484,19 +496,25 @@ def query(
     *,
     candidate_pool: int = DEFAULT_CANDIDATE_POOL,
     use_keyword: bool = True,
+    as_of: str | None = None,
 ) -> list[dict]:
     """Hybrid retrieval: semantic + BM25 + RRF, with metadata pre-filter.
 
-    1. ChromaDB `where` clause (ticker + item_code) is applied BEFORE similarity.
+    1. ChromaDB `where` clause (ticker + item_code [+ filed_date ≤ as_of]) is
+       applied BEFORE similarity.
     2. Semantic search returns top `candidate_pool` chunks.
     3. BM25 ranks the same pool by keyword score (skipped if `use_keyword=False`).
     4. RRF merges both rankings; top `k` returned.
 
     Each returned chunk is `{"text": str, "metadata": dict, "score": float|None}`.
     `metadata` includes `filed_date` so downstream agents can reason about freshness.
+
+    Backtest mode (`as_of="YYYY-MM-DD"`): only chunks from filings dated ≤ as_of
+    are eligible. The cutoff is exclusive of post-as_of evidence, ensuring no
+    forward leakage into Filings agent retrieval.
     """
     coll = _get_collection()
-    where = _build_where_clause(ticker, item_filter)
+    where = _build_where_clause(ticker, item_filter, as_of=as_of)
 
     # Step 1+2 — pre-filter + semantic candidate pool.
     # ChromaDB internally: (a) embeds the query via our OpenRouterEmbedding,

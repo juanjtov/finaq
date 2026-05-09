@@ -74,13 +74,19 @@ def _build_subqueries(ticker: str, thesis: dict) -> list[dict]:
     ]
 
 
-def _retrieve_for_subquery(ticker: str, subquery: dict) -> list[dict]:
+def _retrieve_for_subquery(
+    ticker: str,
+    subquery: dict,
+    *,
+    as_of: str | None = None,
+) -> list[dict]:
     return chroma_query(
         ticker,
         subquery["question"],
         k=SUBQUERY_K,
         item_filter=subquery["item_filter"],
         candidate_pool=CANDIDATE_POOL,
+        as_of=as_of,
     )
 
 
@@ -100,9 +106,13 @@ def _format_chunk(idx: int, chunk: dict) -> str:
 
 
 def _build_user_prompt(
-    ticker: str, thesis: dict, subqueries_with_chunks: list[tuple[dict, list[dict]]]
+    ticker: str,
+    thesis: dict,
+    subqueries_with_chunks: list[tuple[dict, list[dict]]],
+    *,
+    as_of_date: str | None = None,
 ) -> str:
-    today_iso = date.today().isoformat()
+    today_iso = as_of_date or date.today().isoformat()
     parts = [
         f"AS OF: {today_iso}",
         f"TICKER: {ticker}",
@@ -136,14 +146,21 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _call_llm(
-    ticker: str, thesis: dict, subqueries_with_chunks: list[tuple[dict, list[dict]]]
+    ticker: str,
+    thesis: dict,
+    subqueries_with_chunks: list[tuple[dict, list[dict]]],
+    *,
+    as_of_date: str | None = None,
 ) -> dict:
+    from utils.as_of import maybe_inject_as_of
+
     client = get_client()
-    user = _build_user_prompt(ticker, thesis, subqueries_with_chunks)
+    user = _build_user_prompt(ticker, thesis, subqueries_with_chunks, as_of_date=as_of_date)
+    system = maybe_inject_as_of(SYSTEM_PROMPT, as_of_date)
     resp = client.chat.completions.create(
         model=MODEL_FILINGS,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         max_tokens=LLM_MAX_TOKENS,
@@ -159,6 +176,7 @@ async def run(state: FinaqState) -> dict:
     started_at = time.perf_counter()
     ticker = state.get("ticker", "")
     thesis = state.get("thesis") or {}
+    as_of_date = state.get("as_of_date")  # backtest mode if non-None
     errors: list[str] = []
 
     # Step 1 — 3 RAG subqueries (each off-loop because chroma + BM25 are sync)
@@ -166,7 +184,9 @@ async def run(state: FinaqState) -> dict:
     subqueries_with_chunks: list[tuple[dict, list[dict]]] = []
     for sq in subqueries:
         try:
-            chunks = await asyncio.to_thread(_retrieve_for_subquery, ticker, sq)
+            chunks = await asyncio.to_thread(
+                _retrieve_for_subquery, ticker, sq, as_of=as_of_date,
+            )
         except Exception as e:
             logger.error(f"[filings] retrieval failed for {sq['label']}: {e}")
             errors.append(f"retrieval/{sq['label']}: {e}")
@@ -242,7 +262,10 @@ async def run(state: FinaqState) -> dict:
     else:
         # Step 2 — LLM synthesis (off-loop)
         try:
-            llm_out = await asyncio.to_thread(_call_llm, ticker, thesis, subqueries_with_chunks)
+            llm_out = await asyncio.to_thread(
+                _call_llm, ticker, thesis, subqueries_with_chunks,
+                as_of_date=as_of_date,
+            )
             out = FilingsOutput.model_validate(llm_out)
             out.errors = errors
         except Exception as e:
