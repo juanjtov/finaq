@@ -137,14 +137,92 @@ def _fetch_news(ticker: str, company_name: str | None = None) -> list[dict]:
 # --- Drill execution -----------------------------------------------------
 
 
+_AUTO_INGEST_TIMEOUT_S = 90.0
+"""Per-ticker cap on auto-ingest inside the heartbeat. A slow EDGAR
+response or chunking pass must not stall the rest of the cycle — on
+timeout we log and drill on whatever's already in ChromaDB."""
+
+
+async def _ensure_fresh_ingest(ticker: str) -> None:
+    """Heartbeat-side auto-ingest: silently pull the latest filings when
+    EDGAR has anything newer than ChromaDB.
+
+    The CIO cycle is hands-off — there's no human to confirm — so we just
+    do it. Capped at `_AUTO_INGEST_TIMEOUT_S` to protect cycle latency.
+    Soft-fails: any error / timeout logs a warning and the caller drills
+    on the existing corpus. Successful auto-ingests log at INFO so
+    journalctl / log aggregation can correlate them with subsequent
+    cio_actions rows by timestamp.
+    """
+    import asyncio
+
+    from data.freshness import check_ingest_freshness
+
+    try:
+        report = check_ingest_freshness(ticker)
+    except Exception as e:
+        logger.warning(f"[cio.cio] freshness check raised for {ticker}: {e}")
+        return
+
+    if not report.is_stale:
+        return
+
+    diff_str = ", ".join(
+        f"{d.form}({d.chroma_date or 'missing'}→{d.edgar_date})"
+        for d in report.stale_forms()
+    )
+    logger.info(f"[cio.cio] auto-ingest triggered for {ticker} — {diff_str}")
+
+    try:
+        from scripts.ingest_universe import ingest_ticker
+
+        chunks = await asyncio.wait_for(
+            ingest_ticker(ticker, force_refresh=True),
+            timeout=_AUTO_INGEST_TIMEOUT_S,
+        )
+        logger.info(
+            f"[cio.cio] auto-ingest for {ticker} added {chunks} chunks — "
+            f"proceeding to drill"
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"[cio.cio] auto-ingest for {ticker} timed out after "
+            f"{_AUTO_INGEST_TIMEOUT_S}s — drilling on existing corpus"
+        )
+        try:
+            state_db.record_error(
+                agent="cio.auto_ingest",
+                message=f"auto-ingest timeout for {ticker} ({diff_str})",
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning(
+            f"[cio.cio] auto-ingest for {ticker} failed: {e} — "
+            f"drilling on existing corpus"
+        )
+        try:
+            state_db.record_error(
+                agent="cio.auto_ingest",
+                message=f"auto-ingest failed for {ticker}: {e}",
+            )
+        except Exception:
+            pass
+
+
 async def _drill_one(ticker: str, thesis: dict) -> str | None:
     """Execute the existing LangGraph drill-in for a (ticker, thesis) pair.
 
     Returns the new graph_runs.run_id on success, None on failure. Failures
     are logged but never raised — the CIO cycle continues with the next
     pair so a single ticker outage doesn't break the heartbeat.
+
+    A best-effort `_ensure_fresh_ingest` runs first so the drill sees the
+    latest 10-K / 10-Q (or 20-F / 6-K for foreign issuers) when EDGAR has
+    something newer than what's in ChromaDB.
     """
     try:
+        await _ensure_fresh_ingest(ticker)
         # Lazy: graph build pulls in every agent module, including the
         # heavy LLM clients. Defer until we actually need to drill.
         from agents import build_graph, invoke_with_telemetry

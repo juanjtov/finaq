@@ -634,3 +634,43 @@ def has_ticker(ticker: str) -> bool:
 
         logger.warning(f"[chroma.has_ticker] check failed for {ticker}: {e}")
         return False
+
+
+def last_filings_by_type(ticker: str) -> dict[str, str]:
+    """Return {filing_type: most_recent_filed_date} across `ticker`'s chunks.
+
+    `filed_date` is the ISO date (YYYY-MM-DD) parsed from the SEC SGML header
+    at ingest time (`data/edgar.py:parse_filed_date`). Chunks where parsing
+    failed are stored with `filed_date=""` and are ignored here. ISO dates
+    sort lexicographically, so a plain string `max()` is correct.
+
+    Returns an empty dict when the ticker has no ingested chunks. Mission
+    Control uses this to render per-ticker 10-K / 10-Q freshness; the Filings
+    agent can use it to decide whether to warn that the RAG corpus is stale.
+    """
+    if not ticker:
+        return {}
+    try:
+        coll = _get_collection()
+        result = coll.get(where={"ticker": ticker.upper()}, include=["metadatas"])
+    except Exception as e:
+        logger.warning(f"[chroma.last_filings_by_type] {ticker}: {e}")
+        return {}
+    latest: dict[str, str] = {}
+    for m in result.get("metadatas") or []:
+        ftype = m.get("filing_type")
+        fdate = m.get("filed_date")
+        if not ftype or not fdate:
+            continue
+        if fdate > latest.get(ftype, ""):
+            latest[ftype] = fdate
+    return latest
+
+
+def last_filing_date(ticker: str) -> str | None:
+    """Return the max `filed_date` across all of `ticker`'s ingested chunks,
+    or None when nothing is indexed. Thin wrapper over `last_filings_by_type`
+    — the canonical "is the RAG corpus up to date for this ticker?" probe.
+    """
+    by_type = last_filings_by_type(ticker)
+    return max(by_type.values()) if by_type else None

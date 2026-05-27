@@ -1,0 +1,99 @@
+{
+  "name": "Nike (single-name ad-hoc)",
+  "summary": "Single-name drill-in on Nike. Thesis frame: assessing the brand's pricing power and direct-to-consumer (DTC) transition success, weighed against intensifying competition, margin pressure, and inventory management challenges. Peers and key suppliers are used to triangulate relative brand strength and operational efficiency within athletic apparel and footwear.",
+  "anchor_tickers": [
+    "NKE"
+  ],
+  "universe": [
+    "NKE",
+    "ADDYY",
+    "LULU",
+    "UA",
+    "ONON",
+    "VFC",
+    "DECK",
+    "FL",
+    "ADS",
+    "RL",
+    "PVH",
+    "TPR"
+  ],
+  "relationships": [
+    {
+      "from_": "NKE",
+      "to": "PVH",
+      "type": "supplier",
+      "note": "PVH is a major licensee for Nike apparel collections"
+    },
+    {
+      "from_": "NKE",
+      "to": "FL",
+      "type": "customer",
+      "note": "Foot Locker is a significant wholesale partner for Nike products"
+    },
+    {
+      "from_": "NKE",
+      "to": "LULU",
+      "type": "competitor",
+      "note": "Direct competitor in premium athletic apparel and wear"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "gross_margin_change_yoy",
+      "operator": "abs >",
+      "value": 200.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "dtc_revenue_growth_yoy",
+      "operator": "<",
+      "value": 10.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "roe_ttm",
+      "operator": "<",
+      "value": 25.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_equity",
+      "operator": ">",
+      "value": 0.5,
+      "unit": "ratio"
+    },
+    {
+      "signal": "inventory_growth_yoy",
+      "operator": "abs >",
+      "value": 15.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "wholesale_revenue_share",
+      "operator": ">",
+      "value": 55.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "supply chain disruption",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.05,
+    "erp_basis": "Long-run S&P 500 ERP — Nike is a mega-cap consumer discretionary leader with global brand diversification.",
+    "terminal_growth_rate": 0.028,
+    "terminal_growth_basis": "Nominal GDP trend plus 0.3pp for potential international market expansion and premium growth.",
+    "discount_rate_floor": 0.075,
+    "discount_rate_cap": 0.125
+  }
+}

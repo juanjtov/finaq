@@ -530,12 +530,109 @@ def _run_ingestion_for(ticker: str) -> tuple[bool, str]:
     from scripts.ingest_universe import ingest_ticker
 
     try:
-        chunks = _asyncio.run(ingest_ticker(ticker))
+        # `force_refresh=True` so the freshness-gate path picks up new
+        # accessions even when on-disk count already meets DEFAULT_LIMITS.
+        # The not-yet-ingested path has nothing on disk so the flag is a
+        # no-op there — safe to set unconditionally.
+        chunks = _asyncio.run(ingest_ticker(ticker, force_refresh=True))
         if chunks > 0:
             return True, f"Ingested {chunks} chunks for {ticker}."
         return False, f"Ingestion ran but produced 0 chunks for {ticker}."
     except Exception as e:
         return False, f"Ingestion failed for {ticker}: {e}"
+
+
+# --- Pre-drill freshness gate (EDGAR-vs-ChromaDB) -------------------------
+
+
+@st.dialog("EDGAR has newer filings — confirm before drilling")
+def _freshness_dialog(diff_rows: list[dict], ticker: str, thesis_slug: str) -> None:
+    """Modal asking the user whether to ingest the newer filings or cancel.
+
+    `diff_rows` is the pre-extracted list of stale-form dicts; we don't pass
+    the FreshnessReport itself because Streamlit's dialog rerender model
+    re-invokes this function on every interaction and we want a stable
+    primitive that survives serialization.
+    """
+    st.markdown(
+        f"The local filings corpus for **{ticker}** is behind EDGAR. Ingest "
+        "the newer filings first (slower — typically 1–3 minutes — but the "
+        "drill sees the latest 10-Q / 10-K) or cancel."
+    )
+    st.markdown("---")
+    for row in diff_rows:
+        if row["chroma_date"] is None:
+            st.markdown(
+                f"  • **{row['form']}** — missing in ChromaDB · "
+                f"EDGAR has **{row['edgar_date']}**"
+            )
+        else:
+            st.markdown(
+                f"  • **{row['form']}** — ChromaDB **{row['chroma_date']}** → "
+                f"EDGAR **{row['edgar_date']}** "
+                f"(`{row['behind_days']}d behind`)"
+            )
+    st.markdown("---")
+    col_yes, col_no = st.columns(2)
+    if col_yes.button(
+        "📥 Ingest + drill",
+        type="primary",
+        use_container_width=True,
+        key=f"freshness_ingest_{ticker}_{thesis_slug}",
+    ):
+        with st.spinner(f"Ingesting {ticker} from EDGAR…"):
+            ok, msg = _run_ingestion_for(ticker)
+        if ok:
+            st.toast(msg, icon="✅")
+            _kick_off_drill(ticker, thesis_slug)
+            st.rerun()
+        else:
+            st.error(msg)
+    if col_no.button(
+        "Cancel",
+        use_container_width=True,
+        key=f"freshness_cancel_{ticker}_{thesis_slug}",
+    ):
+        st.toast(f"Drill on {ticker} cancelled.", icon="🚫")
+        st.rerun()
+
+
+def _gate_or_kick_off_drill(ticker: str, thesis_slug: str) -> None:
+    """Pre-drill freshness check.
+
+    If EDGAR has newer filings than what's in ChromaDB, open a modal asking
+    whether to ingest first or cancel. Otherwise kick off the drill graph
+    immediately. EDGAR-unreachable falls through to drill on cached data
+    (with a toast) so a transient SEC outage doesn't block the user.
+    """
+    from data.freshness import check_ingest_freshness
+
+    report = check_ingest_freshness(ticker)
+
+    if not report.is_stale:
+        if report.edgar_error:
+            st.toast(
+                f"Freshness check unavailable ({report.edgar_error}). "
+                "Drilling on whatever's in ChromaDB.",
+                icon="⚠️",
+            )
+        _kick_off_drill(ticker, thesis_slug)
+        _render_running_panel(ticker, thesis_slug)
+        return
+
+    # Stale — pre-extract the rows we'll render so the dialog doesn't need
+    # the dataclass at render-time (Streamlit re-invokes dialog fns on each
+    # interaction; passing plain dicts is the path of least surprise).
+    diff_rows = [
+        {
+            "form": d.form,
+            "edgar_date": d.edgar_date,
+            "chroma_date": d.chroma_date,
+            "behind_days": d.behind_days,
+        }
+        for d in report.stale_forms()
+    ]
+    _freshness_dialog(diff_rows, ticker, thesis_slug)
 
 
 def _render_ingest_banner(ticker: str) -> bool:
@@ -889,12 +986,12 @@ def main() -> None:
         if not sel["ticker"]:
             st.warning("Enter a ticker first.")
             return
-        # Run drill-in always runs the agents fresh — the use_cached toggle
-        # only governs the no-click default-view path below.
-        _kick_off_drill(sel["ticker"], sel["thesis_slug"])
-        # Render the running panel immediately; subsequent reruns will
-        # poll until the file appears on disk.
-        _render_running_panel(sel["ticker"], sel["thesis_slug"])
+        # Run drill-in always runs the agents fresh. The freshness gate
+        # consults SEC EDGAR first; if the local ChromaDB ingest is behind
+        # the most recent 10-K/10-Q, a modal asks the user whether to
+        # ingest before drilling, otherwise it kicks off the graph directly.
+        # The use_cached toggle only governs the no-click default-view path below.
+        _gate_or_kick_off_drill(sel["ticker"], sel["thesis_slug"])
         return
     elif sel.get("use_cached", True):
         # No-click default view — load a cached demo if one exists. Honors

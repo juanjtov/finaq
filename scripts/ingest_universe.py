@@ -71,8 +71,16 @@ def _thesis_tickers(slug: str) -> list[str]:
 # --- Per-ticker ingest ----------------------------------------------------
 
 
-async def ingest_ticker(ticker: str) -> int:
-    paths = await download_filings(ticker)
+async def ingest_ticker(ticker: str, *, force_refresh: bool = False) -> int:
+    """Download + chunk + embed every recent filing for `ticker`. Returns
+    total chunk count across all filings.
+
+    `force_refresh=True` re-checks EDGAR even when on-disk count already
+    satisfies `DEFAULT_LIMITS` — used by the drill-time freshness gate so
+    a "ticker has the right number of filings but they're all old" case
+    actually pulls the new accession.
+    """
+    paths = await download_filings(ticker, force_refresh=force_refresh)
     if not paths:
         logger.warning(f"{ticker}: no filings on disk after download")
         return 0

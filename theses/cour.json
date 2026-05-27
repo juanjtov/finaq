@@ -1,0 +1,96 @@
+{
+  "name": "Online Education Platforms",
+  "summary": "Thesis on online education providers led by Coursera (COUR) focusing on enterprise/degree monetization versus consumer subscription fatigue. Key drivers include corporate reskilling partnerships, university credential adoption, and international expansion, offset by high customer acquisition costs and platform commoditization risks. Valuation depends on sustainable gross margins and enterprise contract momentum.",
+  "anchor_tickers": [
+    "COUR"
+  ],
+  "universe": [
+    "COUR",
+    "UDMY",
+    "CHGG",
+    "LRN",
+    "APEI",
+    "LAUR",
+    "ZVO",
+    "STG",
+    "BFAM"
+  ],
+  "relationships": [
+    {
+      "from_": "COUR",
+      "to": "UDMY",
+      "type": "competitor",
+      "note": "Both target enterprise upskilling market with certified content"
+    },
+    {
+      "from_": "LRN",
+      "to": "COUR",
+      "type": "competitor",
+      "note": "Competition in accredited online degree programs"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "enterprise_revenue_growth_yoy",
+      "operator": ">",
+      "value": 25.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "gross_margin",
+      "operator": "<",
+      "value": 50.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "customer_acquisition_cost_ratio",
+      "operator": ">",
+      "value": 1.2,
+      "unit": "x"
+    },
+    {
+      "signal": "free_cash_flow_margin",
+      "operator": "<",
+      "value": -5.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_equity",
+      "operator": ">",
+      "value": 0.7,
+      "unit": "ratio"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "enrollment decline",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "regulatory investigation",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "going concern",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.065,
+    "erp_basis": "Higher volatility in education tech vs broad market due to regulatory and enrollment risks",
+    "terminal_growth_rate": 0.03,
+    "terminal_growth_basis": "Online education adoption growing 1.5x GDP through corporate reskilling demand",
+    "discount_rate_floor": 0.09,
+    "discount_rate_cap": 0.16
+  }
+}

@@ -1,0 +1,95 @@
+{
+  "name": "Nu Holdings (single-name ad-hoc)",
+  "summary": "Single-name drill-in on Nu Holdings (Nubank). Thesis frame: digital banking disruption in Latin America with focus on customer acquisition scalability, deposit-cost advantages versus traditional banks, and credit risk management in volatile emerging markets. Peers include Brazilian fintechs and incumbent banks to benchmark growth efficiency and underwriting discipline.",
+  "anchor_tickers": [
+    "NU"
+  ],
+  "universe": [
+    "NU",
+    "PAGS",
+    "STNE",
+    "ITUB",
+    "BBD",
+    "BSBR",
+    "MELI",
+    "XP"
+  ],
+  "relationships": [
+    {
+      "from_": "NU",
+      "to": "ITUB",
+      "type": "competitor",
+      "note": "Nubank disrupts Itaú Unibanco's retail banking dominance with zero-fee digital accounts"
+    },
+    {
+      "from_": "NU",
+      "to": "MELI",
+      "type": "competitor",
+      "note": "Competes with Mercado Pago in Brazilian digital payments/credit"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "active_customers_growth_yoy",
+      "operator": "<",
+      "value": 20.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "net_interest_margin",
+      "operator": "abs >",
+      "value": 150.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "loan_loss_provision_ratio",
+      "operator": ">",
+      "value": 8.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "customer_acquisition_cost",
+      "operator": ">",
+      "value": 25.0,
+      "unit": "USD"
+    },
+    {
+      "signal": "roe_ttm",
+      "operator": "<",
+      "value": 15.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "deposit_beta",
+      "operator": ">",
+      "value": 40.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "BCB enforcement",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "liquidity stress",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.065,
+    "erp_basis": "S&P 500 ERP + 1.5pp for Brazil country risk and fintech model uncertainty",
+    "terminal_growth_rate": 0.035,
+    "terminal_growth_basis": "Nominal LatAm GDP growth plus fintech adoption premium",
+    "discount_rate_floor": 0.095,
+    "discount_rate_cap": 0.18
+  }
+}

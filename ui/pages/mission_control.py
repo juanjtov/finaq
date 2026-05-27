@@ -82,6 +82,75 @@ def _load_eval_runs() -> list[dict]:
 # --- Render helpers ---------------------------------------------------------
 
 
+def _curated_universe_tickers() -> list[str]:
+    """Sorted unique tickers across every curated thesis JSON in `theses/`.
+
+    Mirrors the heartbeat sweep universe (`cio/cio.py:_curated_candidates`)
+    but flattens to a unique ticker set — Mission Control wants one row per
+    ticker, not per (ticker, thesis) pair. Adhoc theses are excluded; they
+    aren't part of the always-on monitoring surface.
+    """
+    theses_dir = Path("theses")
+    if not theses_dir.exists():
+        return []
+    tickers: set[str] = set()
+    for path in theses_dir.glob("*.json"):
+        if path.stem.startswith("adhoc_"):
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        for t in data.get("universe") or []:
+            if isinstance(t, str) and t:
+                tickers.add(t.upper())
+    return sorted(tickers)
+
+
+def render_filings_freshness_panel() -> None:
+    """Per-ticker RAG corpus freshness — latest filed dates ingested into
+    ChromaDB. Surfaces stale ingest before a drill-in runs and the user
+    wonders why the Filings agent missed last quarter's 10-Q.
+    """
+    from data.chroma import last_filings_by_type
+
+    st.markdown("### Filings freshness (per ticker)")
+    st.caption(
+        "Latest `filed_date` per filing type across every curated thesis's "
+        "universe, read from ChromaDB metadata. `—` means no chunks for that "
+        "type are ingested yet — run `scripts/ingest_universe.py` to backfill."
+    )
+
+    tickers = _curated_universe_tickers()
+    if not tickers:
+        st.caption("No curated theses found in `theses/`.")
+        return
+
+    rows: list[dict] = []
+    for ticker in tickers:
+        by_type = last_filings_by_type(ticker)
+        if not by_type:
+            rows.append(
+                {"ticker": ticker, "10-K": "—", "10-Q": "—", "latest": "—", "other": "—"}
+            )
+            continue
+        # Foreign issuers file 20-F / 6-K instead of 10-K / 10-Q; collapse
+        # everything outside the headline pair into one cell so the column
+        # count stays stable and 20-F coverage is still visible.
+        other_types = sorted(k for k in by_type if k not in {"10-K", "10-Q"})
+        rows.append(
+            {
+                "ticker": ticker,
+                "10-K": by_type.get("10-K", "—"),
+                "10-Q": by_type.get("10-Q", "—"),
+                "latest": max(by_type.values()),
+                "other": ", ".join(f"{k}={by_type[k]}" for k in other_types) or "—",
+            }
+        )
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def render_freshness_panel() -> None:
     st.markdown("### Data-source freshness")
     cols = st.columns(4)
@@ -592,6 +661,8 @@ def main() -> None:
         ),
     )
     render_freshness_panel()
+    section_divider()
+    render_filings_freshness_panel()
     section_divider()
     render_state_db_panel()
     section_divider()

@@ -986,10 +986,17 @@ _CALLBACK_PREFIX_THESIS = "drill_thesis"
 # `callback_data` is capped at 64 bytes and the slug can be up to 46
 # chars (`adhoc_` + 40-char body) — leaves room for ticker.
 _AA_PREFIX_PICK = "ap"        # ap:{slug}:{TICKER}    — user picked a ticker (phase 1 → 2)
-_AA_PREFIX_DRILL_NOW = "ad"   # ad:{slug}:{TICKER}    — drill without ingestion
+_AA_PREFIX_DRILL_NOW = "ad"   # ad:{slug}:{TICKER}    — drill without ingestion (raw)
+_AA_PREFIX_DRILL_GATED = "ag" # ag:{slug}:{TICKER}    — drill through freshness gate
 _AA_PREFIX_INGEST = "ai"      # ai:{slug}:{TICKER}    — ingest filings, then drill
 _AA_PREFIX_BACK = "ab"        # ab:{slug}             — back to ticker picker
 _AA_PREFIX_CANCEL = "ax"      # ax:{slug}             — cancel and dismiss prompt
+# `_AA_PREFIX_DRILL_GATED` exists because `_AA_PREFIX_DRILL_NOW` is the
+# deliberate opt-out path (drill with empty Filings on a not-yet-ingested
+# ticker). When the ticker IS ingested, we instead want to consult EDGAR
+# for freshness before drilling — gated routes through
+# `_dispatch_drill_with_ingest_check`. Keeping the prefixes separate lets
+# the two intents stay legible in the keyboard layer.
 
 
 async def _send_drill_choice_prompt(update: Update, ticker: str) -> None:
@@ -1503,6 +1510,59 @@ async def _send_analyze_ticker_picker(
     )
 
 
+async def _send_freshness_keyboard(
+    reply_target,
+    ticker: str,
+    thesis_slug: str,
+    report,
+) -> None:
+    """Inline-keyboard prompt fired when EDGAR has newer filings than
+    ChromaDB. Reuses `_AA_PREFIX_INGEST` / `_AA_PREFIX_CANCEL` so the
+    existing `analyze_action_callback` dispatcher routes the tap into
+    `_run_ingest_then_drill` (which now passes `force_refresh=True`) or
+    a cancellation reply — no new handler plumbing.
+    """
+    lines = [
+        f"📅 <b>{_h(ticker)} — freshness check</b>",
+        "EDGAR has newer filings than what's ingested:",
+        "",
+    ]
+    for diff in report.stale_forms():
+        if diff.chroma_date is None:
+            lines.append(
+                f"  • <b>{_h(diff.form)}</b>  missing → EDGAR "
+                f"<code>{_h(diff.edgar_date)}</code>"
+            )
+        else:
+            lines.append(
+                f"  • <b>{_h(diff.form)}</b>  <code>{_h(diff.chroma_date)}</code> → "
+                f"<code>{_h(diff.edgar_date)}</code>  "
+                f"({diff.behind_days}d behind)"
+            )
+    body = "\n".join(lines) + "\n\nTap to choose:"
+
+    keyboard: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                "📥 Ingest + drill",
+                callback_data=f"{_AA_PREFIX_INGEST}:{thesis_slug}:{ticker}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "Cancel",
+                callback_data=f"{_AA_PREFIX_CANCEL}:{thesis_slug}",
+            )
+        ],
+    ]
+    await reply_target.reply_text(
+        body,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True,
+    )
+
+
 async def _dispatch_drill_with_ingest_check(
     reply_target,
     ticker: str,
@@ -1543,8 +1603,29 @@ async def _dispatch_drill_with_ingest_check(
         unsupported = []
 
     if ingested:
-        # Happy path — straight to the drill.
-        await _run_drill_and_reply(reply_target, ticker, thesis_slug)
+        # Already in ChromaDB — before kicking off the drill, ask EDGAR
+        # whether there's a newer filing we haven't ingested. Soft-fails:
+        # if EDGAR is unreachable, we drill on whatever's local rather
+        # than blocking on a transient outage.
+        from data.freshness import check_ingest_freshness
+
+        try:
+            report = check_ingest_freshness(ticker)
+        except Exception as e:
+            logger.warning(f"[telegram] freshness check raised for {ticker}: {e}")
+            await _run_drill_and_reply(reply_target, ticker, thesis_slug)
+            return
+
+        if not report.is_stale:
+            if report.edgar_error:
+                logger.info(
+                    f"[telegram] freshness unavailable for {ticker}: "
+                    f"{report.edgar_error}; drilling on cached corpus"
+                )
+            await _run_drill_and_reply(reply_target, ticker, thesis_slug)
+            return
+
+        await _send_freshness_keyboard(reply_target, ticker, thesis_slug, report)
         return
 
     if unsupported:
@@ -1627,11 +1708,15 @@ async def _send_analyze_action_keyboard(
 
     keyboard: list[list[InlineKeyboardButton]] = []
     if ingested:
-        status_line = "✅ Filings already ingested in ChromaDB."
+        status_line = (
+            "✅ Filings already ingested. I'll check EDGAR for newer filings "
+            "before drilling — if anything's behind, you'll get a quick "
+            "Ingest+drill / Cancel prompt."
+        )
         keyboard.append([
             InlineKeyboardButton(
                 "🚀 Drill now (~5 min, ~$0.50)",
-                callback_data=f"{_AA_PREFIX_DRILL_NOW}:{slug}:{ticker}",
+                callback_data=f"{_AA_PREFIX_DRILL_GATED}:{slug}:{ticker}",
             )
         ])
     elif unsupported:
@@ -1696,7 +1781,8 @@ async def analyze_action_callback(
 
     Callback shapes:
       ap:{slug}:{TICKER}  → phase 1 → 2 (ticker picked, show action keyboard)
-      ad:{slug}:{TICKER}  → drill now (no ingestion)
+      ad:{slug}:{TICKER}  → drill now, raw (no freshness check, no ingest)
+      ag:{slug}:{TICKER}  → drill now, gated (run freshness check first)
       ai:{slug}:{TICKER}  → ingest filings, then drill
       ab:{slug}           → back to ticker picker
       ax:{slug}           → cancel
@@ -1752,11 +1838,23 @@ async def analyze_action_callback(
         await _send_analyze_action_keyboard(query=query, slug=slug, ticker=ticker)
         return
     if prefix == _AA_PREFIX_DRILL_NOW:
+        # Raw drill — explicit opt-out of ingest (foreign issuer or
+        # not-ingested + user accepts empty Filings). No freshness check.
         await query.edit_message_text(
             f"🏃 Drilling <b>{_h(ticker)}</b> × <code>{_h(slug)}</code>…",
             parse_mode="HTML",
         )
         await _run_drill_and_reply(query.message, ticker, slug)
+        return
+    if prefix == _AA_PREFIX_DRILL_GATED:
+        # Already-ingested ticker — consult EDGAR first. If the local
+        # corpus is current, drill straight; if behind, the dispatch
+        # will show the freshness keyboard (Ingest+drill / Cancel).
+        await query.edit_message_text(
+            f"🔎 Checking EDGAR freshness for <b>{_h(ticker)}</b>…",
+            parse_mode="HTML",
+        )
+        await _dispatch_drill_with_ingest_check(query.message, ticker, slug)
         return
     if prefix == _AA_PREFIX_INGEST:
         await _run_ingest_then_drill(query, ticker=ticker, slug=slug)
@@ -1842,7 +1940,10 @@ async def _run_ingest_then_drill(query, *, ticker: str, slug: str) -> None:
     try:
         from scripts.ingest_universe import ingest_ticker
 
-        chunks = await ingest_ticker(ticker)
+        # `force_refresh=True` so the freshness-gate path (already-ingested
+        # but stale ticker) actually pulls the new accession; the previously-
+        # uningested path is a no-op delta because nothing's on disk yet.
+        chunks = await ingest_ticker(ticker, force_refresh=True)
         if chunks > 0:
             ingest_msg = (
                 f"✅ Ingested {chunks} chunks for <b>{_h(ticker)}</b>. "
@@ -2417,8 +2518,8 @@ def build_app(*, token: str | None = None, allowlist: str | None = None) -> Appl
             analyze_action_callback,
             pattern=(
                 f"^({_AA_PREFIX_PICK}|{_AA_PREFIX_DRILL_NOW}|"
-                f"{_AA_PREFIX_INGEST}|{_AA_PREFIX_BACK}|"
-                f"{_AA_PREFIX_CANCEL}):"
+                f"{_AA_PREFIX_DRILL_GATED}|{_AA_PREFIX_INGEST}|"
+                f"{_AA_PREFIX_BACK}|{_AA_PREFIX_CANCEL}):"
             ),
         )
     )

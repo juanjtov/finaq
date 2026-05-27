@@ -1,0 +1,100 @@
+{
+  "name": "Cruise Line Operators",
+  "summary": "Cruise line operators represent a cyclical consumer discretionary bet on post-pandemic travel recovery and premium leisure experiences. The thesis examines pricing power amid high fixed costs, fuel price sensitivity, and debt management from pandemic-era recapitalizations. Operators compete on ship quality, itinerary diversity, and onboard monetization while sharing exposure to economic sensitivity and weather-related disruptions.",
+  "anchor_tickers": [
+    "CCL",
+    "RCL",
+    "NCLH"
+  ],
+  "universe": [
+    "CCL",
+    "RCL",
+    "NCLH",
+    "LIND",
+    "DIS",
+    "BKNG",
+    "EXPE",
+    "MAR",
+    "HLT",
+    "UAL",
+    "AAL"
+  ],
+  "relationships": [
+    {
+      "from_": "BKNG",
+      "to": "CCL",
+      "type": "customer",
+      "note": "Booking.com sells Carnival cruise packages"
+    },
+    {
+      "from_": "DIS",
+      "to": "RCL",
+      "type": "competitor",
+      "note": "Disney Cruise Line competes with Royal Caribbean in family segment"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "net_debt_to_ebitda",
+      "operator": ">",
+      "value": 4.0,
+      "unit": "x"
+    },
+    {
+      "signal": "bookings_growth_yoy",
+      "operator": "<",
+      "value": 8.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "fuel_cost_per_berth_day",
+      "operator": "abs >",
+      "value": 15.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "gross_margin_ttm",
+      "operator": "<",
+      "value": 30.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "roe_ttm",
+      "operator": "<",
+      "value": 10.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "current_ratio",
+      "operator": "<",
+      "value": 0.8,
+      "unit": "ratio"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "norovirus",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "going concern",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.06,
+    "erp_basis": "S&P 500 ERP plus 1pp for cruise industry cyclicality and fuel cost volatility",
+    "terminal_growth_rate": 0.027,
+    "terminal_growth_basis": "Long-term travel industry growth at GDP+0.2pp driven by experiential spending",
+    "discount_rate_floor": 0.085,
+    "discount_rate_cap": 0.15
+  }
+}
