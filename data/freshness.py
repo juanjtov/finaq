@@ -20,6 +20,7 @@ yield empty per-form data but never raise.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import date
 
@@ -98,7 +99,22 @@ def check_ingest_freshness(
 
     `edgar_error` populated means freshness is unknown; `is_stale` is False
     in that case so a transient SEC outage doesn't block drills.
+
+    FINAQ_SKIP_FRESHNESS_PROBES short-circuits the whole check to the same
+    "unknown, not stale" report — without touching EDGAR or the ChromaDB
+    Rust client (see the segfault note in data/chroma.py + POSTPONED §2).
+    Gating here, not just in the chroma probes, matters: an empty chroma
+    result with a live EDGAR date would otherwise read as "stale" and
+    funnel every drill into the ingest path the switch exists to avoid.
     """
+    if os.getenv("FINAQ_SKIP_FRESHNESS_PROBES"):
+        return FreshnessReport(
+            ticker=ticker.upper(),
+            is_stale=False,
+            per_form=[],
+            edgar_error="freshness probes disabled (FINAQ_SKIP_FRESHNESS_PROBES)",
+        )
+
     edgar = latest_filing_dates(ticker, forms=forms)
     chroma = last_filings_by_type(ticker)
 

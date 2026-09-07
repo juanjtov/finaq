@@ -743,8 +743,11 @@ def last_filings_by_type(ticker: str) -> dict[str, str]:
     if not ticker:
         return {}
     if os.getenv("FINAQ_SKIP_FRESHNESS_PROBES"):
-        # Kill-switch — see has_ticker above. Empty dict = "freshness
-        # unknown"; check_ingest_freshness then soft-fails to not-stale.
+        # Kill-switch — see has_ticker above. NOTE: check_ingest_freshness
+        # short-circuits on this var BEFORE consulting either probe (an
+        # empty dict here would otherwise read as "nothing ingested" =
+        # stale). This early-return only covers direct callers, e.g.
+        # Mission Control's per-ticker freshness table.
         return {}
     try:
         coll = _get_collection()

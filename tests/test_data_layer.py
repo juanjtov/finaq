@@ -249,13 +249,21 @@ def test_chroma_get_collection_passes_name_through_to_client(monkeypatch):
             return _FakeCollection()
 
     monkeypatch.setattr(ch.chromadb, "PersistentClient", lambda **kwargs: _FakeClient())
+    # _persistent_client caches one client per path for the process — clear
+    # it around the fake so this test neither reuses a real client nor
+    # leaks the fake to later tests.
+    ch._persistent_client.cache_clear()
+    try:
+        coll = ch._get_collection()
+        # _get_collection returns a thread-safe proxy (Rust-client segfault
+        # mitigation); the wrapped collection must be the fake's.
+        assert isinstance(coll._coll, _FakeCollection)
+        assert captured["name"] == "filings"  # default
 
-    coll = ch._get_collection()
-    assert isinstance(coll, _FakeCollection)
-    assert captured["name"] == "filings"  # default
-
-    coll = ch._get_collection(name="synthesis_reports")
-    assert captured["name"] == "synthesis_reports"
+        coll = ch._get_collection(name="synthesis_reports")
+        assert captured["name"] == "synthesis_reports"
+    finally:
+        ch._persistent_client.cache_clear()
 
 
 def test_ingest_filing_batches_upsert_when_chunk_count_exceeds_chroma_limit(
@@ -581,3 +589,30 @@ def test_ingest_filing_embeds_when_presence_check_fails(tmp_path, monkeypatch):
 
     assert ch.ingest_filing("CRDO", fake_path) == 3
     assert upserts == [3]
+
+
+# --- Freshness kill-switch (FINAQ_SKIP_FRESHNESS_PROBES) --------------------
+
+
+def test_check_ingest_freshness_kill_switch_short_circuits(monkeypatch):
+    """With the probes kill-switch set, check_ingest_freshness must report
+    'unknown, not stale' WITHOUT touching EDGAR or ChromaDB. Regression:
+    an earlier version only gated the chroma probe — an empty chroma dict
+    plus a live EDGAR date then read as 'stale' for every ticker, funnelling
+    the UI / Telegram / CIO straight into the ingest path the switch exists
+    to avoid (chromadb Rust segfault, POSTPONED §2)."""
+    from data import freshness as fr
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("probe called despite kill-switch")
+
+    monkeypatch.setattr(fr, "latest_filing_dates", _boom)
+    monkeypatch.setattr(fr, "last_filings_by_type", _boom)
+    monkeypatch.setenv("FINAQ_SKIP_FRESHNESS_PROBES", "1")
+
+    report = fr.check_ingest_freshness("NVDA")
+    assert report.is_stale is False
+    assert report.edgar_error is not None
+    assert "FINAQ_SKIP_FRESHNESS_PROBES" in report.edgar_error
+    assert report.per_form == []
+    assert report.stale_forms() == []

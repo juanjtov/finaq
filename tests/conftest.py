@@ -46,6 +46,12 @@ for _name in _MODEL_STUB_VARS:
 # Tests that assert tracing-enabled behaviour monkeypatch the var themselves.
 os.environ["LANGSMITH_TRACING"] = ""
 
+# Same treatment for the freshness-probe kill-switch (may be set in the
+# user's .env while the chromadb segfault is unfixed — POSTPONED §2): tests
+# must exercise the real gating logic by default; the kill-switch test
+# monkeypatch.setenv's it explicitly.
+os.environ["FINAQ_SKIP_FRESHNESS_PROBES"] = ""
+
 
 @pytest.fixture(autouse=True)
 def _isolated_state_db(tmp_path_factory, monkeypatch):

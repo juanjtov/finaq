@@ -921,10 +921,14 @@ def recent_cio_actions(
     *,
     ticker: str | None = None,
     thesis: str | None = None,
+    cio_run_id: str | None = None,
     db_path: Path | None = None,
 ) -> list[dict]:
     """Most-recent-first list of CIO decisions. Optionally scope to a
-    specific (ticker, thesis) pair — used by the planner's cooldown gate."""
+    specific (ticker, thesis) pair — used by the planner's cooldown gate —
+    or to one parent cycle via `cio_run_id` (Run Inspector's cycle panel;
+    filtering in SQL instead of over a recency window means old cycles
+    still show their actions)."""
     if not Path(db_path or DB_PATH).exists():
         return []
     sql = "SELECT * FROM cio_actions"
@@ -936,6 +940,9 @@ def recent_cio_actions(
     if thesis is not None:
         conds.append("thesis = ?")
         args.append(thesis)
+    if cio_run_id is not None:
+        conds.append("cio_run_id = ?")
+        args.append(cio_run_id)
     if conds:
         sql += " WHERE " + " AND ".join(conds)
     sql += " ORDER BY ts DESC LIMIT ?"

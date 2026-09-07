@@ -819,3 +819,30 @@ def test_run_inspector_shows_cio_trigger_line(tmp_path, monkeypatch):
     # Manual runs fall back to the manual label.
     manual = state_db.start_graph_run("EME", "construction", db_path=db)
     assert "manual" in ri._trigger_line(manual)
+
+
+def test_run_inspector_demo_loader_never_matches_other_runs(tmp_path, monkeypatch):
+    """Regression: the payload loader's `{prefix}*.json` glob matched OTHER
+    runs' suffixed files (and longer slugs sharing the prefix), silently
+    rendering a different run's agent payloads. Only the exact run-id
+    suffix or the exact legacy name may match."""
+    import importlib
+
+    ri = importlib.import_module("ui.pages.run_inspector")
+    monkeypatch.setattr(ri, "DEMO_DIR", tmp_path)
+
+    (tmp_path / "NVDA__nu__aaaaaaaa.json").write_text('{"run_id": "other-run"}')
+    (tmp_path / "NVDA__nu_extended__bbbbbbbb.json").write_text('{"run_id": "longer-slug"}')
+
+    # Different run id, no legacy file → nothing must match.
+    assert ri._load_demo_state("NVDA", "nu", "cccccccc-1234") is None
+
+    # Exact run-id suffix matches.
+    (tmp_path / "NVDA__nu__cccccccc.json").write_text('{"run_id": "mine"}')
+    state = ri._load_demo_state("NVDA", "nu", "cccccccc-1234")
+    assert state and state["run_id"] == "mine"
+
+    # Legacy exact name is the only fallback.
+    (tmp_path / "NVDA__nu.json").write_text('{"run_id": "legacy"}')
+    state = ri._load_demo_state("NVDA", "nu", "dddddddd-0000")
+    assert state and state["run_id"] == "legacy"

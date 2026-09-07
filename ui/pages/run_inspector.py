@@ -76,29 +76,26 @@ def _list_runs() -> list[dict]:
 
 def _load_demo_state(ticker: str, thesis_slug: str, run_id: str) -> dict | None:
     """Find the saved demo JSON matching this run_id. The runner saves to
-    `{TICKER}__{slug}__{run_id[:8]}.json`, but legacy non-suffixed files
-    may also exist — try both."""
+    `{TICKER}__{slug}__{run_id[:8]}.json`; legacy pre-suffix files are
+    exactly `{TICKER}__{slug}.json`. ONLY those two names are accepted —
+    a broader `{prefix}*.json` glob previously matched OTHER runs'
+    suffixed files (and longer slugs sharing the prefix), silently
+    rendering a different run's agent payloads in a traceability view."""
     if not DEMO_DIR.exists():
         return None
     prefix = f"{ticker.upper()}__{thesis_slug}"
     short = run_id[:8] if run_id else ""
-    # Most specific match first.
-    candidates: list[Path] = []
-    if short:
-        exact = DEMO_DIR / f"{prefix}__{short}.json"
-        if exact.exists():
-            candidates.append(exact)
-    if not candidates:
-        # Fall back to any `{prefix}*.json` and pick the most-recently-modified
-        candidates = list(DEMO_DIR.glob(f"{prefix}*.json"))
-    if not candidates:
-        return None
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
-    try:
-        return json.loads(latest.read_text())
-    except Exception as e:
-        st.warning(f"Couldn't parse {latest.name}: {e}")
-        return None
+    candidates = [DEMO_DIR / f"{prefix}__{short}.json"] if short else []
+    candidates.append(DEMO_DIR / f"{prefix}.json")  # legacy exact name
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            return json.loads(path.read_text())
+        except Exception as e:
+            st.warning(f"Couldn't parse {path.name}: {e}")
+            return None
+    return None
 
 
 # --- LangSmith deep-link --------------------------------------------------
@@ -400,11 +397,19 @@ def main() -> None:
     if preselect is None and "run_select" not in st.session_state:
         preselect = st.query_params.get("run_id")
     if preselect:
+        matched = False
         for lbl, r in zip(labels, runs, strict=True):
             rid = str(r.get("run_id") or "")
             if rid == preselect or rid.startswith(str(preselect)):
                 st.session_state["run_select"] = lbl
+                matched = True
                 break
+        if not matched:
+            st.warning(
+                f"Run `{str(preselect)[:8]}…` isn't among the newest "
+                f"{len(runs)} runs in the picker — showing the current "
+                "selection instead."
+            )
 
     chosen_label = st.sidebar.selectbox("Run", labels, key="run_select")
     chosen_idx = labels.index(chosen_label)
@@ -564,8 +569,7 @@ def _render_cio_cycles() -> None:
         # Default-expand the most recent cycle so it's visible without a click.
         is_first = run_id == (runs[0].get("run_id") or "")
         with st.expander(title, expanded=is_first):
-            actions = state_db.recent_cio_actions(limit=200)
-            scoped = [a for a in actions if a.get("cio_run_id") == run_id]
+            scoped = state_db.recent_cio_actions(limit=200, cio_run_id=run_id)
             if not scoped:
                 st.caption("No actions recorded for this cycle.")
                 continue

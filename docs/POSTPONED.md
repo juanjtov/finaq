@@ -63,7 +63,11 @@ explicit value>)`; plain processes and default threads are fine.
 default-stack worker with a process-cached PersistentClient
 (`data/chroma.py:_chroma_executor`), and unit tests stub the probe layer
 (`tests/conftest.py`) so the suite is hermetic and crash-free. The live
-Streamlit process still dies, so the dashboard needs the durable fix.
+Streamlit process still dies, so **set `FINAQ_SKIP_FRESHNESS_PROBES=1` in
+`.env`** until the durable fix lands: `check_ingest_freshness` then
+short-circuits to "unknown, not stale" (no EDGAR call, no Rust client), the
+UI/Telegram/CIO gates all soft-pass, and the dashboard renders normally.
+The cost while it's on: nothing warns you when the corpus trails EDGAR.
 
 | Option | Notes |
 |---|---|
