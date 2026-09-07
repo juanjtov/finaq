@@ -1,0 +1,91 @@
+{
+  "name": "Wendy's (single-name ad-hoc)",
+  "summary": "Single-name drill-in on Wendy's Company. Thesis frame: competitive positioning in the QSR burger segment against larger rivals, with focus on value-menu innovation and digital sales growth. Key considerations include commodity inflation exposure, franchisee health, and relative market share gains in a saturated industry.",
+  "anchor_tickers": [
+    "WEN"
+  ],
+  "universe": [
+    "WEN",
+    "MCD",
+    "QSR",
+    "JACK",
+    "SHAK",
+    "YUM",
+    "CMG",
+    "DPZ",
+    "PZZA"
+  ],
+  "relationships": [
+    {
+      "from_": "WEN",
+      "to": "MCD",
+      "type": "competitor",
+      "note": "Direct burger segment competition in value-menu and breakfast offerings"
+    },
+    {
+      "from_": "WEN",
+      "to": "QSR",
+      "type": "competitor",
+      "note": "Burger King (QSR) competes directly on price and promotions"
+    }
+  ],
+  "material_thresholds": [
+    {
+      "signal": "same_store_sales_growth",
+      "operator": "<",
+      "value": 2.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "digital_sales_penetration",
+      "operator": "<",
+      "value": 30.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "franchise_margin",
+      "operator": "<",
+      "value": 15.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "debt_to_ebitda",
+      "operator": ">",
+      "value": 5.0,
+      "unit": "x"
+    },
+    {
+      "signal": "gross_margin_change_yoy",
+      "operator": "abs >",
+      "value": 200.0,
+      "unit": "bps"
+    },
+    {
+      "signal": "roe_ttm",
+      "operator": "<",
+      "value": 12.0,
+      "unit": "percent"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "commodity inflation",
+      "unit": "text"
+    },
+    {
+      "signal": "filing_mentions",
+      "operator": "contains",
+      "value": "material weakness",
+      "unit": "text"
+    }
+  ],
+  "valuation": {
+    "equity_risk_premium": 0.06,
+    "erp_basis": "S&P 500 base ERP plus 1pp for QSR sector margin volatility",
+    "terminal_growth_rate": 0.023,
+    "terminal_growth_basis": "Below-GDP growth reflecting mature QSR industry saturation",
+    "discount_rate_floor": 0.075,
+    "discount_rate_cap": 0.135
+  },
+  "last_reviewed": "2026-06-03"
+}

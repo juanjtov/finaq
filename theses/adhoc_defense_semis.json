@@ -108,5 +108,6 @@
     "terminal_growth_basis": "Long-run growth should track nominal GDP plus a small premium from continued defense modernization and electronics content growth.",
     "discount_rate_floor": 0.08,
     "discount_rate_cap": 0.14
-  }
+  },
+  "last_reviewed": "2026-05-05"
 }

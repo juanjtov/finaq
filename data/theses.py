@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import json
 import shutil
-from datetime import UTC, datetime
+from collections.abc import Iterable
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -119,6 +120,11 @@ def promote_thesis(slug: str) -> tuple[bool, str]:
         shutil.move(str(src), str(dst))
     except OSError as e:
         return False, f"promote rename failed: {e}"
+    # Promotion is a human judgement that the thesis is right — that is a
+    # review. Soft-fail: the promote already succeeded.
+    ok, msg = mark_reviewed(new_slug)
+    if not ok:
+        logger.warning(f"[theses] promoted {new_slug} but could not stamp last_reviewed: {msg}")
     logger.info(f"[theses] promoted {slug} → {new_slug}")
     return True, f"promoted {slug} → {new_slug}"
 
@@ -136,3 +142,91 @@ def demote_thesis(slug: str) -> tuple[bool, str]:
     if not src.exists():
         return False, f"curated thesis {slug!r} not found at {src}"
     return archive_thesis(slug)
+
+
+# --- Review age ------------------------------------------------------------
+# "Is the thesis itself still what I believe?" is a human judgement the
+# system can't make, but it can nag. `last_reviewed` (ISO date in the JSON)
+# records the last time the user confirmed it; the CIO summary and Theses
+# Admin flag anything older than REVIEW_MAX_DAYS. (User decision 2026-09-07.)
+
+REVIEW_MAX_DAYS = 90
+
+
+def _thesis_path(slug: str, theses_dir: Path | None = None) -> Path:
+    return (theses_dir or THESES_DIR) / f"{slug}.json"
+
+
+def review_age_days(
+    slug: str,
+    *,
+    theses_dir: Path | None = None,
+    today: date | None = None,
+) -> int | None:
+    """Days since the thesis was last reviewed.
+
+    Reads `last_reviewed` from the JSON; falls back to the file's mtime
+    (its last edit) when the field is absent or malformed, so theses
+    written before the field existed still get an honest age. None when
+    the file is missing or unparseable.
+    """
+    path = _thesis_path(slug, theses_dir)
+    if not path.exists():
+        return None
+    today = today or datetime.now(UTC).date()
+    reviewed: date | None = None
+    try:
+        raw = json.loads(path.read_text()).get("last_reviewed")
+        if raw:
+            reviewed = date.fromisoformat(str(raw)[:10])
+    except (ValueError, TypeError, json.JSONDecodeError, OSError):
+        reviewed = None
+    if reviewed is None:
+        try:
+            reviewed = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC).date()
+        except OSError:
+            return None
+    return max(0, (today - reviewed).days)
+
+
+def mark_reviewed(
+    slug: str,
+    *,
+    theses_dir: Path | None = None,
+    today: date | None = None,
+) -> tuple[bool, str]:
+    """Stamp `last_reviewed = today` into `theses/{slug}.json`, preserving
+    every other key and the 2-space layout. Works for curated and adhoc."""
+    path = _thesis_path(slug, theses_dir)
+    if not path.exists():
+        return False, f"thesis {slug!r} not found at {path}"
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        return False, f"could not read {slug!r}: {e}"
+    stamp = (today or datetime.now(UTC).date()).isoformat()
+    data["last_reviewed"] = stamp
+    try:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    except OSError as e:
+        return False, f"could not write {slug!r}: {e}"
+    logger.info(f"[theses] {slug} marked reviewed {stamp}")
+    return True, f"{slug} marked reviewed {stamp}"
+
+
+def overdue_theses(
+    slugs: Iterable[str],
+    *,
+    max_days: int = REVIEW_MAX_DAYS,
+    theses_dir: Path | None = None,
+    today: date | None = None,
+) -> list[dict]:
+    """`[{"slug", "age_days"}]` for theses unreviewed for more than
+    `max_days`, oldest first. Unknown ages (missing file) are skipped."""
+    out: list[dict] = []
+    for slug in sorted(set(slugs)):
+        age = review_age_days(slug, theses_dir=theses_dir, today=today)
+        if age is not None and age > max_days:
+            out.append({"slug": slug, "age_days": age})
+    out.sort(key=lambda r: -r["age_days"])
+    return out

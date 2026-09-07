@@ -95,5 +95,6 @@
     "terminal_growth_basis": "Nominal GDP trend plus 0.3pp for potential international market expansion and premium growth.",
     "discount_rate_floor": 0.075,
     "discount_rate_cap": 0.125
-  }
+  },
+  "last_reviewed": "2026-05-13"
 }

@@ -67,9 +67,28 @@ def fake_thesis_dir(tmp_path, monkeypatch):
     return theses
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def stub_news(monkeypatch):
-    monkeypatch.setattr(cio_mod, "_fetch_news", lambda t, n=None: [])
+    """Never hit Tavily or EDGAR from this suite. Autouse because the
+    orchestrator now runs the freshness check for every candidate
+    ticker before deciding."""
+    monkeypatch.setattr(cio_mod, "_fetch_news", lambda t: [])
+    monkeypatch.setattr(cio_mod, "_probe_freshness", lambda t: None)
+
+    async def _no_ingest(ticker, report):
+        pytest.fail("no test in this suite expects an auto-ingest unless it stubs one")
+
+    monkeypatch.setattr(cio_mod, "_auto_ingest", _no_ingest)
+
+
+def _stale_report(ticker: str, edgar_date: str = "2026-08-05"):
+    """A FreshnessReport saying EDGAR has a 10-Q the corpus lacks."""
+    from data.freshness import FormDiff, FreshnessReport
+
+    return FreshnessReport(
+        ticker=ticker, is_stale=True,
+        per_form=[FormDiff(form="10-Q", edgar_date=edgar_date, chroma_date=None, behind_days=0)],
+    )
 
 
 def _stub_decide_factory(canned: dict[tuple[str, str], CIODecision]):
@@ -589,3 +608,257 @@ async def test_decisions_preserve_candidate_order(
     expected_pairs = [(t, s) for (t, s) in candidates]
     actual_pairs = [(d.ticker, d.thesis) for d in plan.decisions]
     assert actual_pairs == expected_pairs
+
+
+# --- Sept 2026 regressions: freshness before decide, lazy news, source ---
+
+
+@pytest.mark.asyncio
+async def test_freshness_check_runs_before_decide_once_per_ticker(
+    isolated_db, fake_thesis_dir, monkeypatch,
+):
+    """The EDGAR probe must run for every candidate ticker BEFORE
+    `planner.decide` sees it, and only once per ticker even when the
+    ticker sits in two theses. Its report reaches `decide` as
+    `edgar_freshness`. Previously freshness ran inside `_drill_one`,
+    i.e. after the decision it was meant to inform."""
+    events: list[tuple[str, str]] = []
+    reports = {"AAA": _stale_report("AAA"), "BBB": None}
+
+    def _probe(ticker):
+        events.append(("probe", ticker))
+        return reports[ticker]
+
+    monkeypatch.setattr(cio_mod, "_probe_freshness", _probe)
+    seen_freshness: dict[str, object] = {}
+
+    def _decide(*, ticker, thesis, edgar_freshness=None, **kw):
+        events.append(("decide", ticker.upper()))
+        seen_freshness[ticker.upper()] = edgar_freshness
+        return (
+            CIODecision(action="dismiss", ticker=ticker.upper(),
+                        thesis=thesis.get("slug"), rationale="q", confidence="low"),
+            cio_planner._empty_telemetry(),
+        )
+
+    monkeypatch.setattr(cio_planner, "decide", _decide)
+    # AAA in both theses → cross-thesis multiplicity. Neither is an anchor
+    # of curated_a in the candidate override below, so nothing ingests.
+    monkeypatch.setattr(
+        cio_mod, "_curated_candidates",
+        lambda: [("BBB", "curated_a"), ("AAA", "curated_a"), ("AAA", "curated_b")],
+    )
+    monkeypatch.setattr(cio_mod, "_anchor_tickers", lambda: set())
+
+    await cio_mod.run_heartbeat()
+
+    probes = [t for kind, t in events if kind == "probe"]
+    assert probes == ["BBB", "AAA"]  # once per ticker, candidate order
+    for t in ("AAA", "BBB"):
+        assert events.index(("probe", t)) < events.index(("decide", t))
+    assert seen_freshness["AAA"] is reports["AAA"]
+    assert seen_freshness["BBB"] is None
+
+
+@pytest.mark.asyncio
+async def test_news_is_fetched_lazily_and_once_per_ticker(
+    isolated_db, fake_thesis_dir, monkeypatch,
+):
+    """Tavily must fire only when the planner asks (via `news_fetcher`),
+    and at most once per ticker per cycle — 57 eager calls twice a day
+    burned the monthly quota in four days."""
+    fetched: list[str] = []
+    monkeypatch.setattr(cio_mod, "_fetch_news", lambda t: fetched.append(t) or [])
+
+    def _decide(*, ticker, thesis, news_fetcher=None, **kw):
+        # AAA takes the LLM path and asks twice (still one Tavily call);
+        # BBB is a gate shortcut and never asks.
+        if ticker.upper() == "AAA":
+            assert news_fetcher() == []
+            news_fetcher()
+        return (
+            CIODecision(action="dismiss", ticker=ticker.upper(),
+                        thesis=thesis.get("slug"), rationale="q", confidence="low"),
+            cio_planner._empty_telemetry(),
+        )
+
+    monkeypatch.setattr(cio_planner, "decide", _decide)
+    monkeypatch.setattr(
+        cio_mod, "_curated_candidates",
+        lambda: [("AAA", "curated_a"), ("BBB", "curated_a"), ("AAA", "curated_b")],
+    )
+
+    await cio_mod.run_heartbeat()
+    assert fetched == ["AAA"]
+
+
+@pytest.mark.asyncio
+async def test_decision_source_lands_on_cio_actions(
+    isolated_db, fake_thesis_dir, monkeypatch,
+):
+    """`source` round-trips from CIODecision to the cio_actions row —
+    including the orchestrator's own planner-error fallback."""
+    n = {"i": 0}
+
+    def _decide(*, ticker, thesis, **kw):
+        n["i"] += 1
+        if n["i"] == 1:
+            raise RuntimeError("boom")
+        src = "gate" if ticker.upper() == "BBB" else "llm"
+        return (
+            CIODecision(action="dismiss", ticker=ticker.upper(),
+                        thesis=thesis.get("slug"), rationale="q",
+                        confidence="low", source=src),
+            cio_planner._empty_telemetry(),
+        )
+
+    monkeypatch.setattr(cio_planner, "decide", _decide)
+    await cio_mod.run_heartbeat()
+
+    by_ticker = {a["ticker"]: a for a in state_db.recent_cio_actions(limit=20)}
+    assert by_ticker["AAA"]["source"] == "fallback"  # first call raised
+    assert by_ticker["BBB"]["source"] == "gate"
+    assert by_ticker["CCC"]["source"] == "llm"
+
+
+# --- Anchors-only auto-ingest (user decision 2026-09-07) -----------------
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_auto_ingests_anchor_tickers_only(
+    isolated_db, fake_thesis_dir, monkeypatch,
+):
+    """Every ticker is stale at EDGAR, but only the anchors (AAA for
+    curated_a, DDD for curated_b) get the expensive ingest. The full
+    sweep on 2026-09-07 ran for hours embedding 30 tickers nobody asked for."""
+    monkeypatch.setattr(cio_mod, "_probe_freshness", lambda t: _stale_report(t))
+    ingested: list[str] = []
+
+    async def _ingest(ticker, report):
+        ingested.append(ticker)
+
+    monkeypatch.setattr(cio_mod, "_auto_ingest", _ingest)
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory({}))
+
+    await cio_mod.run_heartbeat()
+
+    assert sorted(ingested) == ["AAA", "DDD"]
+    assert cio_mod._anchor_tickers() == {"AAA", "DDD"}
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_skips_ingest_for_fresh_anchor(
+    isolated_db, fake_thesis_dir, monkeypatch,
+):
+    """An anchor whose corpus already matches EDGAR is not ingested."""
+    from data.freshness import FreshnessReport
+
+    monkeypatch.setattr(
+        cio_mod, "_probe_freshness",
+        lambda t: FreshnessReport(ticker=t, is_stale=False, per_form=[]),
+    )
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory({}))
+    await cio_mod.run_heartbeat()  # autouse `_auto_ingest` stub fails if called
+
+
+@pytest.mark.asyncio
+async def test_on_demand_auto_ingests_the_requested_ticker(
+    isolated_db, fake_thesis_dir, monkeypatch,
+):
+    """`/cio BBB curated_a` — BBB is not an anchor, but the user asked."""
+    monkeypatch.setattr(cio_mod, "_probe_freshness", lambda t: _stale_report(t))
+    ingested: list[str] = []
+
+    async def _ingest(ticker, report):
+        ingested.append(ticker)
+
+    monkeypatch.setattr(cio_mod, "_auto_ingest", _ingest)
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory({}))
+
+    await cio_mod.run_on_demand("BBB", "curated_a")
+    assert ingested == ["BBB"]
+
+
+@pytest.mark.asyncio
+async def test_drill_on_stale_non_anchor_ingests_right_before_drill(
+    isolated_db, fake_thesis_dir, monkeypatch,
+):
+    """The planner drills BBB (non-anchor, stale): ingest happens once,
+    after the decision and before `_drill_one`. AAA (anchor, stale) was
+    already ingested in the probe pass and must not be ingested twice."""
+    monkeypatch.setattr(cio_mod, "_probe_freshness", lambda t: _stale_report(t))
+    events: list[tuple[str, str]] = []
+
+    async def _ingest(ticker, report):
+        events.append(("ingest", ticker))
+
+    async def _drill(ticker, thesis):
+        events.append(("drill", ticker))
+        return f"run-{ticker}"
+
+    monkeypatch.setattr(cio_mod, "_auto_ingest", _ingest)
+    monkeypatch.setattr(cio_mod, "_drill_one", _drill)
+    canned = {
+        ("AAA", "curated_a"): CIODecision(action="drill", ticker="AAA", thesis="curated_a",
+                                           rationale="x", confidence="high"),
+        ("BBB", "curated_a"): CIODecision(action="drill", ticker="BBB", thesis="curated_a",
+                                           rationale="x", confidence="high"),
+    }
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
+
+    await cio_mod.run_heartbeat()
+
+    assert events.count(("ingest", "AAA")) == 1
+    assert events.count(("ingest", "BBB")) == 1
+    assert events.index(("ingest", "BBB")) < events.index(("drill", "BBB"))
+    # BBB's ingest is drill-time: it comes after every probe-pass event.
+    assert events.index(("ingest", "BBB")) > events.index(("ingest", "AAA"))
+    assert ("drill", "CCC") not in events and ("ingest", "CCC") not in events
+
+
+# --- Overdue-thesis nag in the cycle summary (2026-09-07) ------------------
+
+
+@pytest.mark.asyncio
+async def test_cycle_flags_theses_overdue_for_review(
+    isolated_db, fake_thesis_dir, monkeypatch,
+):
+    """curated_a was last reviewed in January → overdue; curated_b today →
+    fine. The plan carries the list and the stored summary names it."""
+    from data import theses as theses_lifecycle
+
+    def _stamp(slug: str, day: str) -> None:
+        p = fake_thesis_dir / f"{slug}.json"
+        d = json.loads(p.read_text())
+        d["last_reviewed"] = day
+        p.write_text(json.dumps(d))
+
+    _stamp("curated_a", "2026-01-01")
+    _stamp("curated_b", __import__("datetime").date.today().isoformat())
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory({}))
+
+    plan, summary = await cio_mod.run_heartbeat()
+
+    assert [o["slug"] for o in plan.overdue_theses] == ["curated_a"]
+    assert plan.overdue_theses[0]["age_days"] > theses_lifecycle.REVIEW_MAX_DAYS
+    assert "overdue for review" in summary
+    assert "curated_a" in summary
+    assert "curated_b" not in summary.split("Decisions:")[0]
+    assert "overdue for review" in state_db.recent_cio_runs(limit=1)[0]["summary"]
+
+
+@pytest.mark.asyncio
+async def test_cycle_summary_silent_when_all_theses_reviewed(
+    isolated_db, fake_thesis_dir, monkeypatch,
+):
+    today = __import__("datetime").date.today().isoformat()
+    for slug in ("curated_a", "curated_b"):
+        p = fake_thesis_dir / f"{slug}.json"
+        d = json.loads(p.read_text())
+        d["last_reviewed"] = today
+        p.write_text(json.dumps(d))
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory({}))
+
+    plan, summary = await cio_mod.run_heartbeat()
+    assert plan.overdue_theses == []
+    assert "overdue" not in summary.lower()

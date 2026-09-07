@@ -15,8 +15,13 @@ Each entry point:
 
   1. Opens a `cio_runs` row (telemetry parent).
   2. Builds a candidate list (ticker, thesis_slug) per `_curated_candidates()`.
-  3. For each candidate: pulls news (Tavily, soft-fail), calls
-     `planner.decide(...)`, records a `cio_actions` row.
+  3. For each candidate: probes EDGAR's index (cheap, once per ticker per
+     cycle) and auto-ingests only `auto_ingest` tickers (heartbeat →
+     anchors; on-demand → the requested ticker); then calls
+     `planner.decide(...)` with the probe result as `edgar_freshness` and
+     a lazy news fetcher (Tavily fires only if the gates let the LLM run,
+     memoised per ticker); records a `cio_actions` row. A stale ticker the
+     planner picks for a drill is ingested right before that drill.
   4. Applies the drill-budget cap (post-LLM).
   5. Executes drills via the existing graph; records reuse / dismiss
      directly without further computation.
@@ -45,14 +50,18 @@ from __future__ import annotations
 import json
 import time
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cio import planner as cio_planner
 from cio.planner import CIODecision, Plan
 from data import state as state_db
 from data import theses as theses_lifecycle
 from utils import logger
+
+if TYPE_CHECKING:  # data.freshness pulls in chromadb; keep import-time thin.
+    from data.freshness import FreshnessReport
 
 THESES_DIR = Path("theses")
 ADHOC_PREFIX = theses_lifecycle.ADHOC_PREFIX
@@ -118,17 +127,42 @@ def _curated_candidates() -> list[tuple[str, str]]:
     return out
 
 
-def _fetch_news(ticker: str, company_name: str | None = None) -> list[dict]:
+def _anchor_tickers() -> set[str]:
+    """Union of `anchor_tickers` across curated theses — the only tickers
+    the heartbeat auto-ingests (user decision 2026-09-07: a full-universe
+    sweep re-embedded corpora nobody asked for, for hours)."""
+    out: set[str] = set()
+    for slug in _list_curated_slugs():
+        thesis = _load_thesis(slug)
+        if thesis:
+            out.update(t.upper() for t in (thesis.get("anchor_tickers") or []))
+    return out
+
+
+def _fetch_news(ticker: str) -> list[dict]:
     """Best-effort recent-news pull for a single ticker. Soft-fail: any
     Tavily error returns an empty list. Caller treats `[]` as "no news,
     no signal" — the persona prompt understands this.
 
-    Lazy import so a missing TAVILY_API_KEY at start-time doesn't block
+    Queries `"{ticker} {company name}"` with the name resolved from the
+    yfinance cache (same helper the News agent uses). It used to pass the
+    *thesis* name, so every ticker in the `wen` thesis searched for
+    "Wendy's". Basic search depth (1 Tavily credit, not 2) and the
+    planner's 14-day / 8-headline window — the planner only reads titles.
+
+    Lazy imports so a missing TAVILY_API_KEY at start-time doesn't block
     test imports."""
     try:
+        from agents.news import _company_name_for
         from data.tavily import search_news
 
-        return search_news(ticker, company_name)
+        return search_news(
+            ticker,
+            _company_name_for(ticker),
+            days=cio_planner.NEWS_LOOKBACK_DAYS,
+            max_results=cio_planner.MAX_NEWS_HEADLINES,
+            search_depth="basic",
+        )
     except Exception as e:
         logger.warning(f"[cio.cio] _fetch_news({ticker}) failed: {e}")
         return []
@@ -143,29 +177,36 @@ response or chunking pass must not stall the rest of the cycle — on
 timeout we log and drill on whatever's already in ChromaDB."""
 
 
-async def _ensure_fresh_ingest(ticker: str) -> None:
-    """Heartbeat-side auto-ingest: silently pull the latest filings when
-    EDGAR has anything newer than ChromaDB.
+def _probe_freshness(ticker: str) -> FreshnessReport | None:
+    """EDGAR-index freshness probe — one ~50KB JSON round-trip, no
+    download, no embedding. Runs for EVERY candidate ticker so the
+    planner sees "a newer 10-Q exists at EDGAR" even when we don't
+    ingest it. Soft-fail: returns None on any error."""
+    from data.freshness import check_ingest_freshness
 
-    The CIO cycle is hands-off — there's no human to confirm — so we just
-    do it. Capped at `_AUTO_INGEST_TIMEOUT_S` to protect cycle latency.
+    try:
+        return check_ingest_freshness(ticker)
+    except Exception as e:
+        logger.warning(f"[cio.cio] freshness probe raised for {ticker}: {e}")
+        return None
+
+
+async def _auto_ingest(ticker: str, report: FreshnessReport) -> None:
+    """Download + chunk + embed the filings EDGAR has and ChromaDB lacks.
+
+    The expensive half of freshness. The heartbeat runs it only for
+    anchor tickers and for tickers the planner actually drills — a
+    full sweep of the 46-ticker universe ran for hours and re-embedded
+    corpora the user never asked for (2026-09-07). On-demand
+    `/cio TICKER` ingests the requested ticker.
+
+    Capped at `_AUTO_INGEST_TIMEOUT_S` to protect cycle latency.
     Soft-fails: any error / timeout logs a warning and the caller drills
     on the existing corpus. Successful auto-ingests log at INFO so
     journalctl / log aggregation can correlate them with subsequent
     cio_actions rows by timestamp.
     """
     import asyncio
-
-    from data.freshness import check_ingest_freshness
-
-    try:
-        report = check_ingest_freshness(ticker)
-    except Exception as e:
-        logger.warning(f"[cio.cio] freshness check raised for {ticker}: {e}")
-        return
-
-    if not report.is_stale:
-        return
 
     diff_str = ", ".join(
         f"{d.form}({d.chroma_date or 'missing'}→{d.edgar_date})"
@@ -217,12 +258,11 @@ async def _drill_one(ticker: str, thesis: dict) -> str | None:
     are logged but never raised — the CIO cycle continues with the next
     pair so a single ticker outage doesn't break the heartbeat.
 
-    A best-effort `_ensure_fresh_ingest` runs first so the drill sees the
-    latest 10-K / 10-Q (or 20-F / 6-K for foreign issuers) when EDGAR has
-    something newer than what's in ChromaDB.
+    Freshness / auto-ingest is NOT done here any more: `_run_cycle` probes
+    every candidate before the planner decides, and `_execute_plan` runs
+    `_auto_ingest` for a stale drilled ticker right before calling us.
     """
     try:
-        await _ensure_fresh_ingest(ticker)
         # Lazy: graph build pulls in every agent module, including the
         # heavy LLM clients. Defer until we actually need to drill.
         from agents import build_graph, invoke_with_telemetry
@@ -267,6 +307,7 @@ def _record_decision(
             reuse_run_id=decision.reuse_run_id if decision.action == "reuse" else None,
             confidence=decision.confidence,
             decision_json=decision.model_dump_json(),
+            source=decision.source,
             model_used=t.get("model_used"),
             tokens_in=int(t.get("tokens_in") or 0),
             tokens_out=int(t.get("tokens_out") or 0),
@@ -287,6 +328,8 @@ async def _execute_plan(
     plan: Plan,
     pair_to_thesis: dict[tuple[str, str | None], dict],
     pair_to_telemetry: dict[tuple[str, str | None], dict],
+    freshness: dict[str, FreshnessReport | None] | None = None,
+    ingested: set[str] | None = None,
 ) -> Plan:
     """Run drills + persist every decision as a cio_actions row.
 
@@ -295,7 +338,13 @@ async def _execute_plan(
     `pair_to_telemetry` maps the same key → planner-call telemetry dict
     (model_used, tokens, cost_usd, latency_s) so each cio_actions row
     captures the LLM call that produced it.
+
+    `freshness` / `ingested` come from the cycle's probe pass: a drilled
+    ticker that is stale and was not auto-ingested (non-anchor) gets
+    ingested here, right before its drill — bounded by the drill budget.
     """
+    freshness = freshness or {}
+    ingested = ingested if ingested is not None else set()
     for d in plan.decisions:
         telemetry = pair_to_telemetry.get((d.ticker, d.thesis))
         if d.action == "drill":
@@ -309,6 +358,10 @@ async def _execute_plan(
                     telemetry=telemetry,
                 )
                 continue
+            report = freshness.get(d.ticker)
+            if report is not None and report.is_stale and d.ticker not in ingested:
+                ingested.add(d.ticker)
+                await _auto_ingest(d.ticker, report)
             drill_run_id = await _drill_one(d.ticker, thesis)
             _record_decision(
                 cio_run_id=cio_run_id, trigger=trigger, decision=d,
@@ -335,6 +388,14 @@ def _compose_summary(plan: Plan, *, trigger: str, duration_s: float) -> str:
         f"(budget cap demoted {plan.drills_capped})."
     )
     lines.append(f"Duration: {duration_s:.1f}s.")
+    if plan.overdue_theses:
+        overdue = ", ".join(
+            f"{o['slug']} ({o['age_days']}d)" for o in plan.overdue_theses
+        )
+        lines.append(
+            f"Theses overdue for review (>{theses_lifecycle.REVIEW_MAX_DAYS}d): {overdue}. "
+            f"Open Theses Admin and press Mark reviewed, or edit the JSON."
+        )
     if plan.decisions:
         lines.append("")
         lines.append("Decisions:")
@@ -353,38 +414,70 @@ async def _run_cycle(
     candidates: list[tuple[str, str]],
     drill_budget: int,
     cooldown_hours: int = 48,
+    auto_ingest: set[str] | None = None,
 ) -> tuple[Plan, str]:
     """Inner: open cio_run, decide each pair, cap drills, execute,
     persist, close cio_run. Returns (plan, summary_text).
+
+    `auto_ingest`: tickers whose corpus we refresh BEFORE deciding when
+    EDGAR has something newer (heartbeat → anchors; on-demand → the
+    requested ticker). Every other ticker only gets the cheap EDGAR probe;
+    its result reaches the planner as `edgar_freshness`, and the ingest
+    happens later only if the planner picks it for a drill.
     """
     cio_run_id = state_db.start_cio_run(trigger)
     t0 = time.perf_counter()
+    auto_ingest = {t.upper() for t in (auto_ingest or set())}
 
     pair_to_thesis: dict[tuple[str, str | None], dict] = {}
     pair_to_telemetry: dict[tuple[str, str | None], dict] = {}
     decisions: list[CIODecision] = []
     cycle_model: str | None = None
 
+    # Per-cycle, per-ticker memos. A ticker in two theses (cross-thesis
+    # multiplicity) gets one EDGAR probe and at most one Tavily call per
+    # cycle, not one per pair.
+    freshness: dict[str, FreshnessReport | None] = {}
+    ingested: set[str] = set()
+    news_cache: dict[str, list[dict]] = {}
+
+    def _news_for(t: str) -> list[dict]:
+        if t not in news_cache:
+            news_cache[t] = _fetch_news(t)
+        return news_cache[t]
+
     try:
         for ticker, slug in candidates:
+            ticker = ticker.upper()
             thesis = _load_thesis(slug)
             if thesis is None:
                 logger.warning(f"[cio.cio] {slug!r} not loadable — skipping {ticker}")
                 continue
-            pair_to_thesis[(ticker.upper(), slug)] = thesis
-            news = _fetch_news(ticker, thesis.get("name"))
+            pair_to_thesis[(ticker, slug)] = thesis
+            # Freshness BEFORE the planner looks. The probe is cheap and
+            # runs for everyone; the ingest is expensive and runs only for
+            # `auto_ingest` tickers. Previously this ran inside
+            # `_drill_one`, i.e. after the decision it was meant to inform.
+            if ticker not in freshness:
+                report = _probe_freshness(ticker)
+                freshness[ticker] = report
+                if report is not None and report.is_stale and ticker in auto_ingest:
+                    ingested.add(ticker)
+                    await _auto_ingest(ticker, report)
             try:
                 decision, telemetry = cio_planner.decide(
                     ticker=ticker,
                     thesis=thesis,
-                    news_items=news,
+                    news_fetcher=partial(_news_for, ticker),
+                    edgar_freshness=freshness[ticker],
                     cooldown_hours=cooldown_hours,
                 )
             except Exception as e:
                 logger.error(f"[cio.cio] decide({ticker}/{slug}) failed: {e}")
                 decision = CIODecision(
-                    action="dismiss", ticker=ticker.upper(), thesis=slug,
+                    action="dismiss", ticker=ticker, thesis=slug,
                     rationale=f"planner error: {e!s}", confidence="low",
+                    source="fallback",
                 )
                 telemetry = cio_planner._empty_telemetry()
             decisions.append(decision)
@@ -398,12 +491,18 @@ async def _run_cycle(
         plan = Plan(
             decisions=capped_decisions, drill_budget=drill_budget,
             drills_capped=n_capped,
+            # Nag, don't act: a thesis nobody has confirmed in 90+ days
+            # is surfaced in the summary + Telegram, never auto-archived.
+            overdue_theses=theses_lifecycle.overdue_theses(
+                {slug for _, slug in candidates}, theses_dir=THESES_DIR,
+            ),
         )
 
         await _execute_plan(
             cio_run_id=cio_run_id, trigger=trigger, plan=plan,
             pair_to_thesis=pair_to_thesis,
             pair_to_telemetry=pair_to_telemetry,
+            freshness=freshness, ingested=ingested,
         )
 
         # Step 11.19 — aggregate per-cycle cost from the per-action
@@ -444,12 +543,14 @@ async def run_heartbeat(
     drill_budget: int = cio_planner.DEFAULT_DRILL_BUDGET,
     cooldown_hours: int = 48,
 ) -> tuple[Plan, str]:
-    """Curated-only sweep — used by the launchd timer twice a day."""
+    """Curated-only sweep — used by the launchd timer twice a day.
+    Auto-ingests anchor tickers only; everything else is probed."""
     return await _run_cycle(
         trigger="heartbeat",
         candidates=_curated_candidates(),
         drill_budget=drill_budget,
         cooldown_hours=cooldown_hours,
+        auto_ingest=_anchor_tickers(),
     )
 
 
@@ -465,6 +566,7 @@ async def run_catchup(
         candidates=_curated_candidates(),
         drill_budget=drill_budget,
         cooldown_hours=cooldown_hours,
+        auto_ingest=_anchor_tickers(),
     )
 
 
@@ -512,4 +614,5 @@ async def run_on_demand(
         candidates=candidates,
         drill_budget=budget,
         cooldown_hours=cooldown_hours,
+        auto_ingest={ticker},  # the user asked about this one — refresh it
     )

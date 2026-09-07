@@ -160,19 +160,36 @@ def test_thesis_notes_soft_fails_on_exception(monkeypatch):
 
 
 def test_dismissals_in_window_filters_by_action_and_age(isolated_db):
-    state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss")
-    state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="reuse")
-    state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss")
+    state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss", source="llm")
+    state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="reuse", source="llm")
+    state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss", source="llm")
     out = cio_memory.dismissals_in_window("NVDA", "ai_cake")
     assert len(out) == 2
     assert all(a["action"] == "dismiss" for a in out)
+
+
+def test_dismissals_in_window_counts_llm_rows_only(isolated_db):
+    """Regression for the Sept-2026 deadlock: the guard's own `gate`
+    shortcuts, budget-cap demotions, error fallbacks and legacy rows
+    (source='') must not count — otherwise three heartbeat shortcuts
+    lock the pair forever."""
+    for src in ("gate", "gate", "gate", "budget_cap", "fallback", ""):
+        state_db.record_cio_action(
+            ticker="NVDA", thesis="ai_cake", action="dismiss", source=src,
+        )
+    assert cio_memory.dismissals_in_window("NVDA", "ai_cake") == []
+
+    state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss", source="llm")
+    out = cio_memory.dismissals_in_window("NVDA", "ai_cake")
+    assert len(out) == 1
+    assert out[0]["source"] == "llm"
 
 
 def test_dismissals_in_window_excludes_old_rows(isolated_db, monkeypatch):
     """Dismissals older than the window must not count."""
     import sqlite3
 
-    state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss")
+    state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss", source="llm")
     old_iso = (datetime.now(UTC) - timedelta(days=14)).isoformat()
     with sqlite3.connect(isolated_db) as conn:
         conn.execute("UPDATE cio_actions SET ts = ?", (old_iso,))

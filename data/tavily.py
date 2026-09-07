@@ -80,6 +80,7 @@ def search_news(
     days: int = DEFAULT_DAYS,
     max_results: int = DEFAULT_MAX_RESULTS,
     as_of: str | date | None = None,
+    search_depth: str = "advanced",
 ) -> list[dict[str, Any]]:
     """Fetch recent news articles for a ticker.
 
@@ -87,6 +88,10 @@ def search_news(
     `published_date` (when present). On persistent failure (after retries),
     returns an empty list and logs — the caller treats "no news" as a soft
     signal rather than crashing.
+
+    `search_depth`: Tavily bills "advanced" at 2 credits and "basic" at 1.
+    The News agent keeps the default (it reads article bodies); the CIO
+    planner passes "basic" because it only reads headlines.
 
     Backtest mode (`as_of="YYYY-MM-DD"`): pulls articles published in
     `[as_of − days, as_of]` via Tavily's `start_date`/`end_date` params (N2
@@ -131,7 +136,7 @@ def search_news(
             start_date=start_d.isoformat(),
             end_date=as_of_d.isoformat(),
             max_results=max_results,
-            search_depth="advanced",
+            search_depth=search_depth,
         )
     else:
         response = client.search(
@@ -139,7 +144,7 @@ def search_news(
             topic="news",
             days=days,
             max_results=max_results,
-            search_depth="advanced",
+            search_depth=search_depth,
         )
     raw = response.get("results") or []
 

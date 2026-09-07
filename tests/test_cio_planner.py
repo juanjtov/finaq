@@ -33,8 +33,17 @@ def stub_external(monkeypatch):
     from cio import rag as cio_rag
 
     monkeypatch.setattr(cio_rag, "query_past_reports", lambda **kw: [])
+    monkeypatch.setattr(cio_rag, "latest_watchlist_section", lambda ticker, thesis=None: None)
     monkeypatch.setattr(cio_memory, "thesis_notes", lambda slug: "")
     monkeypatch.setattr(planner, "_summarise_recent_filings", lambda t, since: [])
+
+
+def _seed_llm_dismissals(n: int = 3, ticker: str = "NVDA", thesis: str = "ai_cake") -> None:
+    """N dismissals the way the LLM path records them (source='llm')."""
+    for _ in range(n):
+        state_db.record_cio_action(
+            ticker=ticker, thesis=thesis, action="dismiss", source="llm",
+        )
 
 
 # --- CIODecision schema ---------------------------------------------------
@@ -72,24 +81,19 @@ def test_evaluate_gates_no_history(isolated_db, stub_external):
 
 
 def test_evaluate_gates_yo_yo_shortcuts_to_dismiss(isolated_db, stub_external):
-    """3 dismissals in 7 days → 4th is shortcut to dismiss without LLM."""
-    for _ in range(3):
-        state_db.record_cio_action(
-            ticker="NVDA", thesis="ai_cake", action="dismiss",
-        )
+    """3 LLM dismissals in 7 days → 4th is shortcut to dismiss without LLM."""
+    _seed_llm_dismissals(3)
     out = evaluate_gates("NVDA", "ai_cake")
     assert out.shortcut is not None
     assert out.shortcut.action == "dismiss"
     assert out.shortcut.confidence == "high"
+    assert out.shortcut.source == "gate"
     assert "yo-yo" in out.shortcut.rationale.lower()
 
 
 def test_evaluate_gates_two_dismissals_no_shortcut(isolated_db, stub_external):
     """Below the 3-dismissal threshold → still let the LLM decide."""
-    for _ in range(2):
-        state_db.record_cio_action(
-            ticker="NVDA", thesis="ai_cake", action="dismiss",
-        )
+    _seed_llm_dismissals(2)
     out = evaluate_gates("NVDA", "ai_cake")
     assert out.shortcut is None
     assert len(out.dismissal_streak) == 2
@@ -150,8 +154,7 @@ def test_parse_decision_invalid_schema_returns_error():
 
 def test_decide_yo_yo_shortcut_skips_llm(isolated_db, stub_external, monkeypatch):
     """When gates short-circuit, the LLM must NOT be called."""
-    for _ in range(3):
-        state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss")
+    _seed_llm_dismissals(3)
 
     called = {"n": 0}
 
@@ -529,3 +532,250 @@ def test_build_evidence_bundle_empty_watchlist_when_no_chunk(isolated_db, monkey
     )
     assert bundle["watchlist_items"] == []
     assert bundle["watchlist_signals"] == []
+
+
+# --- Sept 2026 regression: the yo-yo guard must not feed on itself -------
+
+
+def test_evaluate_gates_ignores_its_own_gate_shortcuts(isolated_db, stub_external):
+    """Three gate-sourced dismissals must NOT trigger the guard. Before the
+    fix every shortcut was recorded as a dismissal, so at two heartbeats a
+    day every pair locked itself out after ~36h and the LLM never ran
+    again (98% of production cio_actions rows were guard shortcuts)."""
+    for _ in range(3):
+        state_db.record_cio_action(
+            ticker="NVDA", thesis="ai_cake", action="dismiss", source="gate",
+        )
+    out = evaluate_gates("NVDA", "ai_cake")
+    assert out.shortcut is None
+    assert out.dismissal_streak == []
+
+
+def test_evaluate_gates_ignores_legacy_rows_without_source(isolated_db, stub_external):
+    """Rows written before schema v5 have source='' and are not trusted as
+    LLM judgements — the real DB holds 12k of them, all gate shortcuts."""
+    for _ in range(3):
+        state_db.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss")
+    assert evaluate_gates("NVDA", "ai_cake").shortcut is None
+
+
+def test_evaluate_gates_guard_stands_down_when_filing_landed(
+    isolated_db, stub_external, monkeypatch,
+):
+    """Three LLM dismissals, but a filing landed since the last action →
+    the LLM gets to look (the orchestrator ran the freshness check first)."""
+    _seed_llm_dismissals(3)
+    monkeypatch.setattr(
+        planner, "_summarise_recent_filings",
+        lambda t, since: [{"kind": "10-Q", "accession": "new", "filed_at_iso": "2026-09-06"}],
+    )
+    out = evaluate_gates("NVDA", "ai_cake")
+    assert out.shortcut is None
+    assert len(out.new_filings) == 1
+    assert len(out.dismissal_streak) == 3
+
+
+def test_evaluate_gates_filing_probe_uses_last_action_timestamp(
+    isolated_db, stub_external, monkeypatch,
+):
+    """The new-filing probe asks for filings since the pair's most recent
+    action — not since the last drill, which may be months back."""
+    _seed_llm_dismissals(3)
+    last_ts = state_db.recent_cio_actions(ticker="NVDA", thesis="ai_cake", limit=1)[0]["ts"]
+    seen: dict = {}
+
+    def _probe(t, since):
+        seen["since"] = since
+        return []
+
+    monkeypatch.setattr(planner, "_summarise_recent_filings", _probe)
+    out = evaluate_gates("NVDA", "ai_cake")
+    assert out.shortcut is not None
+    assert seen["since"] == last_ts
+
+
+def test_evaluate_gates_no_filing_probe_below_threshold(
+    isolated_db, stub_external, monkeypatch,
+):
+    """The disk walk only happens when the guard would otherwise fire."""
+    _seed_llm_dismissals(2)
+
+    def _probe(t, since):
+        pytest.fail("filing probe must not run when the guard is idle")
+
+    monkeypatch.setattr(planner, "_summarise_recent_filings", _probe)
+    out = evaluate_gates("NVDA", "ai_cake")
+    assert out.shortcut is None
+    assert out.new_filings == []
+
+
+def test_decide_fetches_news_lazily_only_past_the_gate(
+    isolated_db, stub_external, monkeypatch,
+):
+    """`news_fetcher` must NOT be called when the gate shortcuts (the
+    Tavily-quota fix) and must be called exactly once otherwise, with its
+    result flowing into the evidence bundle."""
+    calls = {"n": 0}
+
+    def _fetcher():
+        calls["n"] += 1
+        return [{"title": "NVDA lands new hyperscaler order", "url": "u",
+                 "published_date": "2026-09-05"}]
+
+    # Gate-shortcut path → no fetch.
+    _seed_llm_dismissals(3)
+    out, _ = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"}, news_fetcher=_fetcher)
+    assert out.source == "gate"
+    assert calls["n"] == 0
+
+    # Open gate (different pair) → one fetch, headlines reach the LLM.
+    captured: dict = {}
+
+    def _llm(**kw):
+        captured.update(kw["evidence"])
+        return json.dumps({"action": "dismiss", "ticker": "MSFT",
+                           "rationale": "quiet", "confidence": "low"})
+
+    monkeypatch.setattr(planner, "_call_llm", _llm)
+    out, _ = planner.decide(ticker="MSFT", thesis={"slug": "ai_cake"}, news_fetcher=_fetcher)
+    assert calls["n"] == 1
+    assert captured["recent_news"][0]["title"].startswith("NVDA lands")
+    assert out.source == "llm"
+
+
+def test_decide_prefers_eager_news_items_over_fetcher(isolated_db, stub_external, monkeypatch):
+    """Explicit `news_items` wins; the fetcher is not consulted."""
+    monkeypatch.setattr(
+        planner, "_call_llm",
+        lambda **kw: json.dumps({"action": "dismiss", "ticker": "NVDA",
+                                 "rationale": "x", "confidence": "low"}),
+    )
+
+    def _fetcher():
+        pytest.fail("fetcher must not run when news_items is given")
+
+    out, _ = planner.decide(
+        ticker="NVDA", thesis={"slug": "ai_cake"}, news_items=[], news_fetcher=_fetcher,
+    )
+    assert out.action == "dismiss"
+
+
+def test_decide_stamps_source_on_every_path(isolated_db, stub_external, monkeypatch):
+    """LLM decision → llm (even if the model claims otherwise); LLM
+    exception → fallback; unparseable → fallback."""
+    monkeypatch.setattr(
+        planner, "_call_llm",
+        lambda **kw: json.dumps({"action": "dismiss", "ticker": "NVDA",
+                                 "rationale": "x", "confidence": "low",
+                                 "source": "gate"}),  # the model lies
+    )
+    out, _ = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    assert out.source == "llm"
+
+    monkeypatch.setattr(planner, "_call_llm", lambda **kw: "garbage")
+    out, _ = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    assert out.source == "fallback"
+
+    def _boom(**kw):
+        raise RuntimeError("503")
+
+    monkeypatch.setattr(planner, "_call_llm", _boom)
+    out, _ = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    assert out.source == "fallback"
+
+
+def test_apply_drill_budget_demotions_are_budget_cap_sourced():
+    decisions = [_drill("AAA", "low"), _drill("BBB", "high")]
+    out, capped = planner.apply_drill_budget(decisions, drill_budget=1)
+    assert capped == 1
+    assert next(d for d in out if d.ticker == "AAA").source == "budget_cap"
+    assert next(d for d in out if d.ticker == "BBB").source == "llm"
+
+
+def test_guard_no_longer_self_locks_over_a_week(isolated_db, stub_external, monkeypatch):
+    """End-to-end simulation of the production failure: 14 heartbeats
+    (7 days × 2) on a quiet pair, every decision recorded the way
+    `cio.cio._record_decision` records it. Before the fix the LLM ran 3
+    times and then never again; now the guard holds on LLM rows only and
+    releases once those age out of the window."""
+    monkeypatch.setattr(
+        planner, "_call_llm",
+        lambda **kw: json.dumps({"action": "dismiss", "ticker": "NVDA",
+                                 "rationale": "quiet", "confidence": "high"}),
+    )
+    llm_calls = 0
+    for _ in range(14):
+        d, _t = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+        llm_calls += d.source == "llm"
+        state_db.record_cio_action(
+            ticker=d.ticker, thesis=d.thesis, action=d.action,
+            rationale=d.rationale, source=d.source,
+        )
+    assert llm_calls == 3
+    assert len(state_db.recent_cio_actions(ticker="NVDA", thesis="ai_cake", limit=50)) == 14
+
+    # Age the LLM rows past the window; the 11 gate rows stay "today".
+    import sqlite3
+
+    old_iso = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    with sqlite3.connect(isolated_db) as conn:
+        conn.execute("UPDATE cio_actions SET ts = ? WHERE source = 'llm'", (old_iso,))
+    d, _t = planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"})
+    assert d.source == "llm"  # gate rows in the window did not keep it locked
+
+
+# --- EDGAR-index freshness as gate evidence (2026-09-07) ------------------
+
+
+def _freshness(ticker: str, *, edgar_date: str, form: str = "10-Q", chroma_date=None):
+    from data.freshness import FormDiff, FreshnessReport
+
+    diff = FormDiff(form=form, edgar_date=edgar_date, chroma_date=chroma_date, behind_days=0)
+    return FreshnessReport(ticker=ticker, is_stale=True, per_form=[diff])
+
+
+def test_guard_stands_down_on_edgar_filing_newer_than_last_action(isolated_db, stub_external):
+    """A ticker we never ingest (nothing new on disk) still wakes the LLM
+    when EDGAR's index shows a filing dated after the pair's last action."""
+    _seed_llm_dismissals(3)
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).date().isoformat()
+    out = evaluate_gates(
+        "NVDA", "ai_cake", edgar_freshness=_freshness("NVDA", edgar_date=tomorrow),
+    )
+    assert out.shortcut is None
+    assert out.new_filings and out.new_filings[0]["at"] == "edgar_index"
+    assert out.new_filings[0]["kind"] == "10-Q"
+
+
+def test_guard_holds_when_edgar_filing_predates_last_action(isolated_db, stub_external):
+    """A never-ingested ticker is 'stale' forever; only a filing dated
+    AFTER the last action counts as new, or the guard would never fire."""
+    _seed_llm_dismissals(3)
+    out = evaluate_gates(
+        "NVDA", "ai_cake", edgar_freshness=_freshness("NVDA", edgar_date="2026-08-05"),
+    )
+    assert out.shortcut is not None
+    assert out.new_filings == []
+
+
+def test_bundle_carries_edgar_freshness(isolated_db, stub_external, monkeypatch):
+    captured: dict = {}
+
+    def _llm(**kw):
+        captured.update(kw["evidence"])
+        return json.dumps({"action": "dismiss", "ticker": "NVDA",
+                           "rationale": "x", "confidence": "low"})
+
+    monkeypatch.setattr(planner, "_call_llm", _llm)
+    planner.decide(
+        ticker="NVDA", thesis={"slug": "ai_cake"},
+        edgar_freshness=_freshness("NVDA", edgar_date="2026-08-05"),
+    )
+    ef = captured["edgar_freshness"]
+    assert ef["is_stale"] is True
+    assert ef["stale_forms"] == [
+        {"form": "10-Q", "edgar_date": "2026-08-05", "chroma_date": None, "behind_days": 0}
+    ]
+
+    planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"}, edgar_freshness=None)
+    assert captured["edgar_freshness"] is None

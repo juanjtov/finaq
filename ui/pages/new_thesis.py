@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import json
 import re
+from datetime import UTC, datetime
 
 import pandas as pd
 import streamlit as st
@@ -318,6 +319,8 @@ def main() -> None:
             "relationships": relationships,
             "material_thresholds": thresholds,
             "valuation": valuation,
+            # Hand-written here and now → reviewed now.
+            "last_reviewed": datetime.now(UTC).date().isoformat(),
         }
 
         # Pydantic does the heavy lifting for cross-field constraints

@@ -227,3 +227,86 @@ def test_demote_idempotent_after_first_call(isolated_theses_dir):
     ok2, msg = theses_lifecycle.demote_thesis("ai_cake")
     assert ok2 is False
     assert "not found" in msg
+
+
+# --- Review age (2026-09-07) ----------------------------------------------
+
+
+def _write(dir_, slug: str, **extra) -> None:
+    data = json.loads(_valid_thesis_json(slug))
+    data.update(extra)
+    (dir_ / f"{slug}.json").write_text(json.dumps(data))
+
+
+def test_review_age_days_reads_last_reviewed(isolated_theses_dir):
+    from datetime import date
+
+    _write(isolated_theses_dir, "alpha", last_reviewed="2026-06-01")
+    age = theses_lifecycle.review_age_days("alpha", today=date(2026, 9, 7))
+    assert age == 98
+
+
+def test_review_age_days_falls_back_to_mtime_when_field_absent(isolated_theses_dir):
+    import os
+    import time
+    from datetime import date
+
+    _write(isolated_theses_dir, "beta")  # no last_reviewed
+    path = isolated_theses_dir / "beta.json"
+    ten_days_ago = time.time() - 10 * 86400
+    os.utime(path, (ten_days_ago, ten_days_ago))
+    age = theses_lifecycle.review_age_days("beta", today=date.today())
+    assert age in (10, 11)  # UTC date rounding at the boundary
+
+
+def test_review_age_days_malformed_field_falls_back_to_mtime(isolated_theses_dir):
+    _write(isolated_theses_dir, "gamma", last_reviewed="not-a-date")
+    assert theses_lifecycle.review_age_days("gamma") == 0  # just written
+
+
+def test_review_age_days_none_for_missing_file(isolated_theses_dir):
+    assert theses_lifecycle.review_age_days("nope") is None
+
+
+def test_mark_reviewed_stamps_today_and_preserves_other_keys(isolated_theses_dir):
+    from datetime import date
+
+    _write(isolated_theses_dir, "delta", last_reviewed="2026-01-01")
+    ok, msg = theses_lifecycle.mark_reviewed("delta", today=date(2026, 9, 7))
+    assert ok and "2026-09-07" in msg
+    data = json.loads((isolated_theses_dir / "delta.json").read_text())
+    assert data["last_reviewed"] == "2026-09-07"
+    assert data["universe"] == ["AAPL", "MSFT"]  # untouched
+    assert theses_lifecycle.review_age_days("delta", today=date(2026, 9, 7)) == 0
+
+
+def test_mark_reviewed_missing_file(isolated_theses_dir):
+    ok, msg = theses_lifecycle.mark_reviewed("nope")
+    assert not ok and "not found" in msg
+
+
+def test_overdue_theses_lists_only_past_threshold_oldest_first(isolated_theses_dir):
+    from datetime import date
+
+    today = date(2026, 9, 7)
+    _write(isolated_theses_dir, "old", last_reviewed="2026-04-29")      # 131d
+    _write(isolated_theses_dir, "older", last_reviewed="2026-01-01")    # 249d
+    _write(isolated_theses_dir, "fresh", last_reviewed="2026-08-01")    # 37d
+    _write(isolated_theses_dir, "edge", last_reviewed="2026-06-09")     # 90d → not overdue
+    out = theses_lifecycle.overdue_theses(
+        ["old", "older", "fresh", "edge", "missing"], today=today,
+    )
+    assert [o["slug"] for o in out] == ["older", "old"]
+    assert out[0]["age_days"] == 249
+    assert out[1]["age_days"] == 131
+
+
+def test_promote_stamps_last_reviewed(isolated_theses_dir):
+    """Promotion is a human judgement → counts as a review."""
+    from datetime import date
+
+    (isolated_theses_dir / "adhoc_zeta.json").write_text(_valid_thesis_json("Zeta"))
+    ok, _ = theses_lifecycle.promote_thesis("adhoc_zeta")
+    assert ok
+    data = json.loads((isolated_theses_dir / "zeta.json").read_text())
+    assert data["last_reviewed"] == date.today().isoformat()

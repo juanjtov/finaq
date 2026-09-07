@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -32,6 +33,7 @@ from cio import memory as cio_memory
 from cio import rag as cio_rag
 from data import state as state_db
 from data.chroma import _BM25_STOPWORDS
+from data.freshness import FreshnessReport
 from utils import logger
 from utils.models import MODEL_CIO
 from utils.openrouter import get_client
@@ -50,8 +52,8 @@ _PROMPT_PATH = Path(__file__).parent / "prompts" / "cio_persona.md"
 _SYSTEM_PROMPT = _PROMPT_PATH.read_text()
 
 _RAG_K = 4  # Past-report sections per (ticker, thesis) for the prompt.
-_NEWS_LOOKBACK_DAYS = 14
-_MAX_NEWS_HEADLINES = 8  # truncate to keep prompt small.
+NEWS_LOOKBACK_DAYS = 14  # what the persona prompt promises ("last 14 days")
+MAX_NEWS_HEADLINES = 8  # truncate to keep prompt small; also the Tavily max_results.
 
 # Watchlist-signal matching constants. The matcher is intentionally simple
 # (significant-word overlap, ≥2 shared keywords for news; ≥1 for filings)
@@ -72,6 +74,7 @@ _WORD_RE_LOWER = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 CONFIDENCE_VALUES = ("low", "medium", "high")
 ACTION_VALUES = ("drill", "reuse", "dismiss")
+SOURCE_VALUES = ("llm", "gate", "budget_cap", "fallback")
 
 
 # --- Pydantic schemas ------------------------------------------------------
@@ -94,6 +97,11 @@ class CIODecision(BaseModel):
     reuse_run_id: str | None = None
     confidence: Literal["low", "medium", "high"] = "medium"
     followup_at: str | None = None  # ISO date the CIO suggests revisiting
+    # Who made the call. `decide()` stamps `llm` on every parsed LLM
+    # response; the gate shortcut, the budget cap and the error fallbacks
+    # stamp their own value. Persisted to `cio_actions.source` so the
+    # yo-yo guard can count LLM dismissals only.
+    source: Literal["llm", "gate", "budget_cap", "fallback"] = "llm"
 
 
 class Plan(BaseModel):
@@ -108,6 +116,10 @@ class Plan(BaseModel):
     decisions: list[CIODecision] = Field(default_factory=list)
     drill_budget: int = DEFAULT_DRILL_BUDGET
     drills_capped: int = 0  # how many proposed drills were demoted to reuse
+    # Theses in this cycle unreviewed for > data.theses.REVIEW_MAX_DAYS:
+    # [{"slug", "age_days"}], oldest first. Rendered by the summary +
+    # Telegram formatter so the nag reaches the user without a dashboard.
+    overdue_theses: list[dict] = Field(default_factory=list)
 
     @property
     def n_drilled(self) -> int:
@@ -135,6 +147,43 @@ class GateOutcome(BaseModel):
     cooldown_status: dict
     dismissal_streak: list[dict]
     notes: str
+    # Filings that landed on disk after the pair's most recent CIO action.
+    # Non-empty overrides the yo-yo guard: "nothing changed" is exactly
+    # what a fresh 10-Q disproves.
+    new_filings: list[dict] = Field(default_factory=list)
+
+
+def _filings_since_last_action(
+    ticker: str,
+    thesis: str | None,
+    edgar_freshness: FreshnessReport | None = None,
+) -> list[dict]:
+    """Filings newer than the pair's latest cio_actions row — on disk
+    (file mtime) and, when an EDGAR probe is supplied, in EDGAR's index
+    (filing date after the last action's date). The EDGAR side is what
+    lets a ticker we never ingest still wake the LLM when a 10-Q lands;
+    comparing against the last ACTION (not the last drill) is what stops
+    a never-ingested ticker from being "new" forever.
+    Empty when the pair has no history (nothing to be "newer" than the
+    LLM's last look — it hasn't looked yet, so the guard can't fire anyway)."""
+    last = cio_memory.recent_cio_actions(ticker, thesis, limit=1)
+    if not last:
+        return []
+    since = last[0].get("ts")
+    out = _summarise_recent_filings(ticker, since)
+    if edgar_freshness is not None:
+        since_date = (since or "")[:10]
+        for d in edgar_freshness.stale_forms():
+            if d.edgar_date and d.edgar_date > since_date:
+                out.append(
+                    {
+                        "kind": d.form,
+                        "accession": None,
+                        "filed_at_iso": d.edgar_date,
+                        "at": "edgar_index",
+                    }
+                )
+    return out
 
 
 def evaluate_gates(
@@ -142,37 +191,53 @@ def evaluate_gates(
     thesis: str | None,
     *,
     cooldown_hours: int = cio_memory.DEFAULT_COOLDOWN_HOURS,
+    edgar_freshness: FreshnessReport | None = None,
 ) -> GateOutcome:
     """Run the deterministic gates. May short-circuit to a `dismiss`
     decision without invoking the LLM (cheap; saves tokens on yo-yo
     cases). Otherwise, return the gathered context so the LLM gets it
     in its prompt.
+
+    The yo-yo guard counts LLM-judged dismissals only (see
+    `cio.memory.dismissals_in_window`) and stands down when a filing has
+    landed since the pair's last action — the orchestrator runs the EDGAR
+    freshness check before calling us, so a new 10-Q is already on disk.
     """
     cooldown = cio_memory.cooldown_status(ticker, thesis, cooldown_hours=cooldown_hours)
     dismissals = cio_memory.dismissals_in_window(ticker, thesis, window_days=7)
     notes = cio_memory.thesis_notes(thesis or "")
 
     shortcut: CIODecision | None = None
-    # Yo-yo guard: if we've dismissed this pair ≥3 times in the last 7 days,
-    # short-circuit a 4th LLM call. The user can /cio TICKER force-explicit
-    # to override this if they want.
+    new_filings: list[dict] = []
+    # Yo-yo guard: if the LLM dismissed this pair ≥3 times in the last 7
+    # days, short-circuit a 4th LLM call — unless new evidence landed.
+    # The user can /cio TICKER to force a look regardless.
     if len(dismissals) >= 3:
-        shortcut = CIODecision(
-            action="dismiss",
-            ticker=ticker.upper(),
-            thesis=thesis,
-            rationale=(
-                f"Yo-yo guard: {len(dismissals)} dismissals in the last 7 days for "
-                f"({ticker}, {thesis}); skipping LLM until evidence shifts."
-            ),
-            confidence="high",
-        )
+        new_filings = _filings_since_last_action(ticker, thesis, edgar_freshness)
+        if new_filings:
+            logger.info(
+                f"[cio.planner] yo-yo guard bypassed for ({ticker}, {thesis}): "
+                f"{len(new_filings)} filing(s) landed since last action"
+            )
+        else:
+            shortcut = CIODecision(
+                action="dismiss",
+                ticker=ticker.upper(),
+                thesis=thesis,
+                rationale=(
+                    f"Yo-yo guard: {len(dismissals)} LLM dismissals in the last 7 days "
+                    f"for ({ticker}, {thesis}) and no new filing; skipping LLM."
+                ),
+                confidence="high",
+                source="gate",
+            )
 
     return GateOutcome(
         shortcut=shortcut,
         cooldown_status=cooldown,
         dismissal_streak=dismissals,
         notes=notes,
+        new_filings=new_filings,
     )
 
 
@@ -188,7 +253,7 @@ def _summarise_news(news_items: list[dict] | None) -> list[dict]:
     if not news_items:
         return []
     out: list[dict] = []
-    for item in news_items[:_MAX_NEWS_HEADLINES]:
+    for item in news_items[:MAX_NEWS_HEADLINES]:
         out.append(
             {
                 "title": (item.get("title") or "")[:240],
@@ -343,6 +408,28 @@ def _summarise_recent_filings(ticker: str, since_iso: str | None) -> list[dict]:
     return out[:6]
 
 
+def _summarise_freshness(report: FreshnessReport | None) -> dict | None:
+    """EDGAR-vs-ChromaDB freshness for the prompt. `stale_forms` lists
+    filings EDGAR has that the local corpus lacks. A drill on the pair
+    ingests them first, so the LLM should treat them as evidence that
+    WILL be available, not evidence that is missing."""
+    if report is None:
+        return None
+    return {
+        "is_stale": report.is_stale,
+        "edgar_error": report.edgar_error,
+        "stale_forms": [
+            {
+                "form": d.form,
+                "edgar_date": d.edgar_date,
+                "chroma_date": d.chroma_date,
+                "behind_days": d.behind_days,
+            }
+            for d in report.stale_forms()
+        ],
+    }
+
+
 def build_evidence_bundle(
     *,
     ticker: str,
@@ -350,6 +437,7 @@ def build_evidence_bundle(
     gates: GateOutcome,
     rag_question: str,
     news_items: list[dict] | None = None,
+    edgar_freshness: FreshnessReport | None = None,
 ) -> dict:
     """Assemble the JSON context the LLM sees inside the user message.
 
@@ -411,6 +499,7 @@ def build_evidence_bundle(
         "watchlist_items": watchlist_items,
         "watchlist_signals": watchlist_signals,
         "recent_filings": recent_filings,
+        "edgar_freshness": _summarise_freshness(edgar_freshness),
         "recent_news": recent_news,
         "notes": gates.notes,
     }
@@ -505,6 +594,8 @@ def decide(
     thesis: dict | None,
     rag_question: str = "What has changed since the last drill-in?",
     news_items: list[dict] | None = None,
+    news_fetcher: Callable[[], list[dict]] | None = None,
+    edgar_freshness: FreshnessReport | None = None,
     cooldown_hours: int = cio_memory.DEFAULT_COOLDOWN_HOURS,
     system_prompt: str | None = None,
 ) -> tuple[CIODecision, dict]:
@@ -521,16 +612,29 @@ def decide(
         `response.usage` per call and writes into the accumulator we
         bind below.
 
+    News: pass `news_items` when you already have them, or `news_fetcher`
+    (a zero-arg callable) to have them pulled only if the gates let the
+    LLM run. The orchestrator uses the fetcher so a gate-shortcut pair
+    costs zero Tavily credits — fetching eagerly for every pair burned
+    the monthly quota in four days.
+
     `system_prompt` defaults to the persona file. Tests pass a stub.
     """
     thesis_slug = (thesis or {}).get("slug") if isinstance(thesis, dict) else None
-    gates = evaluate_gates(ticker, thesis_slug, cooldown_hours=cooldown_hours)
+    gates = evaluate_gates(
+        ticker, thesis_slug, cooldown_hours=cooldown_hours,
+        edgar_freshness=edgar_freshness,
+    )
     if gates.shortcut is not None:
         return gates.shortcut, _empty_telemetry()
+
+    if news_items is None and news_fetcher is not None:
+        news_items = news_fetcher()
 
     bundle = build_evidence_bundle(
         ticker=ticker, thesis=thesis, gates=gates,
         rag_question=rag_question, news_items=news_items,
+        edgar_freshness=edgar_freshness,
     )
 
     # Bind a fresh telemetry accumulator just for this decide() call. The
@@ -567,6 +671,7 @@ def decide(
             CIODecision(
                 action="dismiss", ticker=ticker.upper(), thesis=thesis_slug,
                 rationale=f"LLM call failed: {llm_error}", confidence="low",
+                source="fallback",
             ),
             telemetry,
         )
@@ -578,15 +683,17 @@ def decide(
             CIODecision(
                 action="dismiss", ticker=ticker.upper(), thesis=thesis_slug,
                 rationale=f"LLM response unparseable: {err}", confidence="low",
+                source="fallback",
             ),
             telemetry,
         )
 
-    # Force ticker / thesis to match what we asked about — the LLM has a
-    # bad habit of retyping inputs and occasionally normalises ticker
-    # case. The orchestrator uses `decision.ticker` to route, so be
-    # strict here.
+    # Force ticker / thesis / source to match what we asked about — the
+    # LLM has a bad habit of retyping inputs and occasionally normalises
+    # ticker case. The orchestrator uses `decision.ticker` to route, and
+    # the yo-yo guard trusts `source`, so be strict here.
     decision.ticker = ticker.upper()
+    decision.source = "llm"
     if thesis_slug and not decision.thesis:
         decision.thesis = thesis_slug
 
@@ -650,6 +757,7 @@ def apply_drill_budget(
                 reuse_run_id=last_run if new_action == "reuse" else None,
                 confidence="low",
                 followup_at=d.followup_at,
+                source="budget_cap",
             )
         )
 

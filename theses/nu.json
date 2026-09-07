@@ -91,5 +91,6 @@
     "terminal_growth_basis": "Nominal LatAm GDP growth plus fintech adoption premium",
     "discount_rate_floor": 0.095,
     "discount_rate_cap": 0.18
-  }
+  },
+  "last_reviewed": "2026-05-15"
 }

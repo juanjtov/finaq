@@ -8,7 +8,9 @@ ChromaDB) and returns a structured diff. Consumed by:
     stale (Ingest + drill / Cancel)
   - the Telegram `/drill` handler — replies with an inline-keyboard
     confirmation
-  - the CIO heartbeat — auto-ingests silently when stale before drilling
+  - the CIO heartbeat — probes every candidate ticker (the report feeds
+    the planner as `edgar_freshness`); auto-ingests only anchor tickers,
+    on-demand `/cio` tickers, and tickers the planner picks for a drill
 
 Soft-fail by design: any EDGAR error returns a report with `is_stale=False`
 and `edgar_error` populated, so callers drill on whatever's in the local

@@ -500,3 +500,84 @@ def test_chroma_build_where_clause_no_filters_returns_none():
     from data.chroma import _build_where_clause
 
     assert _build_where_clause(None, None) is None
+
+
+# --- ingest_filing skips filings already in ChromaDB (2026-09-07) ---------
+
+
+def _stub_chunking(monkeypatch, ch, n_chunks: int) -> None:
+    monkeypatch.setattr(ch, "_extract_text", lambda p: "x")
+    monkeypatch.setattr(ch, "_split_into_items", lambda text: [("1A", "Risk Factors", "body")])
+    monkeypatch.setattr(
+        ch, "_chunk_tokens", lambda body, encoder: [f"c{i}" for i in range(n_chunks)]
+    )
+    monkeypatch.setattr(ch, "_filing_meta_from_path", lambda path: ("10-Q", "0001-26-001"))
+    monkeypatch.setattr(ch, "parse_filed_date", lambda path: "2026-08-05")
+    monkeypatch.setattr(ch.tiktoken, "get_encoding", lambda name: object())
+
+
+def test_ingest_filing_skips_when_last_chunk_already_present(tmp_path, monkeypatch):
+    """A filing whose final chunk id is already in the collection was
+    fully ingested before → no re-embed. Re-embedding every on-disk
+    filing whenever one new 10-Q landed multiplied ingest cost ~6x."""
+    from data import chroma as ch
+
+    upserts: list[int] = []
+
+    class _FakeCollection:
+        def get(self, ids, include=None):
+            return {"ids": [i for i in ids if i == "CRDO-0001-26-001-4"]}
+
+        def upsert(self, ids, documents, metadatas):
+            upserts.append(len(ids))
+
+    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
+    _stub_chunking(monkeypatch, ch, n_chunks=5)
+    fake_path = tmp_path / "full-submission.txt"
+    fake_path.write_text("ignored")
+
+    assert ch.ingest_filing("CRDO", fake_path) == 0
+    assert upserts == []
+
+
+def test_ingest_filing_reembeds_partial_ingest(tmp_path, monkeypatch):
+    """Only the FIRST chunk exists (a run killed mid-upsert) → the last
+    id is missing → the filing is embedded again in full."""
+    from data import chroma as ch
+
+    upserts: list[int] = []
+
+    class _FakeCollection:
+        def get(self, ids, include=None):
+            return {"ids": [i for i in ids if i == "CRDO-0001-26-001-0"]}
+
+        def upsert(self, ids, documents, metadatas):
+            upserts.append(len(ids))
+
+    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
+    _stub_chunking(monkeypatch, ch, n_chunks=5)
+    fake_path = tmp_path / "full-submission.txt"
+    fake_path.write_text("ignored")
+
+    assert ch.ingest_filing("CRDO", fake_path) == 5
+    assert upserts == [5]
+
+
+def test_ingest_filing_embeds_when_presence_check_fails(tmp_path, monkeypatch):
+    """A collection without `get` (or a read error) must not block
+    ingest — embedding anyway is the safe direction."""
+    from data import chroma as ch
+
+    upserts: list[int] = []
+
+    class _FakeCollection:
+        def upsert(self, ids, documents, metadatas):
+            upserts.append(len(ids))
+
+    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
+    _stub_chunking(monkeypatch, ch, n_chunks=3)
+    fake_path = tmp_path / "full-submission.txt"
+    fake_path.write_text("ignored")
+
+    assert ch.ingest_filing("CRDO", fake_path) == 3
+    assert upserts == [3]
