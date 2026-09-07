@@ -11,7 +11,10 @@ Two responsibilities:
    `agents._safe_node`. Totals are written to `data_cache/state.db`
    on node exit so the Run Inspector page can show per-node cost
    without re-querying LangSmith. See `data.state.node_telemetry_var`
-   for the accumulator contract.
+   for the accumulator contract. Since schema v6 the interceptor also
+   writes one `llm_calls` row per call (model, latency, tokens, cost,
+   truncated prompt/response) so failed runs stay debuggable even when
+   LangSmith tracing was off at run time.
 """
 
 from __future__ import annotations
@@ -63,6 +66,10 @@ def _install_telemetry_interceptor(client: Any) -> Any:
     direct calls from `/analyze` or `agents.qa.ask` outside the graph),
     so direct calls don't crash the SDK.
     """
+    import json
+    import time
+
+    from data import state as state_db
     from data.state import node_telemetry_var
     from utils.models import compute_cost
 
@@ -71,10 +78,15 @@ def _install_telemetry_interceptor(client: Any) -> Any:
     original_create = client.chat.completions.create
 
     def _wrapped_create(*args: Any, **kwargs: Any) -> Any:
+        t0 = time.perf_counter()
         resp = original_create(*args, **kwargs)
+        latency_s = time.perf_counter() - t0
         accumulator = node_telemetry_var.get(None)
         if accumulator is None:
             return resp  # not inside a node — nothing to record
+        tokens_in = tokens_out = 0
+        cost = 0.0
+        model = ""
         try:
             usage = getattr(resp, "usage", None) or {}
             tokens_in = int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -89,6 +101,30 @@ def _install_telemetry_interceptor(client: Any) -> Any:
             # Telemetry must never break the actual LLM call. A failed
             # accumulator is a debugging miss, not an outage.
             pass
+        try:
+            # Schema v6 — per-call trace row so a run stays debuggable even
+            # when LangSmith tracing was off. Excerpts are clipped inside
+            # record_llm_call; run_id is None for calls outside the graph.
+            prompt_excerpt = json.dumps(kwargs.get("messages") or [], default=str)
+            response_excerpt = ""
+            choices = getattr(resp, "choices", None) or []
+            if choices:
+                response_excerpt = str(
+                    getattr(getattr(choices[0], "message", None), "content", "") or ""
+                )
+            state_db.record_llm_call(
+                run_id=state_db.current_run_id.get(None),
+                node=str(accumulator.get("node") or "") if isinstance(accumulator, dict) else "",
+                model=model or kwargs.get("model") or "",
+                latency_s=latency_s,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cost_usd=cost,
+                prompt_excerpt=prompt_excerpt,
+                response_excerpt=response_excerpt,
+            )
+        except Exception:
+            pass  # same rule: a lost trace row never breaks the call
         return resp
 
     client.chat.completions.create = _wrapped_create

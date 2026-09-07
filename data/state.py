@@ -15,12 +15,14 @@ What we DO record (centrally queryable):
   - Triage runs (Phase 1).
   - Standalone error events (centralised log).
 
-What we DO NOT record:
-  - Per-LLM-call tokens / USD cost / full prompt / response. **LangSmith**
-    auto-instruments these when LANGSMITH_TRACING=true; duplicating that
-    work in our SQLite would just diverge. The dashboard's Mission Control
-    panel will deep-link to LangSmith for per-call detail; state.db is for
-    aggregate-and-historical queries.
+Per-LLM-call detail (schema v6 — revises the earlier "LangSmith owns
+per-call detail" decision):
+  - `llm_calls` records one row per chat-completion call: node, model,
+    latency, tokens, cost, and TRUNCATED prompt/response excerpts. This is
+    the always-on local baseline so a failed run stays debuggable even when
+    LANGSMITH_TRACING was off at run time. **LangSmith** remains the source
+    of full, untruncated traces with replay when tracing is enabled; the Run
+    Inspector shows both (local excerpts + a LangSmith deep-link).
 
 Run-ID propagation via `contextvars` — the graph wrapper sets
 `current_run_id` once per ainvoke, and `_safe_node` reads it without
@@ -37,7 +39,12 @@ from pathlib import Path
 from typing import Any
 
 DB_PATH = Path("data_cache/state.db")
-SCHEMA_VERSION = 4  # Step 11.19 — per-CIO-call telemetry: model_used, tokens, cost_usd, latency_s
+SCHEMA_VERSION = 6  # llm_calls — per-call trace rows with truncated prompt/response excerpts
+
+# Prompt / response excerpts stored per LLM call are clipped to this many
+# characters. Full traces live in LangSmith when tracing is on; the local
+# excerpt exists so a failed run is debuggable offline.
+LLM_EXCERPT_MAX_CHARS = 2000
 
 # Contextvars propagated across asyncio tasks within a single graph invocation.
 # Set by `invoke_with_telemetry`; read by `_safe_node` to attach node rows to
@@ -56,10 +63,12 @@ node_telemetry_var: contextvars.ContextVar[dict | None] = contextvars.ContextVar
 )
 
 
-def new_node_telemetry() -> dict:
+def new_node_telemetry(node: str = "") -> dict:
     """Return a fresh accumulator dict for a single node invocation.
-    Caller binds it to `node_telemetry_var` for the node's lifetime."""
-    return {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0, "n_calls": 0}
+    Caller binds it to `node_telemetry_var` for the node's lifetime.
+    `node` labels llm_calls rows written while this accumulator is bound
+    (empty for callers outside the graph, e.g. the CIO planner)."""
+    return {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0, "n_calls": 0, "node": node}
 
 
 # --- Schema migration -------------------------------------------------------
@@ -103,6 +112,27 @@ CREATE TABLE IF NOT EXISTS node_runs (
 
 CREATE INDEX IF NOT EXISTS idx_node_runs_run_id ON node_runs(run_id);
 CREATE INDEX IF NOT EXISTS idx_graph_runs_started_at ON graph_runs(started_at);
+
+-- Schema v6 — one row per chat-completion call, written by the telemetry
+-- interceptor in utils/openrouter.py whenever a node accumulator is bound.
+-- run_id is NULL for calls outside a graph run (CIO planner, ad-hoc Q&A).
+-- prompt/response excerpts are clipped to LLM_EXCERPT_MAX_CHARS; full
+-- traces stay in LangSmith when tracing is enabled.
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id            TEXT,
+    node              TEXT NOT NULL DEFAULT '',
+    ts                TEXT NOT NULL,
+    model             TEXT,
+    latency_s         REAL    NOT NULL DEFAULT 0.0,
+    tokens_in         INTEGER NOT NULL DEFAULT 0,
+    tokens_out        INTEGER NOT NULL DEFAULT 0,
+    cost_usd          REAL    NOT NULL DEFAULT 0.0,
+    prompt_excerpt    TEXT,
+    response_excerpt  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_calls_run_id ON llm_calls(run_id);
 
 CREATE TABLE IF NOT EXISTS alerts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,6 +211,11 @@ CREATE TABLE IF NOT EXISTS cio_actions (
     tokens_out     INTEGER NOT NULL DEFAULT 0,
     cost_usd       REAL    NOT NULL DEFAULT 0.0,
     latency_s      REAL    NOT NULL DEFAULT 0.0,
+    -- Who produced the decision: llm | gate (yo-yo shortcut) | budget_cap
+    -- (demoted drill) | fallback (planner/LLM error). '' on rows written
+    -- before this column existed. The yo-yo guard counts ONLY `llm` rows —
+    -- counting its own `gate` output locked every pair permanently.
+    source         TEXT    NOT NULL DEFAULT '',
     FOREIGN KEY (cio_run_id) REFERENCES cio_runs(run_id)
 );
 
@@ -240,6 +275,7 @@ def init_db(db_path: Path | None = None) -> None:
             ("tokens_out", "INTEGER NOT NULL DEFAULT 0"),
             ("cost_usd",   "REAL    NOT NULL DEFAULT 0.0"),
             ("latency_s",  "REAL    NOT NULL DEFAULT 0.0"),
+            ("source",     "TEXT    NOT NULL DEFAULT ''"),  # schema v5
         ]:
             if col_name not in existing_actions:
                 conn.execute(
@@ -368,6 +404,63 @@ def record_node_run(
         return cur.lastrowid or 0
 
 
+def record_llm_call(
+    *,
+    run_id: str | None,
+    node: str,
+    model: str | None,
+    latency_s: float,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    cost_usd: float = 0.0,
+    prompt_excerpt: str | None = None,
+    response_excerpt: str | None = None,
+    db_path: Path | None = None,
+) -> int:
+    """Append one llm_calls trace row (schema v6). Excerpts are clipped to
+    LLM_EXCERPT_MAX_CHARS here so callers can pass raw strings. Written by
+    the interceptor in `utils/openrouter.py` on every chat-completion call
+    that happens while a node accumulator is bound."""
+    init_db(db_path)
+    clip = LLM_EXCERPT_MAX_CHARS
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO llm_calls (
+                run_id, node, ts, model, latency_s, tokens_in, tokens_out,
+                cost_usd, prompt_excerpt, response_excerpt
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id, node or "", _now_iso(), model, float(latency_s or 0.0),
+                int(tokens_in or 0), int(tokens_out or 0), float(cost_usd or 0.0),
+                (prompt_excerpt or "")[:clip] or None,
+                (response_excerpt or "")[:clip] or None,
+            ),
+        )
+        return cur.lastrowid or 0
+
+
+def llm_calls_for_run(run_id: str, *, db_path: Path | None = None) -> list[dict]:
+    """Every llm_calls row for a single graph run, in call order. Used by
+    the Run Inspector's trace panel.
+
+    Tolerates a pre-v6 DB (no llm_calls table yet): reads must not crash —
+    and must not migrate — a database the process has only ever read."""
+    if not Path(db_path or DB_PATH).exists():
+        return []
+    with _connect(db_path) as conn:
+        try:
+            rows = conn.execute(
+                "SELECT * FROM llm_calls WHERE run_id = ? ORDER BY id",
+                (run_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []  # schema predates v6; next write migrates it
+    return [dict(r) for r in rows]
+
+
 def record_alert(
     ticker: str,
     thesis: str,
@@ -445,14 +538,23 @@ def record_error(
 
 
 def recent_runs(limit: int = 20, *, db_path: Path | None = None) -> list[dict]:
-    """Most-recent-first list of graph runs, with completed-node count."""
+    """Most-recent-first list of graph runs, with per-run rollups the runs
+    table renders directly: node count, failed-node count + names, summed
+    tokens / cost / LLM-call count, and the run-scoped error count (soft
+    failures — a run can be 'completed' yet degraded)."""
     if not Path(db_path or DB_PATH).exists():
         return []
     with _connect(db_path) as conn:
         rows = conn.execute(
             """
             SELECT g.*, COUNT(n.id) AS node_runs_count,
-                   SUM(CASE WHEN n.status = 'failed' THEN 1 ELSE 0 END) AS failed_nodes
+                   SUM(CASE WHEN n.status = 'failed' THEN 1 ELSE 0 END) AS failed_nodes,
+                   GROUP_CONCAT(CASE WHEN n.status = 'failed' THEN n.node END) AS failed_node_names,
+                   SUM(n.tokens_in)  AS tokens_in,
+                   SUM(n.tokens_out) AS tokens_out,
+                   SUM(n.cost_usd)   AS cost_usd,
+                   SUM(n.n_calls)    AS n_calls,
+                   (SELECT COUNT(*) FROM errors e WHERE e.run_id = g.run_id) AS n_errors
               FROM graph_runs g
          LEFT JOIN node_runs n ON n.run_id = g.run_id
           GROUP BY g.run_id
@@ -754,6 +856,7 @@ def record_cio_action(
     tokens_out: int = 0,
     cost_usd: float = 0.0,
     latency_s: float = 0.0,
+    source: str = "",
     db_path: Path | None = None,
 ) -> int:
     """Append a cio_actions row. Returns the row id.
@@ -765,6 +868,10 @@ def record_cio_action(
     Step 11.19 — `model_used`, tokens, cost_usd, and latency_s capture the
     LLM call that produced this decision. All zero/None for gate-shortcut
     decisions (yo-yo guard) since no LLM call fired.
+
+    `source` ∈ {llm, gate, budget_cap, fallback} says who made the call.
+    `cio.memory.dismissals_in_window` only counts `llm` rows, so the yo-yo
+    guard can never feed on its own shortcuts.
     """
     if action not in _CIO_ACTION_VALUES:
         raise ValueError(f"action must be one of {_CIO_ACTION_VALUES}, got {action!r}")
@@ -781,9 +888,9 @@ def record_cio_action(
             INSERT INTO cio_actions (
                 cio_run_id, ts, trigger, ticker, thesis, action, rationale,
                 drill_run_id, reuse_run_id, confidence, decision_json,
-                model_used, tokens_in, tokens_out, cost_usd, latency_s
+                model_used, tokens_in, tokens_out, cost_usd, latency_s, source
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 cio_run_id, _now_iso(), trigger, ticker, thesis, action, rationale,
@@ -791,6 +898,7 @@ def record_cio_action(
                 model_used,
                 int(tokens_in or 0), int(tokens_out or 0),
                 float(cost_usd or 0.0), float(latency_s or 0.0),
+                source or "",
             ),
         )
         return cur.lastrowid or 0
@@ -835,6 +943,29 @@ def recent_cio_actions(
     with _connect(db_path) as conn:
         rows = conn.execute(sql, args).fetchall()
     return [dict(r) for r in rows]
+
+
+def cio_action_for_run(run_id: str, *, db_path: Path | None = None) -> dict | None:
+    """The CIO decision that triggered (or reused) a graph run, or None for
+    manual runs. Joins the parent cycle so the Run Inspector can render
+    "triggered by CIO heartbeat <ts> — decision: drill (confidence high)"."""
+    if not run_id or not Path(db_path or DB_PATH).exists():
+        return None
+    with _connect(db_path) as conn:
+        try:
+            row = conn.execute(
+                """
+                SELECT a.*, r.started_at AS cycle_started_at, r.trigger AS cycle_trigger
+                  FROM cio_actions a
+             LEFT JOIN cio_runs r ON r.run_id = a.cio_run_id
+                 WHERE a.drill_run_id = ? OR a.reuse_run_id = ?
+              ORDER BY a.ts DESC LIMIT 1
+                """,
+                (run_id, run_id),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None  # pre-CIO schema — treat as a manual run
+    return dict(row) if row else None
 
 
 def last_drill_for(

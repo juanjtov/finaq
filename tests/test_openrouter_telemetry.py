@@ -162,3 +162,105 @@ def test_compute_cost_unknown_model_returns_zero():
     from utils.models import compute_cost
 
     assert compute_cost("not-in-pricing-table", 1_000_000, 1_000_000) == 0.0
+
+
+# --- Schema v6 — per-call llm_calls trace rows -----------------------------
+
+
+def test_interceptor_writes_llm_call_row_with_run_id(tmp_path, monkeypatch):
+    """Inside a graph node, every chat-completion call must land one
+    llm_calls row attributed to the active run + node, with model,
+    latency, tokens, cost, and truncated prompt/response excerpts."""
+    monkeypatch.setattr(state_db, "DB_PATH", tmp_path / "trace.db")
+    run_id = state_db.start_graph_run("NVDA", "ai_cake")
+    run_token = state_db.current_run_id.set(run_id)
+    accumulator = state_db.new_node_telemetry(node="fundamentals")
+    node_token = state_db.node_telemetry_var.set(accumulator)
+    try:
+        client = _install_telemetry_interceptor(
+            _fake_client(_fake_response(1000, 500))
+        )
+        client.chat.completions.create(
+            model="anthropic/claude-haiku-4.5",
+            messages=[{"role": "user", "content": "summarise the KPIs"}],
+        )
+    finally:
+        state_db.node_telemetry_var.reset(node_token)
+        state_db.current_run_id.reset(run_token)
+
+    calls = state_db.llm_calls_for_run(run_id)
+    assert len(calls) == 1
+    c = calls[0]
+    assert c["node"] == "fundamentals"
+    assert c["model"] == "anthropic/claude-haiku-4.5"
+    assert c["tokens_in"] == 1000
+    assert c["tokens_out"] == 500
+    assert c["cost_usd"] > 0
+    assert c["latency_s"] >= 0.0
+    assert "summarise the KPIs" in c["prompt_excerpt"]
+    assert c["response_excerpt"] == "ok"
+
+
+def test_interceptor_no_llm_call_row_without_accumulator(tmp_path, monkeypatch):
+    """No node active → no trace row (same gating as the accumulator, so
+    ad-hoc SDK calls never write ghost rows)."""
+    import sqlite3
+
+    db = tmp_path / "trace.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    assert state_db.node_telemetry_var.get() is None
+    client = _install_telemetry_interceptor(_fake_client(_fake_response(10, 5)))
+    client.chat.completions.create(model="anthropic/claude-haiku-4.5", messages=[])
+    if db.exists():
+        with sqlite3.connect(db) as conn:
+            n = conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0]
+        assert n == 0
+
+
+def test_interceptor_records_null_run_id_outside_graph(tmp_path, monkeypatch):
+    """The CIO planner binds an accumulator without a graph run — the
+    trace row is still written, with run_id NULL."""
+    import sqlite3
+
+    db = tmp_path / "trace.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    accumulator = state_db.new_node_telemetry()
+    token = state_db.node_telemetry_var.set(accumulator)
+    try:
+        client = _install_telemetry_interceptor(
+            _fake_client(_fake_response(100, 50))
+        )
+        client.chat.completions.create(
+            model="anthropic/claude-haiku-4.5", messages=[]
+        )
+    finally:
+        state_db.node_telemetry_var.reset(token)
+    with sqlite3.connect(db) as conn:
+        rows = list(conn.execute("SELECT run_id, node FROM llm_calls"))
+    assert len(rows) == 1
+    assert rows[0][0] is None
+    assert rows[0][1] == ""
+
+
+def test_interceptor_trace_write_failure_does_not_break_call(monkeypatch):
+    """Same invariant as the accumulator: a failed llm_calls write is a
+    debugging miss, never an outage."""
+    def _boom(**kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(state_db, "record_llm_call", _boom)
+    accumulator = state_db.new_node_telemetry(node="news")
+    token = state_db.node_telemetry_var.set(accumulator)
+    try:
+        client = _install_telemetry_interceptor(
+            _fake_client(_fake_response(100, 50))
+        )
+        resp = client.chat.completions.create(
+            model="anthropic/claude-haiku-4.5", messages=[]
+        )
+        assert resp.usage.prompt_tokens == 100
+        # The accumulator still recorded the call even though the trace
+        # row was lost.
+        assert accumulator["n_calls"] == 1
+    finally:
+        state_db.node_telemetry_var.reset(token)

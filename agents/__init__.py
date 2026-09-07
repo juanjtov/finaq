@@ -52,7 +52,7 @@ def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
         # response and increments tokens_in/tokens_out/cost_usd/n_calls.
         # We bind a fresh dict here so each node gets its own counter, then
         # write the totals to node_runs in the `finally` block.
-        accumulator = state_db.new_node_telemetry()
+        accumulator = state_db.new_node_telemetry(node=name)
         token_var = state_db.node_telemetry_var.set(accumulator)
         try:
             result = await run_fn(state)

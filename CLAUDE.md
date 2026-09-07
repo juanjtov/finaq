@@ -184,6 +184,8 @@ Validated by Pydantic in `utils/schemas.py`. Same schema Discovery will emit in 
 
 Hand-write three of these for Phase 0: `ai_cake.json`, `nvda_halo.json`, `construction.json`. Tickers and relationships are listed in `FINAQ_Context.docx`.
 
+Optional `"last_reviewed": "YYYY-MM-DD"` records when the user last confirmed the thesis still reflects their view. `data/theses.py` (`review_age_days`, `mark_reviewed`, `overdue_theses`, `REVIEW_MAX_DAYS = 90`) reads it, falling back to the file's mtime; Theses Admin shows an age badge + "Mark reviewed" button, and the CIO cycle summary lists theses unreviewed for more than 90 days. See ARCHITECTURE §5.3b.
+
 ## 8. LangGraph state machine
 
 State (`utils/state.py`):
@@ -515,7 +517,7 @@ A step is not done until its test plan passes end to end:
 Single-user single-box system. No managed observability (Sentry/DataDog/Grafana) — overkill. Two layers + four read surfaces:
 
 - **LangSmith tracing** (auto-instruments every LLM call when `LANGSMITH_TRACING=true`). Free tier covers personal use. Project name `finaq` by default. Used for per-LLM-call latency, tokens, full prompt/response, replay.
-- **Local SQLite at `data_cache/state.db`** — single source of truth for graph_runs, node_runs, alerts, triage_runs, errors, daily_cost. Every agent writes through `data/state.py.record_*` from inside `_safe_node`. Schema migration is idempotent. Backed up with the rest of `data_cache/` on the droplet.
+- **Local SQLite at `data_cache/state.db`** — single source of truth for graph_runs, node_runs, llm_calls, alerts, triage_runs, errors, daily_cost. Every agent writes through `data/state.py.record_*` from inside `_safe_node`. Schema migration is idempotent. Backed up with the rest of `data_cache/` on the droplet. Since schema v6, `llm_calls` stores one row per LLM call (node, model, latency, tokens, cost, truncated prompt/response excerpts) so failed runs stay debuggable even when LangSmith tracing was off — full untruncated traces remain LangSmith's job. See ARCHITECTURE §11.1 (revision) + §11.6 (run traceability: runs table → Run Inspector deep-link via `?run_id=`, degraded-status derivation, CIO lineage backlinks).
 
 Read surfaces (each unlocked by an existing build step):
 - **Streamlit Mission Control page** (Step 8, `ui/pages/mission_control.py`) — visual dashboard.

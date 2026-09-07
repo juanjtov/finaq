@@ -655,3 +655,167 @@ def test_md_safe_idempotent_on_empty_input():
 
     assert _md_safe("") == ""
     assert _md_safe("plain text no markup") == "plain text no markup"
+
+
+# --- Run traceability (schema v6) ------------------------------------------
+
+
+def _seed_failed_run(db, state_db) -> str:
+    """One WEN run that failed on multiple fronts — the shape the runs
+    table + inspector must make obvious."""
+    run_id = state_db.start_graph_run("WEN", "wen", db_path=db)
+    now = state_db._now_iso()
+    state_db.record_node_run(
+        run_id, "fundamentals", now, now, 46.0, "completed",
+        tokens_in=21000, tokens_out=2400, cost_usd=0.06, n_calls=4, db_path=db,
+    )
+    state_db.record_node_run(
+        run_id, "filings", now, now, 122.0, "failed",
+        error="chroma timeout", db_path=db,
+    )
+    state_db.record_error("filings", "chroma timeout", run_id=run_id, db_path=db)
+    state_db.record_llm_call(
+        run_id=run_id, node="fundamentals", model="test/model",
+        latency_s=6.1, tokens_in=5200, tokens_out=600, cost_usd=0.014,
+        prompt_excerpt='[{"role": "user", "content": "kpis"}]',
+        response_excerpt='{"summary": "ok"}',
+        db_path=db,
+    )
+    state_db.finish_graph_run(run_id, "failed", duration_s=214.0, db_path=db)
+    return run_id
+
+
+def test_mission_control_runs_table_shows_cost_and_failed_agents(
+    tmp_path, monkeypatch
+):
+    """The revamped runs table must surface cost + failed-agent names and
+    derive the failed status label — the exact info that was missing when
+    a run 'failed on multiple fronts' and looked like noise."""
+    from data import state as state_db
+
+    db = tmp_path / "mc.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    _seed_failed_run(db, state_db)
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+
+    # Find the runs table among the page's dataframes: it has a 'cost' col.
+    runs_df = None
+    for el in at.dataframe:
+        try:
+            if "cost" in list(el.value.columns):
+                runs_df = el.value
+                break
+        except Exception:
+            continue
+    assert runs_df is not None, "runs table with a 'cost' column not rendered"
+    row = runs_df.iloc[0]
+    assert "failed" in row["status"]
+    assert "filings" in row["failed agents"]
+    assert row["cost"] == "$0.0600"
+    assert row["errors"] == 1
+    # Spend-today metric present.
+    assert any("Spend today" in (m.label or "") for m in at.metric)
+
+
+def test_mission_control_degraded_status_label():
+    """Completed run + failed node or soft error → 'degraded', never a
+    healthy-looking 'completed'."""
+    import importlib
+
+    mc = importlib.import_module("ui.pages.mission_control")
+    assert "degraded" in mc._run_status_label(
+        {"status": "completed", "failed_nodes": 1, "n_errors": 0}
+    )
+    assert "degraded" in mc._run_status_label(
+        {"status": "completed", "failed_nodes": 0, "n_errors": 2}
+    )
+    assert "completed" in mc._run_status_label(
+        {"status": "completed", "failed_nodes": 0, "n_errors": 0}
+    )
+    assert "failed" in mc._run_status_label({"status": "failed"})
+
+
+def test_run_inspector_renders_trace_timeline_and_banner(tmp_path, monkeypatch):
+    """The inspector must render the failure banner, agent timeline, and
+    the local LLM call trace for a failed run."""
+    from data import state as state_db
+
+    db = tmp_path / "ri.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    _seed_failed_run(db, state_db)
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "run_inspector.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+
+    # Failure banner names the failed agent.
+    banner = " ".join(e.value for e in at.error)
+    assert "filings" in banner
+    assert "1 of 2 agents failed" in banner
+
+    # Trace + timeline sections present.
+    markdown_blob = " ".join(m.value for m in at.markdown)
+    assert "LLM call trace" in markdown_blob
+    assert "Agent timeline" in markdown_blob
+    # One expander per LLM call, labelled with the node.
+    assert any("fundamentals" in (x.label or "") for x in at.expander)
+
+
+def test_run_inspector_preselects_run_from_session_state(tmp_path, monkeypatch):
+    """Mission Control's row-click hands over `inspect_run_id` via session
+    state — the inspector must open on THAT run, not the newest."""
+    import time as _time
+
+    from data import state as state_db
+
+    db = tmp_path / "ri2.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    older = _seed_failed_run(db, state_db)
+    _time.sleep(0.02)  # distinct started_at so ordering is deterministic
+    newer = state_db.start_graph_run("NU", "nu", db_path=db)
+    state_db.finish_graph_run(newer, "completed", db_path=db)
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "run_inspector.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.session_state["inspect_run_id"] = older
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    sel = next((sb for sb in at.selectbox if sb.label == "Run"), None)
+    assert sel is not None
+    assert older[:8] in (sel.value or ""), (
+        f"expected preselected run {older[:8]}, got {sel.value!r}"
+    )
+
+
+def test_run_inspector_shows_cio_trigger_line(tmp_path, monkeypatch):
+    """A run drilled by the CIO must show the 'triggered by CIO' backlink
+    in the header; the helper is unit-tested directly."""
+    import importlib
+
+    from data import state as state_db
+
+    db = tmp_path / "ri3.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    cycle = state_db.start_cio_run("heartbeat", db_path=db)
+    run_id = state_db.start_graph_run("NU", "nu", db_path=db)
+    state_db.record_cio_action(
+        ticker="NU", thesis="nu", action="drill", cio_run_id=cycle,
+        drill_run_id=run_id, confidence="high", db_path=db,
+    )
+    state_db.finish_graph_run(run_id, "completed", db_path=db)
+
+    ri = importlib.import_module("ui.pages.run_inspector")
+    line = ri._trigger_line(run_id)
+    assert "CIO heartbeat" in line
+    assert "drill" in line
+    # Manual runs fall back to the manual label.
+    manual = state_db.start_graph_run("EME", "construction", db_path=db)
+    assert "manual" in ri._trigger_line(manual)
