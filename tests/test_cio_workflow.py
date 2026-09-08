@@ -87,7 +87,7 @@ def _stale_report(ticker: str, edgar_date: str = "2026-08-05"):
 
     return FreshnessReport(
         ticker=ticker, is_stale=True,
-        per_form=[FormDiff(form="10-Q", edgar_date=edgar_date, chroma_date=None, behind_days=0)],
+        per_form=[FormDiff(form="10-Q", edgar_date=edgar_date, ingested_date=None, behind_days=0)],
     )
 
 

@@ -1,4 +1,4 @@
-"""Backfill the `synthesis_reports` ChromaDB collection from past drill-in
+"""Backfill the `synthesis_reports` corpus (Pinecone reports index) from past drill-in
 reports on disk (`data_cache/demos/*.json`).
 
 The CIO planner (Step 11.8) does RAG over past drill-ins to support its
@@ -12,7 +12,7 @@ This script:
   2. Splits the `report` markdown on H2 headers — each section becomes a
      chunk so the planner can retrieve at the section level (e.g. the
      "Top risks" section without the bull bullets).
-  3. Embeds + upserts into the `synthesis_reports` collection. Idempotent:
+  3. Embeds + upserts into the reports index. Idempotent:
      re-running upserts the same chunk ids and overwrites in place.
 
 Filename convention:
@@ -42,11 +42,10 @@ from pathlib import Path
 # Bootstrap so this can be run as a standalone script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from data.chroma import _get_collection
+from data.vectors import upsert_reports
 from utils import logger
 
 REPORTS_DIR = Path("data_cache/demos")
-COLLECTION_NAME = "synthesis_reports"
 
 # Section split: H2 headers of the synthesis Markdown (`## What this means`, ...).
 # `(?m)` so `^` matches any line start. `(?P<title>...)` captures the heading.
@@ -120,10 +119,10 @@ def _build_metadata(
     data: dict,
     file_mtime: str,
 ) -> dict:
-    """ChromaDB metadata for a single section chunk.
+    """Metadata for a single section chunk.
 
-    All values must be primitives (str / int / float / bool / None) — Chroma
-    rejects nested dicts. None values are dropped (Chroma also rejects None).
+    All values must be primitives (str / int / float / bool) — Pinecone
+    rejects nested dicts and nulls, so None values are dropped.
     """
     rep = data.get("report") or ""
     date_match = _DATE_RE.search(rep)
@@ -207,8 +206,7 @@ def index_one(path: Path, *, dry_run: bool = False) -> int:
         )
         return len(docs)
 
-    coll = _get_collection(name=COLLECTION_NAME)
-    coll.upsert(ids=ids, documents=docs, metadatas=metas)
+    upsert_reports(ids, docs, metas)
     logger.info(
         f"[index_existing_reports] {path.name}: indexed {len(docs)} chunks "
         f"({ticker} / {thesis})"
@@ -220,7 +218,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Parse + chunk but don't write to ChromaDB.",
+        help="Parse + chunk but don't write to the index.",
     )
     parser.add_argument(
         "--reports-dir", default=str(REPORTS_DIR),

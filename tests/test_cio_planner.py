@@ -2,7 +2,7 @@
 
 The LLM call is stubbed in every test so this suite is deterministic and
 runs in <1s. RAG retrieval is also stubbed because the synthesis_reports
-collection depends on the live ChromaDB state.
+collection depends on the live the filings index state.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def isolated_db(tmp_path, monkeypatch):
 @pytest.fixture
 def stub_external(monkeypatch):
     """Stub RAG + Notion + EDGAR file-walks so planner tests don't hit
-    Chroma / Notion / disk."""
+    Pinecone / Notion / disk."""
     from cio import memory as cio_memory
     from cio import rag as cio_rag
 
@@ -511,7 +511,7 @@ def test_build_evidence_bundle_includes_watchlist_fields(isolated_db, monkeypatc
 
 
 def test_build_evidence_bundle_empty_watchlist_when_no_chunk(isolated_db, monkeypatch):
-    """When ChromaDB has no Watchlist chunk for the pair (cold start),
+    """When the filings index has no Watchlist chunk for the pair (cold start),
     bundle still has the keys but the lists are empty."""
     from cio import rag as cio_rag
     from cio import memory as cio_memory
@@ -727,10 +727,10 @@ def test_guard_no_longer_self_locks_over_a_week(isolated_db, stub_external, monk
 # --- EDGAR-index freshness as gate evidence (2026-09-07) ------------------
 
 
-def _freshness(ticker: str, *, edgar_date: str, form: str = "10-Q", chroma_date=None):
+def _freshness(ticker: str, *, edgar_date: str, form: str = "10-Q", ingested_date=None):
     from data.freshness import FormDiff, FreshnessReport
 
-    diff = FormDiff(form=form, edgar_date=edgar_date, chroma_date=chroma_date, behind_days=0)
+    diff = FormDiff(form=form, edgar_date=edgar_date, ingested_date=ingested_date, behind_days=0)
     return FreshnessReport(ticker=ticker, is_stale=True, per_form=[diff])
 
 
@@ -774,7 +774,7 @@ def test_bundle_carries_edgar_freshness(isolated_db, stub_external, monkeypatch)
     ef = captured["edgar_freshness"]
     assert ef["is_stale"] is True
     assert ef["stale_forms"] == [
-        {"form": "10-Q", "edgar_date": "2026-08-05", "chroma_date": None, "behind_days": 0}
+        {"form": "10-Q", "edgar_date": "2026-08-05", "ingested_date": None, "behind_days": 0}
     ]
 
     planner.decide(ticker="NVDA", thesis={"slug": "ai_cake"}, edgar_freshness=None)

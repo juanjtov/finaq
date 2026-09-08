@@ -1,4 +1,4 @@
-"""Bulk download SEC filings and ingest into ChromaDB.
+"""Bulk download SEC filings and ingest into the filings index.
 
 The Filings agent's RAG index is empty for any ticker not ingested here.
 A drill-in on a missing ticker will return `errors=["no chunks retrieved"]`
@@ -24,8 +24,8 @@ import json
 import sys
 from pathlib import Path
 
-from data.chroma import ingest_filing
 from data.edgar import download_filings
+from data.vectors import ingest_filing
 from utils import logger
 
 THESES_DIR = Path("theses")
@@ -62,9 +62,7 @@ def _all_tickers() -> list[str]:
 def _thesis_tickers(slug: str) -> list[str]:
     universes = _load_all_thesis_universes()
     if slug not in universes:
-        raise SystemExit(
-            f"Thesis '{slug}' not found. Available: {sorted(universes.keys())}"
-        )
+        raise SystemExit(f"Thesis '{slug}' not found. Available: {sorted(universes.keys())}")
     return [t.upper() for t in universes[slug]]
 
 
@@ -98,9 +96,7 @@ async def main(tickers: list[str]) -> None:
             grand_total += await ingest_ticker(ticker)
         except Exception as e:
             logger.error(f"{ticker}: ingest failed: {e}")
-    logger.info(
-        f"Done. Grand total: {grand_total} chunks across {len(tickers)} tickers."
-    )
+    logger.info(f"Done. Grand total: {grand_total} chunks across {len(tickers)} tickers.")
 
 
 # --- CLI -------------------------------------------------------------------

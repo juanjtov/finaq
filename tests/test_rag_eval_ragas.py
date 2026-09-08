@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from agents.filings import _build_subqueries, _retrieve_for_subquery, run
-from data.chroma import query
+from data.vectors import query
 from utils.rag_eval import write_eval_run
 from utils.schemas import FilingsOutput
 
@@ -41,7 +41,7 @@ def _require_keys_and_corpus():
         pytest.skip("MODEL_JUDGE not set in .env (see .env.example)")
     chunks = query("NVDA", "anything", k=1)
     if not chunks:
-        pytest.skip("ChromaDB has no NVDA corpus; run data-layer integration first")
+        pytest.skip("the filings index has no NVDA corpus; run data-layer integration first")
 
 
 @pytest.mark.asyncio

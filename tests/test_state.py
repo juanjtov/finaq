@@ -302,12 +302,12 @@ def test_record_node_run_with_failure(tmp_path: Path):
         st._now_iso(),
         0.1,
         "failed",
-        error="ChromaDB connection refused",
+        error="the filings index connection refused",
         db_path=db,
     )
     rows = st.all_node_runs_for(run_id, db_path=db)
     assert rows[0]["status"] == "failed"
-    assert "ChromaDB" in rows[0]["error"]
+    assert "the filings index" in rows[0]["error"]
 
 
 def test_record_node_run_rejects_unknown_status(tmp_path: Path):
@@ -443,12 +443,12 @@ def test_record_triage_run_round_trip(tmp_path: Path):
 
 def test_record_error_round_trip(tmp_path: Path):
     db = tmp_path / "test.db"
-    eid = st.record_error("filings", "ChromaDB unreachable", db_path=db)
+    eid = st.record_error("filings", "the filings index unreachable", db_path=db)
     assert eid > 0
     rows = st.recent_errors(db_path=db)
     assert len(rows) == 1
     assert rows[0]["agent"] == "filings"
-    assert "ChromaDB" in rows[0]["message"]
+    assert "the filings index" in rows[0]["message"]
 
 
 def test_record_error_with_run_id_links(tmp_path: Path):
@@ -1098,3 +1098,50 @@ def test_llm_calls_for_run_tolerates_pre_v6_db(tmp_path: Path):
             ).fetchall()
         }
     assert "llm_calls" not in names
+
+
+# --- ingested_filings manifest (schema v7) -----------------------------------
+
+
+def test_ingested_filings_manifest_round_trip(tmp_path: Path):
+    """`record_ingested_filing` upserts per (ticker, accession); reads come
+    back newest filed_date first; the chunk probe distinguishes 'never
+    ingested' (None) from 'ingested with N chunks'."""
+    db = tmp_path / "test.db"
+    assert st.ingested_filings("NKE", db_path=db) == []
+    assert st.ingested_filing_chunks("NKE", "acc-1", db_path=db) is None
+
+    st.record_ingested_filing(
+        ticker="nke", accession="acc-1", filing_type="10-K",
+        filed_date="2025-07-24", chunks=310, db_path=db,
+    )
+    st.record_ingested_filing(
+        ticker="NKE", accession="acc-2", filing_type="10-Q",
+        filed_date="2025-10-01", chunks=120, db_path=db,
+    )
+    # Re-ingest of the same accession replaces the row (new chunk count).
+    st.record_ingested_filing(
+        ticker="NKE", accession="acc-1", filing_type="10-K",
+        filed_date="2025-07-24", chunks=305, db_path=db,
+    )
+
+    rows = st.ingested_filings("nke", db_path=db)
+    assert [(r["accession"], r["chunks"]) for r in rows] == [("acc-2", 120), ("acc-1", 305)]
+    assert all(r["ticker"] == "NKE" and r["ingested_at"] for r in rows)
+    assert st.ingested_filing_chunks("NKE", "acc-1", db_path=db) == 305
+
+
+def test_ingest_manifest_summary(tmp_path: Path):
+    db = tmp_path / "test.db"
+    empty = st.ingest_manifest_summary(db_path=db)
+    assert empty == {"tickers": 0, "filings": 0, "chunks": 0, "last_ingested_at": None}
+
+    st.record_ingested_filing(
+        ticker="NKE", accession="a", filing_type="10-K", filed_date="", chunks=10, db_path=db
+    )
+    st.record_ingested_filing(
+        ticker="COUR", accession="b", filing_type="10-Q", filed_date="", chunks=5, db_path=db
+    )
+    summary = st.ingest_manifest_summary(db_path=db)
+    assert (summary["tickers"], summary["filings"], summary["chunks"]) == (2, 2, 15)
+    assert summary["last_ingested_at"]

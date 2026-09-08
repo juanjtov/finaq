@@ -14,7 +14,7 @@ For each `(ticker, thesis)` candidate the CIO decides one of:
 Module map:
   - `cio.memory`     — domain layer over `data.state` + `data.notion` (cooldown,
                        recent actions, user notes).
-  - `cio.rag`        — RAG over the `synthesis_reports` ChromaDB collection
+  - `cio.rag`        — RAG over the `synthesis_reports` corpus (Pinecone reports index)
                        (past drill-ins, indexed by `scripts/index_existing_reports`).
   - `cio.planner`    — gates + LLM `decide()` per pair → `CIODecision`.
   - `cio.cio`        — orchestrator: sweep candidates, propose plan, execute,
@@ -22,7 +22,7 @@ Module map:
   - `cio.notify`     — exec-summary composer + Telegram/Notion sends. (Step 11.10)
   - `cio.dispatcher` — cron CLI + Telegram /cio handler entry. (Step 11.10)
 
-Public surface — kept thin to avoid pulling LLM / Chroma at import time.
+Public surface — kept thin to avoid pulling LLM / vector-store clients at import time.
 Submodule references are deferred via `from cio.<mod> import <symbol>` inside
 the consumer.
 """

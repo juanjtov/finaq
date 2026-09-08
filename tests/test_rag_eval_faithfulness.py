@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from agents.filings import _build_subqueries, _retrieve_for_subquery, run
-from data.chroma import query
+from data.vectors import query
 from utils.rag_eval import check_faithfulness, write_eval_run
 from utils.schemas import FilingsOutput
 
@@ -38,7 +38,7 @@ def _require_keys_and_corpus():
         pytest.skip("OPENROUTER_API_KEY not set")
     chunks = query("NVDA", "anything", k=1)
     if not chunks:
-        pytest.skip("ChromaDB has no NVDA corpus; run data-layer integration first")
+        pytest.skip("the filings index has no NVDA corpus; run data-layer integration first")
 
 
 @pytest.mark.asyncio
@@ -58,7 +58,7 @@ async def test_filings_synthesis_is_grounded_in_retrieved_chunks():
     out = FilingsOutput.model_validate(result["filings"])
 
     if out.errors and any("no chunks" in e for e in out.errors):
-        pytest.skip("ChromaDB has no NVDA chunks; run data-layer integration first")
+        pytest.skip("the filings index has no NVDA chunks; run data-layer integration first")
 
     faith = check_faithfulness(
         mdna_quotes=[q.model_dump() for q in out.mdna_quotes],

@@ -3,7 +3,7 @@
 The CLI under test:
   - `data.yfin.get_financials(ticker, as_of=...)` — yfinance filtering
   - `data.edgar._existing_filings(ticker, kind, as_of=...)` — file-mtime / SGML-header gate
-  - `data.chroma._build_where_clause(..., as_of=...)` — ChromaDB metadata filter
+  - `data.vectors._build_filter(..., as_of=...)` — Pinecone metadata filter
   - `data.treasury.get_10y_treasury_yield(as_of=...)` — historical FRED-style lookup
 
 Each test proves the gate actually drops post-as_of data and that the
@@ -12,7 +12,6 @@ production path (`as_of=None`) is unchanged.
 
 from __future__ import annotations
 
-import json
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -180,59 +179,29 @@ def test_edgar_existing_filings_drops_undated_in_backtest_mode(tmp_path, monkeyp
     assert len(bt) == 1, "backtest drops the undated filing"
 
 
-# --- ChromaDB ---------------------------------------------------------------
+# --- Vector store -----------------------------------------------------------
 
 
-def test_chroma_where_clause_no_filed_date_filter():
-    """`_build_where_clause` no longer takes `as_of` — ChromaDB rejects
-    `$lte` on string operands. The cutoff is enforced post-query via
-    `_filter_by_as_of`. The where-clause builder produces only the
-    ticker + item_code filter (or None if both empty)."""
-    from data.chroma import _build_where_clause
+def test_vectors_filter_applies_as_of_cutoff_server_side():
+    """Backtest mode: the cutoff is a metadata filter on `filed_date_int`
+    (YYYYMMDD) so post-as_of chunks never enter the candidate pool, and the
+    `$gte: 1` bound keeps undated chunks out (conservative posture, same as
+    `data/edgar._existing_filings`)."""
+    from data.vectors import _build_filter
 
-    where = _build_where_clause("INTC", "1A")
-    assert "$and" in where
-    conds = where["$and"]
-    assert {"ticker": "INTC"} in conds
-    assert {"item_code": "1A"} in conds
-    serialised = json.dumps(where)
-    assert "filed_date" not in serialised
-    assert "$lte" not in serialised
+    f = _build_filter("1A", as_of="2025-09-05")
+    assert f == {
+        "item_code": {"$eq": "1A"},
+        "filed_date_int": {"$gte": 1, "$lte": 20250905},
+    }
 
 
-def test_chroma_where_clause_returns_none_when_no_filters():
-    """No ticker + no item_filter → no where clause."""
-    from data.chroma import _build_where_clause
+def test_vectors_filter_is_none_in_production_without_item_filter():
+    """Production path (`as_of=None`) adds no date bound at all."""
+    from data.vectors import _build_filter
 
-    assert _build_where_clause(None, None) is None
-
-
-def test_chroma_filter_by_as_of_drops_post_cutoff_chunks():
-    """The Python-side post-filter drops chunks whose filed_date > as_of
-    and chunks with no filed_date (conservative posture in backtest)."""
-    from data.chroma import _filter_by_as_of
-
-    chunks = [
-        {"text": "old", "metadata": {"filed_date": "2024-12-01"}},
-        {"text": "edge", "metadata": {"filed_date": "2025-09-05"}},  # equal — kept
-        {"text": "post", "metadata": {"filed_date": "2025-11-12"}},  # dropped
-        {"text": "undated", "metadata": {}},  # dropped
-    ]
-    kept = _filter_by_as_of(chunks, as_of="2025-09-05")
-    texts = [c["text"] for c in kept]
-    assert texts == ["old", "edge"]
-
-
-def test_chroma_filter_by_as_of_passthrough_when_as_of_none():
-    """Production path (`as_of=None`) returns the chunks unchanged — even
-    chunks with malformed or missing filed_date metadata."""
-    from data.chroma import _filter_by_as_of
-
-    chunks = [
-        {"text": "a", "metadata": {"filed_date": "2025-01-01"}},
-        {"text": "b", "metadata": {}},
-    ]
-    assert _filter_by_as_of(chunks, as_of=None) == chunks
+    assert _build_filter(None, None) is None
+    assert _build_filter(None, as_of=None) is None
 
 
 # --- Treasury ---------------------------------------------------------------
@@ -489,14 +458,14 @@ def test_agents_thread_as_of_to_data_layer(monkeypatch):
     # --- Filings
     from agents import filings as fl
 
-    def _stub_chroma(ticker, question, *, k, item_filter, candidate_pool, use_keyword=True, as_of=None):
+    def _stub_vector_query(ticker, question, *, k, item_filter, candidate_pool, use_keyword=True, as_of=None):
         captured.setdefault("filings", []).append({"as_of": as_of})
         return []
 
-    monkeypatch.setattr(fl, "chroma_query", _stub_chroma)
+    monkeypatch.setattr(fl, "vector_query", _stub_vector_query)
 
     asyncio.run(fl.run({"ticker": "INTC", "thesis": {}, "as_of_date": "2025-09-05"}))
-    assert captured["filings"], "filings.run did not call chroma_query"
+    assert captured["filings"], "filings.run did not call vector_query"
     assert all(c["as_of"] == "2025-09-05" for c in captured["filings"])
 
     # --- News

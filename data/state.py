@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 DB_PATH = Path("data_cache/state.db")
-SCHEMA_VERSION = 6  # llm_calls — per-call trace rows with truncated prompt/response excerpts
+SCHEMA_VERSION = 7  # ingested_filings — manifest of what the vector store holds per ticker
 
 # Prompt / response excerpts stored per LLM call are clipped to this many
 # characters. Full traces live in LangSmith when tracing is on; the local
@@ -169,6 +169,16 @@ CREATE TABLE IF NOT EXISTS errors (
 -- during that cycle: drill / reuse / dismiss. The dispatcher writes one
 -- cio_runs row per cycle; the planner writes one cio_actions row per
 -- decision. Mission Control reads both to render "last 20 actions".
+CREATE TABLE IF NOT EXISTS ingested_filings (
+    ticker       TEXT    NOT NULL,
+    accession    TEXT    NOT NULL,
+    filing_type  TEXT    NOT NULL,
+    filed_date   TEXT    NOT NULL DEFAULT '',   -- ISO date from the SGML header; '' if unparsed
+    chunks       INTEGER NOT NULL,
+    ingested_at  TEXT    NOT NULL,
+    PRIMARY KEY (ticker, accession)
+);
+
 CREATE TABLE IF NOT EXISTS cio_runs (
     run_id          TEXT PRIMARY KEY,
     trigger         TEXT NOT NULL,                -- heartbeat | on_demand | catchup
@@ -532,6 +542,77 @@ def record_error(
             (_now_iso(), agent, message, run_id),
         )
         return cur.lastrowid or 0
+
+
+# --- Vector-store ingest manifest -------------------------------------------
+# Which filings are in the Pinecone filings index, with how many chunks. The
+# freshness gate and the "is this ticker ingested?" probes read this instead
+# of the index so that dozens of per-ticker checks per CIO cycle stay local.
+
+
+def record_ingested_filing(
+    *,
+    ticker: str,
+    accession: str,
+    filing_type: str,
+    filed_date: str,
+    chunks: int,
+    db_path: Path | None = None,
+) -> None:
+    """Upsert one filing's manifest row after its vectors landed."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO ingested_filings
+                (ticker, accession, filing_type, filed_date, chunks, ingested_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ticker.upper(), accession, filing_type, filed_date or "", chunks, _now_iso()),
+        )
+
+
+def ingested_filings(ticker: str, *, db_path: Path | None = None) -> list[dict]:
+    """Manifest rows for `ticker`, newest filed_date first."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM ingested_filings WHERE ticker = ? ORDER BY filed_date DESC",
+            (ticker.upper(),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def ingested_filing_chunks(
+    ticker: str, accession: str, *, db_path: Path | None = None
+) -> int | None:
+    """Chunk count recorded for one (ticker, accession), or None if never ingested."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT chunks FROM ingested_filings WHERE ticker = ? AND accession = ?",
+            (ticker.upper(), accession),
+        ).fetchone()
+    return int(row["chunks"]) if row else None
+
+
+def ingest_manifest_summary(*, db_path: Path | None = None) -> dict:
+    """Mission Control card: how much of the filings index the manifest covers."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT ticker) AS tickers, COUNT(*) AS filings,
+                   COALESCE(SUM(chunks), 0) AS chunks, MAX(ingested_at) AS last_ingested_at
+            FROM ingested_filings
+            """
+        ).fetchone()
+    return {
+        "tickers": int(row["tickers"]),
+        "filings": int(row["filings"]),
+        "chunks": int(row["chunks"]),
+        "last_ingested_at": row["last_ingested_at"],
+    }
 
 
 # --- Queries ----------------------------------------------------------------

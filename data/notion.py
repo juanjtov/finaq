@@ -3,7 +3,7 @@
 Five functions, all env-var-gated — if `NOTION_API_KEY` isn't set every call
 is a no-op so the rest of FINAQ works exactly as today (cached state on
 disk, dashboard renders, etc.). Notion is **content** memory, distinct
-from `data_cache/state.db` (operations) and ChromaDB (vector store).
+from `data_cache/state.db` (operations) and the filings index (vector store).
 
 Public API
 ----------

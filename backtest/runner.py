@@ -53,7 +53,7 @@ async def run_backtest(
     logger.info(f"[backtest] {ticker} → thesis={slug!r} as_of={as_of_date}")
 
     # 2. Filings auto-ingest if corpus empty (production mode — captures
-    #    everything; the per-call as_of filter on chroma.query handles the
+    #    everything; the per-call as_of filter on vectors.query handles the
     #    historical posture for retrieval).
     await _ensure_filings_ingested(ticker)
 
@@ -107,7 +107,7 @@ async def run_backtest(
 async def _ensure_filings_ingested(ticker: str) -> None:
     """If `ticker` has zero chunks in the filings collection, download +
     ingest first. Production-mode ingestion (no as_of) — the per-call
-    `chroma.query(..., as_of=...)` filter does the date filtering at
+    `vectors.query(..., as_of=...)` filter does the date filtering at
     retrieval time, which is the right place.
 
     Backtest mode in `data.edgar.download_filings` refuses to fetch from
@@ -115,13 +115,11 @@ async def _ensure_filings_ingested(ticker: str) -> None:
     as_of. The metadata `filed_date` per chunk is what the as_of filter
     uses.
     """
-    from data.chroma import _get_collection, ingest_filing
-    from data.edgar import DEFAULT_LIMITS, download_filings
+    from data.edgar import download_filings
+    from data.vectors import has_ticker, ingest_filing
 
-    coll = _get_collection()
-    probe = coll.get(where={"ticker": ticker.upper()}, limit=1, include=[])
-    if probe.get("ids"):
-        logger.info(f"[backtest] {ticker}: filings already in chroma — skipping ingest")
+    if has_ticker(ticker):
+        logger.info(f"[backtest] {ticker}: filings already indexed — skipping ingest")
         return
 
     logger.info(f"[backtest] {ticker}: filings corpus empty — ingesting now (no as_of)")

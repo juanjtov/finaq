@@ -28,7 +28,7 @@ Three categories:
 | 10 | **Telegram bot (bidirectional)** | Slash commands + LLM-driven NL routing (model resolved via `MODEL_ROUTER`). `/drill`, `/analyze` (ad-hoc thesis Discovery-lite), `/scan`, `/note`, `/thesis`, `/status`, `/help`. Allowlist enforced. |
 | ~~11~~ | ~~Triage agent + scheduling~~ | **Replaced by CIO meta-layer** — see ARCHITECTURE §12 + the CIO entries in §2 below. The CIO is decision-making (drill / reuse / dismiss) instead of signal-extraction (alert / no-alert), which fits the user's actual ask better. Heartbeat schedule (5am + 1pm PT) lives in `deploy/launchd/com.finaq.cio.plist`. |
 | 12 | **Droplet deployment** | DigitalOcean $6/mo droplet, Caddy HTTPS, three systemd units, `deploy/install.sh`. Supersedes the Cloudflare Tunnel option. |
-| 13 | **Backtest harness** | Plumb `as_of_date` through `data/{edgar,yfin,chroma,news}.py` + all 5 agents so a drill-in can be run "as of" a historical date. Pick 4–6 dates × 5–10 tickers (e.g. Sept 1 2024, Dec 1 2024, Mar 1 2025, Jun 1 2025, Sept 1 2025), drill at each, compare predicted P10/P50/P90 vs today's actual price. Surface metrics: hit rate (band coverage), bias (P50 − actual), calibration. **Critical:** switch backtest model strings to one whose training cutoff predates `as_of_date` (otherwise the LLM has forward-leaked knowledge — the user explicitly plans for this by picking 2025-09-01 and routing those runs through earlier models). Lands as `python -m scripts.backtest --as-of 2025-09-01 --tickers NVDA,DELL,…` + a JSON report + Mission Control panel. |
+| 13 | **Backtest harness** | Plumb `as_of_date` through `data/{edgar,yfin,vectors,news}.py` + all 5 agents so a drill-in can be run "as of" a historical date. Pick 4–6 dates × 5–10 tickers (e.g. Sept 1 2024, Dec 1 2024, Mar 1 2025, Jun 1 2025, Sept 1 2025), drill at each, compare predicted P10/P50/P90 vs today's actual price. Surface metrics: hit rate (band coverage), bias (P50 − actual), calibration. **Critical:** switch backtest model strings to one whose training cutoff predates `as_of_date` (otherwise the LLM has forward-leaked knowledge — the user explicitly plans for this by picking 2025-09-01 and routing those runs through earlier models). Lands as `python -m scripts.backtest --as-of 2025-09-01 --tickers NVDA,DELL,…` + a JSON report + Mission Control panel. |
 | 14 | **Champion/challenger model harness** | For each LLM-driven agent (start with the agents whose `MODEL_*` env var resolves to the most expensive tier — typically `MODEL_SYNTHESIS`, `MODEL_FILINGS`, `MODEL_ADHOC_THESIS`), run a fixed prompt suite through 2-3 candidate models in parallel. Score on three axes: **quality** (LLM-judge grade reusing the tier-2 RAG eval pipeline; 5 runs per challenger, fixed seed where supported, temperature=0), **cost** ($/run from token counts × OpenRouter pricing), **latency** (wall-clock time per call). Output: scatter plot (cost vs quality) and radar chart per agent showing the trade-off frontier. Champion stays the current `MODEL_*` env var; challenger results land in `data_cache/eval/champion_challenger/{date}__{agent}.json`. Mission Control gets a "Model selection" panel that ranks candidates. Manual promotion (you flip the env var); no auto-switch. CLI: `python -m scripts.champion_challenger --agent synthesis --challengers <model_id_a>,<model_id_b>`. Lands LAST, after Step 13 — needs the eval pipeline + backtest harness to be stable so comparisons are meaningful. |
 
 ### Mission-control surfaces (each unlocked by an existing build step)
@@ -50,33 +50,15 @@ Three categories:
 Each item has a **trigger**: the observable condition that should cause us to
 revisit. If the trigger never fires, we never build it.
 
-### chromadb Rust-client segfault (macOS) — durable fix
+### ~~chromadb Rust-client segfault (macOS)~~ — resolved
 
-**Status (2026-09-07):** chromadb 1.5.8/1.5.9's Rust binding segfaults the
-whole Python process (exit 139, no traceback) on this Mac when collection ops
-run inside Streamlit or pytest — the drill-time freshness probes
-(`has_ticker`, `last_filings_by_type`) added in the EDGAR freshness gate
-were killing the dashboard server on every page load. Reproduces
-deterministically on any thread created after `threading.stack_size(<any
-explicit value>)`; plain processes and default threads are fine.
-**Mitigations shipped:** all collection ops route through one dedicated
-default-stack worker with a process-cached PersistentClient
-(`data/chroma.py:_chroma_executor`), and unit tests stub the probe layer
-(`tests/conftest.py`) so the suite is hermetic and crash-free. The live
-Streamlit process still dies, so **set `FINAQ_SKIP_FRESHNESS_PROBES=1` in
-`.env`** until the durable fix lands: `check_ingest_freshness` then
-short-circuits to "unknown, not stale" (no EDGAR call, no Rust client), the
-UI/Telegram/CIO gates all soft-pass, and the dashboard renders normally.
-The cost while it's on: nothing warns you when the corpus trails EDGAR.
+**Resolved 2026-09-07** by moving the vector store to Pinecone serverless
+(ARCHITECTURE §3.5); `chromadb` is no longer a dependency and the
+`data_cache/chroma/` directory can be deleted. `FINAQ_SKIP_FRESHNESS_PROBES`
+survives as a plain operator kill-switch for the drill-time EDGAR freshness
+gate.
 
-| Option | Notes |
-|---|---|
-| **Version bisect + pin + re-ingest** | 1.0.21 cannot open the 1.5.x-migrated store (Rust panic on the migrations table), so any downgrade means re-ingesting the 7.2GB corpus (`scripts/ingest_universe.py`, embedding cost applies). |
-| **Subprocess isolation** | Run chroma ops in a worker subprocess (crash can't take down Streamlit). ~1 day; adds IPC + import latency per worker restart. |
-| **Upstream fix** | Watch chromadb releases/issues for a Rust-binding segfault fix on macOS; retest with the repro above (`threading.stack_size(512*1024)` + one `coll.get`). |
-
-**Trigger:** immediately — the dashboard crashes on pages that touch the
-freshness probes until one of these lands.
+---
 
 ### RAG / retrieval enhancements (within Step 5b's scope)
 
@@ -88,7 +70,7 @@ freshness probes until one of these lands.
 | **LLM-generated subqueries** (cheap-tier model rewrites the 3 subquery templates per thesis × ticker) | Ad-hoc `/analyze` (Step 10) or new theses produce shallow Filings synthesis with hardcoded templates. | 1 extra cheap-tier call per drill-in, ~$0.001 |
 | **Hybrid corpus expansion** (BM25 over the *full* ticker corpus, not just the 60 semantic candidates) | A known-relevant chunk is missed because it's outside the candidate pool. | Re-architect `query()` to fetch the whole filtered corpus first |
 | **Chunk-size tuning** (currently 800 tokens) | The Filings synthesis cites mid-sentence-cut chunks OR top-8 are clearly redundant from the same paragraph. | One-line constant change + re-ingest |
-| **Skip Items 15 + 16 (Exhibits / Form 10-K Summary) during chunking** — these items contain inline-XBRL taxonomy dumps that are machine-readable financial-statement tag definitions, NOT narrative. The chunker currently treats them as prose, embeds them, and they semantically match queries containing words like "segment / revenue / capex" with **zero narrative content**. Discovered 2026-05-08 from the live RAG eval: ORCL `segment_performance` retrieval scored p@k=0.00 because all 8 retrieved chunks were XBRL tag identifiers like `CloudServicesAndLicenseSupportRevenue`. ORCL's filing has 101 chunks in Item 15 vs 21 in Item 7 (MD&A) — the noise dominates anything semantically adjacent. Affects every large-cap that XBRL-stuffs Item 15 (likely most of them). | The user notices a low-quality drill rationale that quotes XBRL tag names as "evidence" OR `live_eval` p@k score for any subquery without an `item_filter` consistently lands below 0.3 due to Item 15 noise. | ~30 min: gate `_split_into_items` on Item code, drop "15" and "16". Re-ingest the universe (~10 min on cached EDGAR data, since the source filings are already on disk). Re-run `live_eval` on ORCL `segment_performance` to confirm p@k climbs above 0.5. |
+| ~~**Skip Items 15 + 16 (Exhibits / Form 10-K Summary) during chunking**~~ — **SHIPPED 2026-09-07**, superseded by primary-document extraction in `data/vectors.py`: only the form block (and EX-99 press releases) of each EDGAR submission is parsed, so XBRL taxonomy dumps, uuencoded graphics and exhibits never reach the chunker. They had been 94% of the corpus (312K of 333K chunks), labelled Item 16 / 6 / 19. | — | — |
 | **8-K (current report) ingest** — adds material-event filings (M&A, restructuring, earnings releases, executive changes) to the corpus alongside 10-K + 10-Q. | Filings agent misses time-sensitive events that News surfaces but 10-K/10-Q don't yet cover (e.g. mid-quarter capex announcement, leadership change). The current ingest scope is 10-K (annual) + 10-Q (quarterly) only — fine for trend analysis, weak for current-events coverage. | Add `"8-K"` to `data/edgar.DEFAULT_LIMITS`; bump default limits since 8-K is much more frequent (~1/month per ticker vs 1/quarter for 10-Q). Re-ingest universe. ~30 lines + re-ingest. |
 | ~~**20-F + 6-K (foreign issuer reports)**~~ — **SHIPPED B5 (2026-05-08).** Foreign issuer filings are now in `data/edgar.DEFAULT_LIMITS = {"10-K": 2, "10-Q": 4, "20-F": 2, "6-K": 4}`. The Filings agent transparently falls back to no-item-filter retrieval when 20-F's different item-code scheme (Item 3.D vs 1A; Item 5 vs 7) produces zero chunks under the primary subqueries. NU re-ingested + appears in backtest. **Defensive cap added the same day** (`_MAX_CHUNKS_PER_FILING = 6000`) after NU's 35MB 20-F generated 19,423 chunks and ate 84GB of disk on the HNSW index before being killed mid-ingest. SMCI's natural ~7,200 chunks lose ~1,200 trailing exhibits but the body sections stay intact. TSM and ASML can be re-ingested when needed; only NU was actually re-ingested for the backtest demo. |
 | **Auto-ingest on first miss** — when Filings sees zero chunks for a ticker, kick off `scripts.ingest_universe.ingest_ticker()` automatically and retry retrieval, instead of returning an `errors=[ticker_not_ingested]` payload + dashboard banner. | (a) The user repeatedly hits the dashboard's "📥 Ingest now" banner across multiple tickers and sessions — friction shows up in telemetry. (b) Phase 1 Telegram bot lacks a UI surface for the manual-ingest button, so a bot-driven `/drill TICKER` on a never-ingested ticker has no graceful path today. | Fundamentals.run() or a new pre-flight node detects `not has_ticker(ticker)` → calls `ingest_ticker()` synchronously → continues. Adds 5-10 min to the first drill-in for a new ticker. ~50 lines. Today's manual flow (banner + button in dashboard, scripts.ingest_universe in CLI) is the deliberate Phase 0 stand-in — keeps cost + time visible to the user. |
@@ -98,7 +80,7 @@ freshness probes until one of these lands.
 | Item | Trigger | Effort |
 |---|---|---|
 | **Hybrid universal-floor + thesis-spotlight golden queries** — today `tests/eval/golden_queries.py` and `tests/eval/news_golden_queries.py` are 100% NVDA. We can't tell whether retrieval works for ORCL, AVGO, CAT, etc., except via opportunistic live_eval scoring. The right shape is parametrized: a small set (~5) of universal queries (e.g. "primary growth drivers", "top stated risks", "operating margin trend", "concentration risks") applied to every ingested ticker, plus per-anchor thesis spotlights (NVDA/MSFT for ai_cake, CAT for construction, etc.). Each ticker carries its own `expected_substrings` tuple per universal query — adding a ticker = adding one row of expected substrings, no test code to write. Frame as a `UniversalGolden` dataclass that the runner walks cross-product against the ingested ticker list. | (a) The user wants a quality verdict for a non-NVDA ticker and the only available signal is the (probabilistic, expensive) tier-2 LLM-judge. (b) A drill-in on a non-NVDA ticker produces visibly poor synthesis and we can't tell whether retrieval is the cause. (c) We add a new ticker to a curated thesis and need an eval baseline before signing off. | ~2-3h: design the `UniversalGolden` dataclass, hand-write 5 universal queries with expected_substrings for the 22 currently-ingested tickers (skip TSM/ASML — foreign issuers; skip DDOG/CRM/MDB/OKTA until ingested), fold into the existing `pytest -m eval` runner. Re-run on every ticker; build a per-ticker dashboard panel in Mission Control showing recall@K + LLM-judge per ticker. |
-| **Ingest the 4 missing saas_universe tickers** (DDOG, CRM, MDB, OKTA) | The CIO regularly drills these without any filings RAG context — confirmed 2026-05-08 via per-ticker chunk probe (`data.chroma._get_collection().get(where={"ticker": ...})` returns 0). | ~30 min: `python -m scripts.ingest_universe --tickers DDOG,CRM,MDB,OKTA`. Verifies SEC filings exist for each; bumps the corpus + golden-query coverage. |
+| ~~**Ingest the 4 missing saas_universe tickers**~~ (DDOG, CRM, MDB, OKTA) — **Moot 2026-09-07**: the Pinecone corpus was seeded with NU / NKE / COUR only and every other ticker is ingested on demand by the drill-time freshness gate (~500-1,000 chunks per ticker, well inside the CIO's 90 s cap). | — | — |
 
 ### RAG evaluation enhancements (within Tier 1/2/3 already shipped — covers Filings AND News)
 
@@ -171,7 +153,7 @@ evidence channel.
 
 | Item | Trigger / phase | Notes |
 |---|---|---|
-| **Podcast indexer** (transcribe via Whisper, chunk + embed into a `podcast_transcripts` ChromaDB collection, surface to the CIO planner) | Phase 2 — when the CIO consistently misses signals that landed in earnings podcasts / Acquired-style deep-dives that aren't yet in news. | ~1–2 weeks: pick a podcast list (e.g. Acquired, BG2, All-In, company-specific earnings calls), pipeline Whisper transcription (CPU is enough at 15-min/hour-of-audio), chunk + embed, add a `podcast_excerpts` field to `build_evidence_bundle`. |
+| **Podcast indexer** (transcribe via Whisper, chunk + embed into a `podcast_transcripts` Pinecone namespace, surface to the CIO planner) | Phase 2 — when the CIO consistently misses signals that landed in earnings podcasts / Acquired-style deep-dives that aren't yet in news. | ~1–2 weeks: pick a podcast list (e.g. Acquired, BG2, All-In, company-specific earnings calls), pipeline Whisper transcription (CPU is enough at 15-min/hour-of-audio), chunk + embed, add a `podcast_excerpts` field to `build_evidence_bundle`. |
 | **Curated-author social feed (X/Twitter)** — an allowlist of analyst handles whose posts the CIO should consider as evidence | Phase 2 — when the user identifies ≥10 specific authors whose takes shape thesis decisions today (Damodaran, Stratechery, individual sell-side names). | ~1 week: X/Twitter API access (rate-limited, may need paid tier in 2026), pull tweets per author per day, summarise via Haiku-class LLM, surface as `recent_signals` in the bundle. |
 | **Bloomberg / WSJ / FT paid-feed integration** | Phase 2+ — when the user pays for a terminal subscription that licenses programmatic access AND the CIO's news coverage is demonstrably missing market-moving stories the paid feeds catch. Today's Tavily covers free web; firewalled stories don't land. | ~2-3 days per source after license + API auth lands: same shape as Tavily — pulling top-N headlines per ticker per day. |
 
@@ -203,7 +185,7 @@ re-decision, not a drift.
 | **LangGraph Cloud / Platform deployment** | Local-first per CLAUDE.md §2. `langgraph dev` runs locally; cloud deployment is the only outbound option ruled out. |
 | **Cloudflare Tunnel for Streamlit reachability** | Dropped from Step 12 once the user committed to the droplet. Tunnel is a "laptop-awake" stopgap; droplet is the real answer. |
 | **Multi-tenant / multi-user** | FINAQ runs as `juan`. No auth, no users table. Ever. |
-| **Hosted vector DB** (Pinecone, Weaviate Cloud) | ChromaDB on local disk works at our scale. Cloud vector DB adds bill, latency, dependency. |
+| ~~**Hosted vector DB**~~ | **Reversed 2026-09-07** — Pinecone serverless (free Starter tier) is now the vector store; the local ChromaDB store had grown to 7.2 GB and was crashing the dashboard. See ARCHITECTURE §3.5. |
 | **Cron / Celery / Airflow** | Two scheduled jobs (Triage, daily backups) don't justify a workflow engine. systemd timers are the right tool. |
 | **Pyproject.toml as dependency manifest** | Replaced by `requirements.txt` per CLAUDE.md §16.3. `pyproject.toml` is kept for tool config only. |
 

@@ -417,11 +417,11 @@ async def test_ask_returns_graceful_failure_when_llm_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ask_filings_returns_no_data_when_chroma_empty(monkeypatch):
-    """When ChromaDB returns no chunks for the ticker, we surface that
+async def test_ask_filings_returns_no_data_when_index_empty(monkeypatch):
+    """When the filings index returns no chunks for the ticker, we surface that
     explicitly rather than asking the LLM to answer over no context."""
 
-    monkeypatch.setattr("data.chroma.query", lambda *a, **kw: [])
+    monkeypatch.setattr("data.vectors.query", lambda *a, **kw: [])
 
     state = _state_with()  # ticker NVDA, no filings in state — that's fine for ask path
     out = await ask(state, "filings", "what about export controls?")
@@ -433,7 +433,7 @@ async def test_ask_filings_propagates_llm_when_chunks_present(monkeypatch):
     from agents import qa
 
     monkeypatch.setattr(
-        "data.chroma.query",
+        "data.vectors.query",
         lambda *a, **kw: [
             {
                 "text": "Capacity constraints persist across leading-edge nodes.",
@@ -465,12 +465,12 @@ async def test_ask_filings_propagates_llm_when_chunks_present(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ask_filings_handles_chroma_failure(monkeypatch):
-    """ChromaDB raise → tenacity retry → finally surfaces in errors."""
+async def test_ask_filings_handles_index_failure(monkeypatch):
+    """the filings index raise → tenacity retry → finally surfaces in errors."""
 
     monkeypatch.setattr(
-        "data.chroma.query",
-        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("chroma down")),
+        "data.vectors.query",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("index down")),
     )
     state = _state_with()
     out = await ask(state, "filings", "anything?")

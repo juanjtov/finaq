@@ -1,4 +1,4 @@
-"""Hand-curated golden set for the `synthesis_reports` ChromaDB corpus.
+"""Hand-curated golden set for the `synthesis_reports` the filings index corpus.
 
 Each entry is a CIO-relevant question that should retrieve content from the
 right past drill-in section. We test recall@K — at least one expected
@@ -6,7 +6,7 @@ substring (case-insensitive) must appear somewhere in the top-K chunks.
 
 The corpus is populated by `scripts.index_existing_reports` from
 `data_cache/demos/*.json` — every section of every demo report becomes a
-ChromaDB chunk. This eval verifies the planner can find the right report
+the filings index chunk. This eval verifies the planner can find the right report
 section to fold into its decision prompt.
 
 Maintenance: when reports get rotated (older demos archived, newer ones

@@ -20,7 +20,7 @@ import os
 
 import pytest
 
-from data.chroma import query
+from data.vectors import query
 from tests.eval.golden_queries import GOLDEN_QUERIES, GoldenQuery, chunks_match_golden
 from utils.rag_eval import write_eval_run
 
@@ -33,7 +33,7 @@ def _require_keys_and_corpus():
         pytest.skip("OPENROUTER_API_KEY not set")
     chunks = query("NVDA", "anything", k=1)
     if not chunks:
-        pytest.skip("ChromaDB has no NVDA corpus; run data-layer integration first")
+        pytest.skip("the filings index has no NVDA corpus; run data-layer integration first")
 
 
 # --- Metadata pre-filter (must apply BEFORE retrieval) ----------------------

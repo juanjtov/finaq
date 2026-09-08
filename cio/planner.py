@@ -32,8 +32,8 @@ from pydantic import BaseModel, Field, ValidationError
 from cio import memory as cio_memory
 from cio import rag as cio_rag
 from data import state as state_db
-from data.chroma import _BM25_STOPWORDS
 from data.freshness import FreshnessReport
+from data.vectors import BM25_STOPWORDS
 from utils import logger
 from utils.models import MODEL_CIO
 from utils.openrouter import get_client
@@ -296,7 +296,7 @@ def _significant_keywords(s: str) -> set[str]:
     return {
         w
         for w in _WORD_RE_LOWER.findall(s.lower())
-        if w not in _BM25_STOPWORDS and len(w) >= _WATCHLIST_MIN_KEYWORD_LEN
+        if w not in BM25_STOPWORDS and len(w) >= _WATCHLIST_MIN_KEYWORD_LEN
     }
 
 
@@ -409,7 +409,7 @@ def _summarise_recent_filings(ticker: str, since_iso: str | None) -> list[dict]:
 
 
 def _summarise_freshness(report: FreshnessReport | None) -> dict | None:
-    """EDGAR-vs-ChromaDB freshness for the prompt. `stale_forms` lists
+    """EDGAR-vs-index freshness for the prompt. `stale_forms` lists
     filings EDGAR has that the local corpus lacks. A drill on the pair
     ingests them first, so the LLM should treat them as evidence that
     WILL be available, not evidence that is missing."""
@@ -422,7 +422,7 @@ def _summarise_freshness(report: FreshnessReport | None) -> dict | None:
             {
                 "form": d.form,
                 "edgar_date": d.edgar_date,
-                "chroma_date": d.chroma_date,
+                "ingested_date": d.ingested_date,
                 "behind_days": d.behind_days,
             }
             for d in report.stale_forms()

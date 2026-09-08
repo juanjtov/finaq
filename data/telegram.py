@@ -864,7 +864,7 @@ async def drill_command(
         await _send_thesis_choice_prompt(update, ticker, matches)
         return
     # Single thematic match — dispatch (with an ingest check first; if
-    # the ticker isn't in ChromaDB, the keyboard offers ingest-first).
+    # the ticker isn't in the filings index, the keyboard offers ingest-first).
     await _dispatch_drill_with_ingest_check(update.message, ticker, matches[0])
 
 
@@ -1418,7 +1418,7 @@ async def _run_analyze(
          per ticker
 
     Auto-drilling on `anchors[0]` (the previous behaviour) was removed
-    because LLM-suggested tickers often don't have filings in ChromaDB,
+    because LLM-suggested tickers often don't have filings in the filings index,
     producing incomplete drills with empty Filings sections. Forcing the
     user to pick the ticker AND the action explicitly fixes that.
     """
@@ -1517,7 +1517,7 @@ async def _send_freshness_keyboard(
     report,
 ) -> None:
     """Inline-keyboard prompt fired when EDGAR has newer filings than
-    ChromaDB. Reuses `_AA_PREFIX_INGEST` / `_AA_PREFIX_CANCEL` so the
+    the filings index. Reuses `_AA_PREFIX_INGEST` / `_AA_PREFIX_CANCEL` so the
     existing `analyze_action_callback` dispatcher routes the tap into
     `_run_ingest_then_drill` (which now passes `force_refresh=True`) or
     a cancellation reply — no new handler plumbing.
@@ -1528,14 +1528,14 @@ async def _send_freshness_keyboard(
         "",
     ]
     for diff in report.stale_forms():
-        if diff.chroma_date is None:
+        if diff.ingested_date is None:
             lines.append(
                 f"  • <b>{_h(diff.form)}</b>  missing → EDGAR "
                 f"<code>{_h(diff.edgar_date)}</code>"
             )
         else:
             lines.append(
-                f"  • <b>{_h(diff.form)}</b>  <code>{_h(diff.chroma_date)}</code> → "
+                f"  • <b>{_h(diff.form)}</b>  <code>{_h(diff.ingested_date)}</code> → "
                 f"<code>{_h(diff.edgar_date)}</code>  "
                 f"({diff.behind_days}d behind)"
             )
@@ -1569,7 +1569,7 @@ async def _dispatch_drill_with_ingest_check(
     thesis_slug: str,
 ) -> None:
     """Decide between silent drill-dispatch vs the ingest-action keyboard
-    based on whether the ticker has filings in ChromaDB.
+    based on whether the ticker has filings in the filings index.
 
     Three branches:
       - **Ingested** → silent dispatch. No extra tap; the happy path
@@ -1580,14 +1580,14 @@ async def _dispatch_drill_with_ingest_check(
       - **Supported but not ingested yet** → send the action keyboard
         so the user picks "Drill now (Filings empty)" vs "Ingest first,
         then drill". Closes the gap where `/drill FROG` (ad-hoc ticker
-        not in ChromaDB) would silently produce an inaccurate report.
+        not in the filings index) would silently produce an inaccurate report.
 
     Reuses the `_AA_PREFIX_*` callback prefixes from the /analyze flow so
     the same `analyze_action_callback` handler dispatches the tap — no
     duplicate handler code.
     """
-    from data.chroma import has_ticker
     from data.edgar import has_filings_in_unsupported_kinds
+    from data.vectors import has_ticker
 
     try:
         ingested = has_ticker(ticker)
@@ -1603,7 +1603,7 @@ async def _dispatch_drill_with_ingest_check(
         unsupported = []
 
     if ingested:
-        # Already in ChromaDB — before kicking off the drill, ask EDGAR
+        # Already in the filings index — before kicking off the drill, ask EDGAR
         # whether there's a newer filing we haven't ingested. Soft-fails:
         # if EDGAR is unreachable, we drill on whatever's local rather
         # than blocking on a transient outage.
@@ -1662,7 +1662,7 @@ async def _dispatch_drill_with_ingest_check(
         ],
     ]
     body = (
-        f"📥 <b>{_h(ticker)}</b> isn't ingested in ChromaDB yet. "
+        f"📥 <b>{_h(ticker)}</b> isn't ingested yet. "
         f"Filings RAG will return zero chunks unless you ingest first — "
         f"the drill-in's Filings section + thesis-aware bull/bear citations "
         f"would be empty otherwise.\n\n"
@@ -1684,14 +1684,14 @@ async def _send_analyze_action_keyboard(
     """Phase 3 of /analyze — the user picked a ticker; now ask whether
     to drill immediately or ingest filings first.
 
-    Status-aware: if the ticker is already ingested in ChromaDB, only
+    Status-aware: if the ticker is already ingested in the filings index, only
     "Drill now" appears (ingestion would be a no-op). If it's a foreign
     issuer (files 20-F/6-K), explain that ingestion won't help — only
     the drill-anyway option is offered. Otherwise both options appear.
     """
     # Check ingest status. Lazy imports keep the bot's startup snappy.
-    from data.chroma import has_ticker
     from data.edgar import has_filings_in_unsupported_kinds
+    from data.vectors import has_ticker
 
     try:
         ingested = has_ticker(ticker)
@@ -1921,11 +1921,11 @@ async def _run_ingest_then_drill(query, *, ticker: str, slug: str) -> None:
 
     Ingestion downloads recent 10-K/10-Q filings via SEC EDGAR, chunks
     each on Item headers, embeds via OpenRouter's `/v1/embeddings`, and
-    upserts to ChromaDB. ~5-10 minutes the first time per ticker;
+    upserts to the filings index. ~5-10 minutes the first time per ticker;
     repeat ingestions are no-ops.
 
     Errors during ingestion don't block the drill — we surface a
-    warning and proceed with whatever's in ChromaDB so the user gets
+    warning and proceed with whatever's in the filings index so the user gets
     SOMETHING rather than a hang.
     """
     await query.edit_message_text(
@@ -1959,7 +1959,7 @@ async def _run_ingest_then_drill(query, *, ticker: str, slug: str) -> None:
         logger.error(f"[telegram] ingest_ticker({ticker}) failed: {e}")
         ingest_msg = (
             f"❌ Ingestion failed: <code>{_h(str(e)[:200])}</code>. "
-            f"Drilling anyway with whatever is in ChromaDB."
+            f"Drilling anyway with whatever is in the filings index."
         )
 
     # Reply with the ingest result (don't edit the prompt — we want the

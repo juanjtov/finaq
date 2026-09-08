@@ -1,8 +1,8 @@
-"""Freshness gate — is the local ChromaDB ingest up-to-date for a ticker?
+"""Freshness gate — is the local filings-index ingest up-to-date for a ticker?
 
 Composes `data.edgar.latest_filing_dates` (SEC's authoritative recent-filings
-index) with `data.chroma.last_filings_by_type` (what's actually in the local
-ChromaDB) and returns a structured diff. Consumed by:
+index) with `data.vectors.last_filings_by_type` (what the ingest manifest in
+state.db says is indexed) and returns a structured diff. Consumed by:
 
   - the Streamlit `Run drill-in` button — opens a confirmation dialog when
     stale (Ingest + drill / Cancel)
@@ -14,7 +14,7 @@ ChromaDB) and returns a structured diff. Consumed by:
 
 Soft-fail by design: any EDGAR error returns a report with `is_stale=False`
 and `edgar_error` populated, so callers drill on whatever's in the local
-corpus rather than blocking on a flaky network. ChromaDB read failures
+corpus rather than blocking on a flaky network. Manifest read failures
 yield empty per-form data but never raise.
 """
 
@@ -24,8 +24,8 @@ import os
 from dataclasses import dataclass
 from datetime import date
 
-from data.chroma import last_filings_by_type
 from data.edgar import latest_filing_dates
+from data.vectors import last_filings_by_type
 from utils import logger
 
 # Forms we care about. Matches DEFAULT_LIMITS in data/edgar.py so the
@@ -35,25 +35,25 @@ TRACKED_FORMS: tuple[str, ...] = ("10-K", "10-Q", "20-F", "6-K")
 
 @dataclass(frozen=True)
 class FormDiff:
-    """Per-form freshness — what EDGAR has vs what's ingested in ChromaDB."""
+    """Per-form freshness — what EDGAR has vs what's ingested."""
 
     form: str
     edgar_date: str | None  # ISO YYYY-MM-DD; None when EDGAR has no filings of this form
-    chroma_date: str | None  # ISO YYYY-MM-DD; None when ChromaDB has none
-    behind_days: int  # 0 when fresh or unknown; positive when ChromaDB trails EDGAR
+    ingested_date: str | None  # ISO YYYY-MM-DD; None when nothing of this form is ingested
+    behind_days: int  # 0 when fresh or unknown; positive when the ingest trails EDGAR
 
     @property
     def is_missing(self) -> bool:
-        """EDGAR has filings of this form but ChromaDB has none ingested."""
-        return self.edgar_date is not None and self.chroma_date is None
+        """EDGAR has filings of this form but none is ingested."""
+        return self.edgar_date is not None and self.ingested_date is None
 
     @property
     def is_behind(self) -> bool:
-        """ChromaDB has filings of this form but EDGAR has a newer one."""
+        """This form is ingested but EDGAR has a newer one."""
         return (
             self.edgar_date is not None
-            and self.chroma_date is not None
-            and self.edgar_date > self.chroma_date
+            and self.ingested_date is not None
+            and self.edgar_date > self.ingested_date
         )
 
 
@@ -90,22 +90,21 @@ def check_ingest_freshness(
     ticker: str,
     forms: tuple[str, ...] = TRACKED_FORMS,
 ) -> FreshnessReport:
-    """Compare EDGAR's recent index to local ChromaDB ingest for `ticker`.
+    """Compare EDGAR's recent index to the ingest manifest for `ticker`.
 
     A ticker is `stale` when EDGAR reports a `filingDate` strictly greater
-    than the local ChromaDB `filed_date` for any form in `forms` — OR when
-    EDGAR has any of those forms and ChromaDB has none. Forms with no EDGAR
+    than the ingested `filed_date` for any form in `forms` — OR when EDGAR
+    has any of those forms and none is ingested. Forms with no EDGAR
     presence (e.g., 20-F for a domestic filer) never drive staleness.
 
     `edgar_error` populated means freshness is unknown; `is_stale` is False
     in that case so a transient SEC outage doesn't block drills.
 
     FINAQ_SKIP_FRESHNESS_PROBES short-circuits the whole check to the same
-    "unknown, not stale" report — without touching EDGAR or the ChromaDB
-    Rust client (see the segfault note in data/chroma.py + POSTPONED §2).
-    Gating here, not just in the chroma probes, matters: an empty chroma
-    result with a live EDGAR date would otherwise read as "stale" and
-    funnel every drill into the ingest path the switch exists to avoid.
+    "unknown, not stale" report without calling EDGAR — an operator
+    kill-switch for the drill-time gate. Gating here, not just in the
+    manifest probe, matters: an empty manifest with a live EDGAR date would
+    otherwise read as "stale" and funnel every drill into the ingest path.
     """
     if os.getenv("FINAQ_SKIP_FRESHNESS_PROBES"):
         return FreshnessReport(
@@ -116,7 +115,7 @@ def check_ingest_freshness(
         )
 
     edgar = latest_filing_dates(ticker, forms=forms)
-    chroma = last_filings_by_type(ticker)
+    ingested = last_filings_by_type(ticker)
 
     edgar_error: str | None = None
     if not edgar:
@@ -126,12 +125,12 @@ def check_ingest_freshness(
     is_stale = False
     for form in forms:
         e_date = edgar.get(form) or None
-        c_date = chroma.get(form) or None
+        c_date = ingested.get(form) or None
         behind = _days_between(e_date or "", c_date or "") if (e_date and c_date) else 0
         if e_date and (c_date is None or e_date > c_date):
             is_stale = True
         diffs.append(
-            FormDiff(form=form, edgar_date=e_date, chroma_date=c_date, behind_days=behind)
+            FormDiff(form=form, edgar_date=e_date, ingested_date=c_date, behind_days=behind)
         )
 
     report = FreshnessReport(
@@ -144,7 +143,7 @@ def check_ingest_freshness(
         logger.info(
             f"[freshness] {ticker}: stale — "
             + ", ".join(
-                f"{d.form}({d.chroma_date or 'missing'}→{d.edgar_date})"
+                f"{d.form}({d.ingested_date or 'missing'}→{d.edgar_date})"
                 for d in report.stale_forms()
             )
         )

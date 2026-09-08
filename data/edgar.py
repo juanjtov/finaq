@@ -5,7 +5,7 @@ fetches the 2 most recent annual reports and 4 most recent interim reports per
 ticker by default — covering both domestic filers (10-K + 10-Q) and foreign
 private issuers (20-F + 6-K). Also exposes `parse_filed_date` which extracts
 the SEC-reported filing date from a submission's SGML header — used by
-ChromaDB metadata for freshness.
+the filings index metadata for freshness.
 
 For tickers that file only one of the two (e.g. NVDA has no 20-Fs, NU has
 no 10-Ks), `dl.get(kind, ticker)` is a no-op when no filings exist of that
@@ -30,7 +30,7 @@ EDGAR_DIR = Path("data_cache/edgar")
 # Domestic filers (10-K + 10-Q) and foreign private issuers (20-F + 6-K) are
 # both covered. 6-K filings are press releases / interim disclosures attached
 # as exhibits — they don't follow Item-X structure so each lands as one
-# "misc" chunk pile via the fallback in data/chroma.py:_split_into_items.
+# "misc" chunk pile via the fallback in data/vectors.py:_split_into_items.
 DEFAULT_LIMITS: dict[str, int] = {"10-K": 2, "10-Q": 4, "20-F": 2, "6-K": 4}
 
 # SEC SGML headers contain a "FILED AS OF DATE:	YYYYMMDD" line within the first
@@ -111,7 +111,14 @@ def _existing_filings(ticker: str, kind: str, *, as_of: str | None = None) -> li
     folder = _filings_dir(ticker, kind)
     if not folder.exists():
         return []
-    paths = sorted(folder.glob("*/full-submission.txt"))
+    # Newest first by SGML filed date. Accession numbers sort oldest-first,
+    # so a plain glob sort + `[:limit]` used to hand the ingest the OLDEST
+    # filings whenever more than `limit` were on disk (backtest bumps).
+    paths = sorted(
+        folder.glob("*/full-submission.txt"),
+        key=lambda p: (parse_filed_date(p) or "", p.parent.name),
+        reverse=True,
+    )
     if as_of is None:
         return paths
 
@@ -225,7 +232,7 @@ async def download_filings(
 # SEC's submissions endpoint returns the full recent-filings index for a
 # company keyed by CIK. One ~50KB JSON round-trip tells us every recent
 # filing's `form` + `filingDate` + `accessionNumber`; no filing download
-# needed. The freshness gate uses this to decide whether ChromaDB ingest is
+# needed. The freshness gate uses this to decide whether filings-index ingest is
 # current before a drill-in fires.
 
 _CIK_MAP_URL = "https://www.sec.gov/files/company_tickers.json"

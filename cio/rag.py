@@ -1,17 +1,15 @@
-"""Retrieval over the `synthesis_reports` ChromaDB collection.
+"""Retrieval over the `synthesis_reports` corpus (Pinecone reports index).
 
-The collection is populated by `scripts.index_existing_reports` (backfill
-of `data_cache/demos/*.json`) and — once Step 11.9's CIO orchestration
-lands — by the runner sidecar that ships every fresh drill-in's report
-into the collection in the same shape.
+The corpus is populated by `scripts.index_existing_reports` (backfill of
+`data_cache/demos/*.json`). Each document is one section of a Synthesis
+report (`## What this means`, `## Bull case`, ...) so the planner can
+retrieve at the granularity of "the bull case from the prior NVDA / ai_cake
+drill" without having to re-parse the full report.
 
-Each document is one section of a Synthesis report (`## What this means`,
-`## Bull case`, ...) so the planner can retrieve at the granularity of
-"the bull case from the prior NVDA / ai_cake drill" without having to
-re-parse the full report.
-
-Retrieval reuses `data.chroma`'s tokeniser + BM25 + RRF helpers, just
-parameterised with `collection_name="synthesis_reports"`.
+Retrieval reuses `data.vectors`' tokeniser + BM25 + RRF helpers on top of
+the reports index; the ticker-scoped lookups (`latest_watchlist_section`,
+`latest_report_excerpts`) list a ticker's chunks by id prefix and need no
+embedding call.
 
 Output shape:
   list[{
@@ -23,9 +21,8 @@ Output shape:
 
 from __future__ import annotations
 
-from data.chroma import _bm25_rank, _get_collection, _reciprocal_rank_fusion
+from data.vectors import _bm25_rank, _reciprocal_rank_fusion, fetch_reports, query_reports
 
-REPORTS_COLLECTION = "synthesis_reports"
 DEFAULT_K = 5
 DEFAULT_CANDIDATE_POOL = 25
 
@@ -49,23 +46,6 @@ def _build_where(ticker: str | None, thesis: str | None) -> dict | None:
     return {"$and": conds}
 
 
-def _unpack(results: dict) -> list[dict]:
-    chunks: list[dict] = []
-    ids = (results.get("ids") or [[]])[0]
-    docs = (results.get("documents") or [[]])[0]
-    metas = (results.get("metadatas") or [[]])[0]
-    dists = (results.get("distances") or [[None] * len(ids)])[0]
-    for i in range(len(ids)):
-        chunks.append(
-            {
-                "text": docs[i],
-                "metadata": metas[i],
-                "score": dists[i],
-            }
-        )
-    return chunks
-
-
 def query_past_reports(
     question: str,
     *,
@@ -77,22 +57,14 @@ def query_past_reports(
 ) -> list[dict]:
     """Retrieve top-`k` section chunks from prior drill-ins relevant to `question`.
 
-    Hybrid retrieval: ChromaDB metadata pre-filter → semantic top-N →
-    BM25 over the same pool → Reciprocal Rank Fusion → top-`k`. Same
-    recipe as the filings RAG pipeline, just on a different collection.
+    Hybrid retrieval: metadata pre-filter → semantic top-N → BM25 over the
+    same pool → Reciprocal Rank Fusion → top-`k`. Same recipe as the
+    filings RAG pipeline, just on a different index.
 
-    Returns `[]` (not None) on empty or missing collection — the planner
+    Returns `[]` (not None) on empty or missing corpus — the planner
     treats no past reports the same as "drill from scratch".
     """
-    coll = _get_collection(name=REPORTS_COLLECTION)
-    where = _build_where(ticker, thesis)
-
-    sem_results = coll.query(
-        query_texts=[question],
-        n_results=candidate_pool,
-        where=where,
-    )
-    candidates = _unpack(sem_results)
+    candidates = query_reports(question, where=_build_where(ticker, thesis), top_k=candidate_pool)
     if not candidates:
         return []
 
@@ -104,6 +76,11 @@ def query_past_reports(
         fused = semantic_indices
 
     return [candidates[i] for i in fused[:k]]
+
+
+def _date_of(chunk: dict) -> str:
+    m = chunk.get("metadata") or {}
+    return str(m.get("date") or m.get("filed_at_iso") or "")
 
 
 def latest_watchlist_section(
@@ -120,37 +97,16 @@ def latest_watchlist_section(
     drill signal — the prior drill explicitly flagged it.
 
     Returns `{text, metadata}` for the latest watchlist chunk, or None
-    when no past drill has produced one yet (or ChromaDB is empty).
+    when no past drill has produced one yet (or the index is empty).
     """
-    coll = _get_collection(name=REPORTS_COLLECTION)
-    conds: list[dict] = [{"ticker": ticker.upper()}]
-    if thesis:
-        conds.append({"thesis": thesis})
-    conds.append({"section": "Watchlist"})
-    
-    #Boilerplate to keep where format the same {"$and":conds}
-    where = conds[0] if len(conds) == 1 else {"$and": conds}
-
     try:
-        results = coll.get(where=where, limit=50)
+        chunks = fetch_reports(ticker, thesis=thesis, section="Watchlist", limit=50)
     except Exception:
         return None
-    ids = results.get("ids") or []
-    if not ids:
+    if not chunks:
         return None
-    docs = results.get("documents") or []
-    metas = results.get("metadatas") or []
-
-    # Most-recent by metadata.date (filed_at_iso falls back).
-    def _date_key(idx: int) -> str:
-        m = metas[idx] or {}
-        return str(m.get("date") or m.get("filed_at_iso") or "")
-
-    best = max(range(len(ids)), key=_date_key)
-    return {
-        "text": docs[best],
-        "metadata": metas[best],
-    }
+    best = max(chunks, key=_date_of)
+    return {"text": best["text"], "metadata": best["metadata"]}
 
 
 def latest_report_excerpts(
@@ -171,39 +127,23 @@ def latest_report_excerpts(
     sections (sorted by section weight: What this means → Thesis →
     Top risks first).
     """
-    coll = _get_collection(name=REPORTS_COLLECTION)
-    where = _build_where(ticker, thesis)
-    if not where:
+    if not ticker:
         return []
     try:
-        results = coll.get(where=where, limit=200)
+        chunks = fetch_reports(ticker, thesis=thesis, limit=200)
     except Exception:
-        return []
-    ids = results.get("ids") or []
-    docs = results.get("documents") or []
-    metas = results.get("metadatas") or []
-    if not ids:
         return []
 
     # Group by run_id; pick most recent by date.
     by_run: dict[str, list[dict]] = {}
-    for i, _id in enumerate(ids):
-        meta = metas[i] or {}
-        run_id = str(meta.get("run_id") or "")
-        if not run_id:
-            continue
-        by_run.setdefault(run_id, []).append(
-            {"text": docs[i], "metadata": meta, "score": None}
-        )
-
+    for chunk in chunks:
+        run_id = str((chunk.get("metadata") or {}).get("run_id") or "")
+        if run_id:
+            by_run.setdefault(run_id, []).append(chunk)
     if not by_run:
         return []
-    # Sort run_ids by metadata.date descending (fallback: filed_at_iso).
-    def _run_date(run_id: str) -> str:
-        first = by_run[run_id][0]["metadata"]
-        return str(first.get("date") or first.get("filed_at_iso") or "")
 
-    most_recent_run = sorted(by_run.keys(), key=_run_date, reverse=True)[0]
+    most_recent_run = max(by_run, key=lambda rid: _date_of(by_run[rid][0]))
     sections = by_run[most_recent_run]
 
     # Section ordering — most decision-relevant first. Anything not in
@@ -219,7 +159,5 @@ def latest_report_excerpts(
         "Watchlist": 7,
         "Evidence": 8,
     }
-    sections.sort(
-        key=lambda s: priority.get(str(s["metadata"].get("section") or ""), 99)
-    )
+    sections.sort(key=lambda s: priority.get(str(s["metadata"].get("section") or ""), 99))
     return sections[:k]

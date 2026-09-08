@@ -1,9 +1,9 @@
-"""Step 2 integration tests — real EDGAR, yfinance, OpenRouter, ChromaDB.
+"""Step 2 integration tests — real EDGAR, yfinance, OpenRouter, the filings index.
 
 Run via:  pytest -m integration tests/test_data_layer_integration.py
 
 These tests download real SEC filings (idempotent), hit yfinance, and write to
-the ChromaDB collection on disk under data_cache/chroma. Re-running is safe.
+the ticker's namespace in the Pinecone filings index. Re-running is safe.
 """
 
 from __future__ import annotations
@@ -66,9 +66,9 @@ def test_yfin_cache_hit_on_second_call():
 
 
 @pytest.mark.asyncio
-async def test_chroma_ingest_and_query_round_trip_nvda():
-    from data.chroma import ingest_filing, query
+async def test_vectors_ingest_and_query_round_trip_nvda():
     from data.edgar import download_filings
+    from data.vectors import ingest_filing, query
 
     paths = await download_filings("NVDA")
     assert paths, "no NVDA filings on disk"
@@ -86,8 +86,8 @@ async def test_chroma_ingest_and_query_round_trip_nvda():
 
 
 @pytest.mark.asyncio
-async def test_chroma_item_filter_returns_only_matching_section():
-    from data.chroma import query
+async def test_vectors_item_filter_returns_only_matching_section():
+    from data.vectors import query
 
     results = await asyncio.to_thread(
         query, "NVDA", "principal risks to the business", 5, "Item 1A"
@@ -95,29 +95,3 @@ async def test_chroma_item_filter_returns_only_matching_section():
     assert results, "expected some Risk Factors chunks"
     for r in results:
         assert r["metadata"]["item_code"] == "1A", r["metadata"]
-
-
-@pytest.mark.asyncio
-async def test_chroma_cross_ticker_query_returns_chunks_from_multiple_tickers():
-    """Without a ticker filter, queries should be able to surface chunks from any
-    ingested ticker. Use two ticker-specific questions so semantic search picks up
-    each — the point is that the data is queryable across tickers, not that one
-    query returns balanced results."""
-    from data.chroma import ingest_filing, query
-    from data.edgar import download_filings
-
-    paths = await download_filings("ANET")
-    if paths:
-        target = next((p for p in paths if "10-K" in p.parts), paths[0])
-        await asyncio.to_thread(ingest_filing, "ANET", target)
-
-    nvda_results = await asyncio.to_thread(
-        query, None, "GPU revenue growth from data center customers", 5
-    )
-    anet_results = await asyncio.to_thread(
-        query, None, "ethernet switch market share and networking products", 5
-    )
-    tickers_seen = {r["metadata"]["ticker"] for r in nvda_results + anet_results}
-    assert {"NVDA", "ANET"}.issubset(
-        tickers_seen
-    ), f"expected NVDA and ANET to both be queryable, got: {tickers_seen}"

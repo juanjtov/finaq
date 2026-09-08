@@ -59,7 +59,7 @@ def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
             # Surface "soft failures" — agents that return successfully but
             # carry non-empty `errors` lists in their payload. The canonical
             # case: Filings returns {filings: {errors: ["no chunks retrieved"]}}
-            # when ChromaDB is empty for the ticker — completes without
+            # when the filings index is empty for the ticker — completes without
             # raising, so was previously invisible in Mission Control.
             try:
                 for value in (result or {}).values():
