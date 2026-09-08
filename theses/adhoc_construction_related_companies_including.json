@@ -103,5 +103,6 @@
     "terminal_growth_basis": "Below GDP trend reflecting mature industry with limited pricing power",
     "discount_rate_floor": 0.08,
     "discount_rate_cap": 0.15
-  }
+  },
+  "last_reviewed": "2026-05-05"
 }

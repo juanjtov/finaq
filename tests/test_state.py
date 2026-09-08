@@ -31,6 +31,7 @@ def test_init_db_creates_all_tables(tmp_path: Path):
     expected = {
         "meta", "graph_runs", "node_runs", "alerts", "triage_runs", "errors",
         "cio_runs", "cio_actions",  # Step 11.5
+        "llm_calls",  # schema v6
     }
     assert expected.issubset(names), f"missing tables: {expected - names}"
 
@@ -215,7 +216,12 @@ def test_new_node_telemetry_returns_fresh_dict():
     a = st.new_node_telemetry()
     b = st.new_node_telemetry()
     assert a is not b
-    assert a == {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0, "n_calls": 0}
+    assert a == {
+        "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0, "n_calls": 0, "node": "",
+    }
+    # Schema v6 — the accumulator carries the node name so llm_calls rows
+    # written mid-node can be attributed to the right agent.
+    assert st.new_node_telemetry(node="filings")["node"] == "filings"
 
 
 def test_daily_cost_aggregates_node_runs(tmp_path: Path):
@@ -879,3 +885,216 @@ def test_record_cio_action_persists_telemetry_columns(tmp_path: Path):
     assert a["tokens_out"] == 80
     assert a["cost_usd"] == pytest.approx(0.0025)
     assert a["latency_s"] == pytest.approx(1.5)
+
+
+# --- Schema v5 — cio_actions.source ---------------------------------------
+
+
+def test_init_db_adds_source_column_to_cio_actions(tmp_path: Path):
+    """Schema v5: `source` (llm | gate | budget_cap | fallback), '' default."""
+    db = tmp_path / "test.db"
+    st.init_db(db)
+    with sqlite3.connect(db) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cio_actions)")}
+    assert "source" in cols
+
+
+def test_init_db_v4_to_v5_migration_backfills_source_as_empty(tmp_path: Path):
+    """A pre-v5 DB gains the column; legacy rows read back as source=''
+    so the yo-yo guard never mistakes them for LLM judgements."""
+    db = tmp_path / "test.db"
+    st.init_db(db)
+    st.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss",
+                         source="llm", db_path=db)
+    with sqlite3.connect(db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE cio_actions_legacy AS
+                SELECT id, cio_run_id, ts, trigger, ticker, thesis, action, rationale,
+                       drill_run_id, reuse_run_id, confidence, decision_json,
+                       model_used, tokens_in, tokens_out, cost_usd, latency_s
+                FROM cio_actions;
+            DROP TABLE cio_actions;
+            ALTER TABLE cio_actions_legacy RENAME TO cio_actions;
+            """
+        )
+    st.init_db(db)
+    rows = st.recent_cio_actions(db_path=db)
+    assert len(rows) == 1
+    assert rows[0]["source"] == ""
+
+
+def test_record_cio_action_persists_source(tmp_path: Path):
+    db = tmp_path / "test.db"
+    for src in ("llm", "gate", "budget_cap", "fallback"):
+        st.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss",
+                             source=src, db_path=db)
+    st.record_cio_action(ticker="NVDA", thesis="ai_cake", action="dismiss", db_path=db)
+    sources = sorted(a["source"] for a in st.recent_cio_actions(db_path=db))
+    assert sources == ["", "budget_cap", "fallback", "gate", "llm"]
+
+
+# --- Schema v6 — llm_calls trace rows + run rollups ------------------------
+
+
+def test_record_llm_call_and_query_roundtrip(tmp_path: Path):
+    db = tmp_path / "test.db"
+    run_id = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    st.record_llm_call(
+        run_id=run_id, node="fundamentals", model="test/model-a",
+        latency_s=1.5, tokens_in=1000, tokens_out=200, cost_usd=0.003,
+        prompt_excerpt='[{"role": "user", "content": "hi"}]',
+        response_excerpt="hello",
+        db_path=db,
+    )
+    st.record_llm_call(
+        run_id=run_id, node="synthesis", model="test/model-b",
+        latency_s=12.0, tokens_in=40000, tokens_out=5000, cost_usd=0.16,
+        db_path=db,
+    )
+    calls = st.llm_calls_for_run(run_id, db_path=db)
+    assert len(calls) == 2
+    # Call order preserved (by autoincrement id).
+    assert calls[0]["node"] == "fundamentals"
+    assert calls[1]["node"] == "synthesis"
+    assert calls[0]["model"] == "test/model-a"
+    assert calls[0]["tokens_in"] == 1000
+    assert calls[0]["prompt_excerpt"].startswith('[{"role"')
+    assert calls[0]["response_excerpt"] == "hello"
+    # Missing excerpts stored as NULL, not empty string.
+    assert calls[1]["prompt_excerpt"] is None
+
+
+def test_record_llm_call_truncates_excerpts(tmp_path: Path):
+    db = tmp_path / "test.db"
+    long_text = "x" * (st.LLM_EXCERPT_MAX_CHARS + 500)
+    st.record_llm_call(
+        run_id=None, node="", model="m", latency_s=0.1,
+        prompt_excerpt=long_text, response_excerpt=long_text,
+        db_path=db,
+    )
+    with sqlite3.connect(db) as conn:
+        row = conn.execute(
+            "SELECT prompt_excerpt, response_excerpt, run_id FROM llm_calls"
+        ).fetchone()
+    assert len(row[0]) == st.LLM_EXCERPT_MAX_CHARS
+    assert len(row[1]) == st.LLM_EXCERPT_MAX_CHARS
+    # run_id None is allowed — calls outside a graph run (CIO planner, Q&A).
+    assert row[2] is None
+
+
+def test_llm_calls_for_run_empty_when_db_missing(tmp_path: Path):
+    assert st.llm_calls_for_run("nope", db_path=tmp_path / "missing.db") == []
+
+
+def test_init_db_v5_to_v6_adds_llm_calls_table(tmp_path: Path):
+    """A DB created before v6 (no llm_calls) must gain the table on the
+    next init_db, without touching existing rows."""
+    db = tmp_path / "test.db"
+    st.init_db(db)
+    run_id = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE llm_calls")
+    st.init_db(db)  # re-migrate
+    with sqlite3.connect(db) as conn:
+        names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert "llm_calls" in names
+    # Pre-existing rows untouched.
+    assert st.get_graph_run(run_id, db_path=db) is not None
+
+
+def test_recent_runs_rolls_up_cost_tokens_and_failed_names(tmp_path: Path):
+    """Mission Control's runs table renders cost / tokens / failed-agent
+    names straight from recent_runs — the rollup must be correct."""
+    db = tmp_path / "test.db"
+    run_id = st.start_graph_run("WEN", "wen", db_path=db)
+    now = st._now_iso()
+    st.record_node_run(
+        run_id, "fundamentals", now, now, 46.0, "completed",
+        tokens_in=21000, tokens_out=2400, cost_usd=0.06, n_calls=4, db_path=db,
+    )
+    st.record_node_run(
+        run_id, "filings", now, now, 122.0, "failed",
+        error="chroma timeout", tokens_in=18000, tokens_out=1100,
+        cost_usd=0.04, n_calls=2, db_path=db,
+    )
+    st.record_node_run(
+        run_id, "news", now, now, 93.0, "failed",
+        error="tavily 429", db_path=db,
+    )
+    st.record_error("filings", "chroma timeout", run_id=run_id, db_path=db)
+    st.finish_graph_run(run_id, "failed", duration_s=214.0, db_path=db)
+
+    runs = st.recent_runs(db_path=db)
+    assert len(runs) == 1
+    r = runs[0]
+    assert r["node_runs_count"] == 3
+    assert r["failed_nodes"] == 2
+    assert set((r["failed_node_names"] or "").split(",")) == {"filings", "news"}
+    assert r["tokens_in"] == 39000
+    assert r["tokens_out"] == 3500
+    assert abs(r["cost_usd"] - 0.10) < 1e-9
+    assert r["n_calls"] == 6
+    assert r["n_errors"] == 1
+
+
+def test_recent_runs_rollups_zero_for_run_without_nodes(tmp_path: Path):
+    db = tmp_path / "test.db"
+    st.start_graph_run("NU", "nu", db_path=db)
+    r = st.recent_runs(db_path=db)[0]
+    assert r["node_runs_count"] == 0
+    assert (r["failed_node_names"] or None) is None
+    assert r["n_errors"] == 0
+
+
+def test_cio_action_for_run_finds_drill_and_reuse(tmp_path: Path):
+    db = tmp_path / "test.db"
+    cycle = st.start_cio_run("heartbeat", db_path=db)
+    drill_run = st.start_graph_run("NU", "nu", db_path=db)
+    reused_run = st.start_graph_run("EME", "construction", db_path=db)
+    st.record_cio_action(
+        ticker="NU", thesis="nu", action="drill", cio_run_id=cycle,
+        drill_run_id=drill_run, confidence="high", db_path=db,
+    )
+    st.record_cio_action(
+        ticker="EME", thesis="construction", action="reuse", cio_run_id=cycle,
+        reuse_run_id=reused_run, confidence="medium", db_path=db,
+    )
+    a = st.cio_action_for_run(drill_run, db_path=db)
+    assert a is not None
+    assert a["action"] == "drill"
+    assert a["cycle_trigger"] == "heartbeat"
+    assert a["cycle_started_at"]  # joined from the parent cycle
+    b = st.cio_action_for_run(reused_run, db_path=db)
+    assert b is not None and b["action"] == "reuse"
+
+
+def test_cio_action_for_run_none_for_manual_runs(tmp_path: Path):
+    db = tmp_path / "test.db"
+    manual_run = st.start_graph_run("NVDA", "ai_cake", db_path=db)
+    assert st.cio_action_for_run(manual_run, db_path=db) is None
+    assert st.cio_action_for_run("", db_path=db) is None
+
+
+def test_llm_calls_for_run_tolerates_pre_v6_db(tmp_path: Path):
+    """A DB created before schema v6 has no llm_calls table. A read must
+    return [] (not raise, not migrate) — the live dashboard reads DBs that
+    only get migrated on their next write. Regression for the Run
+    Inspector crashing with 'no such table: llm_calls'."""
+    db = tmp_path / "old.db"
+    st.init_db(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE llm_calls")
+    assert st.llm_calls_for_run("any-run", db_path=db) == []
+    # And the missing table stays missing — reads never migrate.
+    with sqlite3.connect(db) as conn:
+        names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert "llm_calls" not in names

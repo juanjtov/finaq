@@ -92,5 +92,6 @@
     "terminal_growth_basis": "Online education adoption growing 1.5x GDP through corporate reskilling demand",
     "discount_rate_floor": 0.09,
     "discount_rate_cap": 0.16
-  }
+  },
+  "last_reviewed": "2026-05-11"
 }

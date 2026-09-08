@@ -20,6 +20,7 @@ Cross-encoder re-ranking is intentionally NOT included; see docs/POSTPONED.md §
 
 from __future__ import annotations
 
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -273,6 +274,68 @@ class OpenRouterEmbedding(EmbeddingFunction[Documents]):
         return cls(model=config.get("model", MODEL_EMBEDDINGS))
 
 
+# chromadb 1.5.x's Rust binding can segfault the WHOLE Python process (exit
+# 139, no traceback) when collection ops run on certain threads on macOS —
+# reproduced deterministically on any thread created with an explicit
+# `threading.stack_size(...)`, and observed live under Streamlit and pytest
+# (the drill-time freshness probes were killing the server; see the
+# "chromadb segfault" note in docs/POSTPONED.md for the full findings).
+# Routing every collection op through ONE dedicated default-stack worker
+# serialises Rust-client access and removes the per-caller thread variable.
+# This narrows but does NOT fully eliminate the crash in a live Streamlit
+# process (1.5.8 and 1.5.9 both still die inside the worker there) — the
+# durable fix (version pin + re-ingest, or subprocess isolation) is tracked
+# separately. Unit tests stub these probes via tests/conftest.py.
+
+
+@lru_cache(maxsize=1)
+def _chroma_executor():
+    from concurrent.futures import ThreadPoolExecutor
+
+    ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chroma")
+    # ThreadPoolExecutor spawns threads lazily — force creation now so the
+    # worker's lifetime doesn't depend on which caller submits first.
+    ex.submit(lambda: None).result()
+    return ex
+
+
+def _on_chroma_thread(fn, *args, **kwargs):
+    """Run `fn` on the dedicated big-stack chroma thread and return its
+    result (exceptions propagate unchanged)."""
+    return _chroma_executor().submit(fn, *args, **kwargs).result()
+
+
+class _ThreadSafeCollection:
+    """Proxy that executes every collection method on the big-stack chroma
+    thread, so call sites (agents, UI pages, CIO memory) never touch the
+    Rust client from their own — possibly small-stacked — thread."""
+
+    def __init__(self, coll):
+        self._coll = coll
+
+    def __getattr__(self, attr):
+        target = getattr(self._coll, attr)
+        if not callable(target):
+            return target
+
+        def _call(*args, **kwargs):
+            return _on_chroma_thread(target, *args, **kwargs)
+
+        return _call
+
+
+@lru_cache(maxsize=2)
+def _persistent_client(path: str):
+    """One PersistentClient per on-disk path for the process lifetime.
+    Constructed on the chroma thread; reuse also drops per-call overhead
+    (Mission Control alone previously created ~40 clients per rerun)."""
+    return _on_chroma_thread(
+        chromadb.PersistentClient,
+        path=path,
+        settings=Settings(anonymized_telemetry=False),
+    )
+
+
 def _get_collection(name: str = COLLECTION_NAME):
     """Open (or create) a persistent ChromaDB collection with cosine distance.
 
@@ -280,21 +343,21 @@ def _get_collection(name: str = COLLECTION_NAME):
     sites are unchanged. The CIO planner (Step 11.8) opens
     `name="synthesis_reports"` to RAG over past drill-in reports.
 
+    Returns a `_ThreadSafeCollection` proxy — see above for why.
+
     Note: ChromaDB applies the `configuration` parameter only on collection
     creation. If the on-disk collection was created with a different space
     (e.g., the legacy l2 default), this function returns it unchanged — wipe
     `data_cache/chroma/<collection>` and re-ingest to pick up the cosine config.
     """
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(
-        path=str(CHROMA_DIR),
-        settings=Settings(anonymized_telemetry=False),
-    )
-    return client.get_or_create_collection(
+    client = _persistent_client(str(CHROMA_DIR))
+    return _ThreadSafeCollection(_on_chroma_thread(
+        client.get_or_create_collection,
         name=name,
         embedding_function=OpenRouterEmbedding(),
         configuration={"hnsw": {"space": DISTANCE_SPACE}},
-    )
+    ))
 
 
 def _extract_text(filing_path: Path) -> str:
@@ -367,6 +430,19 @@ _UPSERT_BATCH_SIZE = 4000
 _MAX_CHUNKS_PER_FILING = 6000
 
 
+def _already_ingested(coll, last_chunk_id: str) -> bool:
+    """True when the filing's final chunk id is present in `coll`.
+
+    A run killed mid-filing leaves the last id missing, so the filing is
+    re-embedded in full next time. Any read error → False: embedding
+    again is the safe direction, blocking ingest is not."""
+    try:
+        got = coll.get(ids=[last_chunk_id], include=[])
+        return bool(got and got.get("ids"))
+    except Exception:
+        return False
+
+
 def ingest_filing(ticker: str, filing_path: Path) -> int:
     """Chunk a filing, embed via OpenRouter, upsert into the `filings` collection.
 
@@ -432,6 +508,17 @@ def ingest_filing(ticker: str, filing_path: Path) -> int:
             f"(typically exhibits / XBRL) are not indexed. This is the "
             f"defensive behaviour after the NU 20-F disk-fill incident."
         )
+
+    # Skip the embed when this filing is already fully in the collection.
+    # Chunking is deterministic, so the LAST id is stable; upserts land in
+    # order, so its presence proves every earlier batch landed too. Before
+    # this check a ticker with one new 10-Q re-embedded all six filings.
+    if _already_ingested(coll, ids[-1]):
+        logger.info(
+            f"{ticker} {filing_type} {accession}: already ingested "
+            f"({len(ids)} chunks) — skipping embed"
+        )
+        return 0
 
     # Batched upsert — stays under ChromaDB's max_batch_size limit.
     for i in range(0, len(docs), _UPSERT_BATCH_SIZE):
@@ -621,6 +708,11 @@ def has_ticker(ticker: str) -> bool:
     """
     if not ticker:
         return False
+    if os.getenv("FINAQ_SKIP_FRESHNESS_PROBES"):
+        # Kill-switch while the Rust-client segfault (see the note above
+        # _chroma_executor + docs/POSTPONED.md) is unfixed: report
+        # "ingested" so pages render without touching the Rust client.
+        return True
     try:
         coll = _get_collection()
         # `limit=1` short-circuits as soon as ChromaDB finds one matching chunk.
@@ -649,6 +741,13 @@ def last_filings_by_type(ticker: str) -> dict[str, str]:
     agent can use it to decide whether to warn that the RAG corpus is stale.
     """
     if not ticker:
+        return {}
+    if os.getenv("FINAQ_SKIP_FRESHNESS_PROBES"):
+        # Kill-switch — see has_ticker above. NOTE: check_ingest_freshness
+        # short-circuits on this var BEFORE consulting either probe (an
+        # empty dict here would otherwise read as "nothing ingested" =
+        # stale). This early-return only covers direct callers, e.g.
+        # Mission Control's per-ticker freshness table.
         return {}
     try:
         coll = _get_collection()

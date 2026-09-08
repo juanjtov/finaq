@@ -93,6 +93,15 @@ def format_for_telegram(plan: Plan, *, trigger: str, duration_s: float) -> str:
             f"<i>Drill budget cap demoted {plan.drills_capped} pair(s).</i>"
         )
     lines.append(f"<i>Duration: {duration_s:.1f}s</i>")
+    if plan.overdue_theses:
+        overdue = ", ".join(
+            f"<code>{_h(o.get('slug'))}</code> ({int(o.get('age_days') or 0)}d)"
+            for o in plan.overdue_theses
+        )
+        lines.append(
+            f"🗓 <b>Theses overdue for review</b> — {overdue}. "
+            f"Still what you believe? Mark reviewed in Theses Admin."
+        )
     lines.append("")
 
     # Group by action so the user reads drills first (loudest signal),

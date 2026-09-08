@@ -1,0 +1,18 @@
+# Secrets — never bake into the image; injected as ACA secrets/env at deploy.
+.env
+.env.*
+
+# Runtime state — recreated inside the container; multi-GB locally.
+data_cache/
+
+# Dev-only
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+tests/
+docs/
+LICENSE
+README.md

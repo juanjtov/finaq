@@ -96,6 +96,33 @@ def _row_meta(data: dict | None) -> tuple[str, str, int]:
     return name, anchors_str, len(universe)
 
 
+def _review_badge(slug: str) -> tuple[str, bool]:
+    """(markdown badge, is_overdue) for a thesis's review age.
+
+    The age comes from `last_reviewed` in the JSON, or the file's last
+    edit when the field is absent. Overdue = older than REVIEW_MAX_DAYS."""
+    age = theses_lifecycle.review_age_days(slug, theses_dir=THESES_DIR)
+    if age is None:
+        return "<span style='opacity:0.7;'>review date unknown</span>", False
+    if age > theses_lifecycle.REVIEW_MAX_DAYS:
+        return (
+            f"<span style='color:#B3261E;font-weight:600;'>⚠️ unreviewed {age}d "
+            f"(&gt;{theses_lifecycle.REVIEW_MAX_DAYS}d)</span>"
+        ), True
+    return f"<span style='opacity:0.7;'>reviewed {age}d ago</span>", False
+
+
+def _mark_reviewed_button(slug: str, key: str) -> None:
+    """'Mark reviewed' → stamps today's date into the JSON and reruns."""
+    if st.button("Mark reviewed", key=key, help="Stamp today as last_reviewed"):
+        ok, msg = theses_lifecycle.mark_reviewed(slug, theses_dir=THESES_DIR)
+        if ok:
+            st.success(msg)
+        else:
+            st.error(f"Mark reviewed failed: {msg}")
+        st.rerun()
+
+
 def _render_curated(slugs: list[str]) -> None:
     if not slugs:
         st.caption("No curated theses. Promote an ad-hoc thesis below to get started.")
@@ -107,15 +134,20 @@ def _render_curated(slugs: list[str]) -> None:
     for slug in slugs:
         data, err = _load_thesis(slug)
         name, anchors_str, n = _row_meta(data)
-        cols = st.columns([3, 4, 2, 1.4, 1.4])
+        badge, _overdue = _review_badge(slug)
+        cols = st.columns([3, 4, 2, 1.4, 1.6, 1.4])
         cols[0].markdown(f"**`{slug}`**")
-        cols[1].markdown(f"{name}  \n<span style='opacity:0.7;'>anchors: {anchors_str}</span>",
-                         unsafe_allow_html=True)
+        cols[1].markdown(
+            f"{name}  \n<span style='opacity:0.7;'>anchors: {anchors_str}</span>  \n{badge}",
+            unsafe_allow_html=True,
+        )
         cols[2].metric("Universe", n, label_visibility="visible")
         with cols[3]:
             if st.button("View JSON", key=f"view_curated_{slug}"):
                 st.session_state[f"_show_json_{slug}"] = True
         with cols[4]:
+            _mark_reviewed_button(slug, key=f"reviewed_curated_{slug}")
+        with cols[5]:
             if st.button("Demote", key=f"demote_{slug}", type="secondary"):
                 ok, msg = theses_lifecycle.demote_thesis(slug)
                 if ok:
@@ -147,10 +179,13 @@ def _render_adhoc(slugs: list[str]) -> None:
     for slug in slugs:
         data, err = _load_thesis(slug)
         name, anchors_str, n = _row_meta(data)
-        cols = st.columns([3, 4, 2, 1.4, 1.4, 1.4])
+        badge, _overdue = _review_badge(slug)
+        cols = st.columns([3, 4, 2, 1.4, 1.6, 1.4, 1.4])
         cols[0].markdown(f"**`{slug}`**")
-        cols[1].markdown(f"{name}  \n<span style='opacity:0.7;'>anchors: {anchors_str}</span>",
-                         unsafe_allow_html=True)
+        cols[1].markdown(
+            f"{name}  \n<span style='opacity:0.7;'>anchors: {anchors_str}</span>  \n{badge}",
+            unsafe_allow_html=True,
+        )
         cols[2].metric("Universe", n, label_visibility="visible")
 
         with cols[3]:
@@ -158,6 +193,9 @@ def _render_adhoc(slugs: list[str]) -> None:
                 st.session_state[f"_show_json_{slug}"] = True
 
         with cols[4]:
+            _mark_reviewed_button(slug, key=f"reviewed_adhoc_{slug}")
+
+        with cols[5]:
             valid, vmsg = _validates(slug)
             if st.button(
                 "Promote",
@@ -173,7 +211,7 @@ def _render_adhoc(slugs: list[str]) -> None:
                     st.error(f"Promote failed: {msg}")
                 st.rerun()
 
-        with cols[5]:
+        with cols[6]:
             if st.button("Archive", key=f"archive_{slug}", type="secondary"):
                 ok, msg = theses_lifecycle.archive_thesis(slug)
                 if ok:
@@ -231,10 +269,20 @@ def main() -> None:
     adhoc = [s for s in active if s.startswith(ADHOC_PREFIX)]
     archive_files = _list_archive_files()
 
-    metric_cols = st.columns(3)
+    overdue = theses_lifecycle.overdue_theses(active, theses_dir=THESES_DIR)
+    metric_cols = st.columns(4)
     metric_cols[0].metric("Curated", len(curated))
     metric_cols[1].metric("Ad-hoc", len(adhoc))
     metric_cols[2].metric("Archived", len(archive_files))
+    metric_cols[3].metric(
+        f"Unreviewed >{theses_lifecycle.REVIEW_MAX_DAYS}d", len(overdue),
+        help="Theses nobody has confirmed recently. Press Mark reviewed once you've re-read one.",
+    )
+    if overdue:
+        st.warning(
+            "Overdue for review: "
+            + ", ".join(f"`{o['slug']}` ({o['age_days']}d)" for o in overdue)
+        )
 
     section_divider()
     st.subheader("Curated theses")

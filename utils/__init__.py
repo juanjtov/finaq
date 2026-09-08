@@ -17,6 +17,11 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 logger = logging.getLogger("finaq")
 
+# httpx logs every request URL at INFO. The Telegram Bot API puts the bot
+# token IN the URL path, so the heartbeat's stderr log was writing the
+# secret to disk on every cycle. Warnings and errors still surface.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 RETRYABLE_EXCEPTIONS = (
     httpx.HTTPError,
     httpx.TimeoutException,

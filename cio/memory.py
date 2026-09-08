@@ -123,17 +123,23 @@ def dismissals_in_window(
     *,
     window_days: int = 7,
 ) -> list[dict]:
-    """All `dismiss` actions for the pair in the last `window_days` days.
+    """LLM-judged `dismiss` actions for the pair in the last `window_days` days.
 
-    The planner uses this as an anti-yo-yo signal — if we dismissed the
-    same pair 3 times this week, we don't need to LLM-decide a 4th time;
-    we can shortcut to dismiss without burning tokens.
+    The planner uses this as an anti-yo-yo signal — if the LLM dismissed
+    the same pair 3 times this week, we don't need to LLM-decide a 4th
+    time; we can shortcut to dismiss without burning tokens.
+
+    Only rows with `source == "llm"` count. Gate shortcuts, budget-cap
+    demotions and error fallbacks are excluded — otherwise the guard
+    feeds on its own output: at two heartbeats a day every pair hit three
+    dismissals within 36h and then never saw the LLM again (Sept 2026).
+    Legacy rows (`source == ''`, pre-schema-v5) are excluded too.
     """
     actions = recent_cio_actions(ticker, thesis, limit=20)
     cutoff = datetime.now(UTC) - timedelta(days=window_days)
     out: list[dict] = []
     for a in actions:
-        if a.get("action") != "dismiss":
+        if a.get("action") != "dismiss" or a.get("source") != "llm":
             continue
         ts = _parse_iso(a.get("ts"))
         if ts and ts.tzinfo is None:

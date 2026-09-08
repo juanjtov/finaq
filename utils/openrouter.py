@@ -11,7 +11,10 @@ Two responsibilities:
    `agents._safe_node`. Totals are written to `data_cache/state.db`
    on node exit so the Run Inspector page can show per-node cost
    without re-querying LangSmith. See `data.state.node_telemetry_var`
-   for the accumulator contract.
+   for the accumulator contract. Since schema v6 the interceptor also
+   writes one `llm_calls` row per call (model, latency, tokens, cost,
+   truncated prompt/response) so failed runs stay debuggable even when
+   LangSmith tracing was off at run time.
 """
 
 from __future__ import annotations
@@ -63,6 +66,10 @@ def _install_telemetry_interceptor(client: Any) -> Any:
     direct calls from `/analyze` or `agents.qa.ask` outside the graph),
     so direct calls don't crash the SDK.
     """
+    import json
+    import time
+
+    from data import state as state_db
     from data.state import node_telemetry_var
     from utils.models import compute_cost
 
@@ -70,17 +77,72 @@ def _install_telemetry_interceptor(client: Any) -> Any:
     # we patch its `create` to capture usage on the way out.
     original_create = client.chat.completions.create
 
+    def _prompt_excerpt(messages: Any) -> str:
+        """Serialize only up to the storage cap — synthesis prompts run to
+        hundreds of KB while record_llm_call clips to LLM_EXCERPT_MAX_CHARS,
+        so dumping the full list per call would be pure waste."""
+        parts: list[str] = []
+        total = 0
+        for m in messages or []:
+            s = json.dumps(m, default=str)
+            parts.append(s)
+            total += len(s)
+            if total >= state_db.LLM_EXCERPT_MAX_CHARS:
+                break
+        return "[" + ", ".join(parts) + "]"
+
+    def _record_trace_row(
+        accumulator: Any,
+        kwargs: dict,
+        latency_s: float,
+        tokens_in: int,
+        tokens_out: int,
+        cost: float,
+        response_excerpt: str,
+    ) -> None:
+        """Schema v6 — per-call trace row so a run stays debuggable even
+        when LangSmith tracing was off. Best-effort: a lost trace row
+        never breaks the call. run_id is None for calls outside the graph."""
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            state_db.record_llm_call(
+                run_id=state_db.current_run_id.get(None),
+                node=str(accumulator.get("node") or "") if isinstance(accumulator, dict) else "",
+                model=kwargs.get("model") or "",
+                latency_s=latency_s,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cost_usd=cost,
+                prompt_excerpt=_prompt_excerpt(kwargs.get("messages")),
+                response_excerpt=response_excerpt,
+            )
+
     def _wrapped_create(*args: Any, **kwargs: Any) -> Any:
-        resp = original_create(*args, **kwargs)
+        t0 = time.perf_counter()
+        try:
+            resp = original_create(*args, **kwargs)
+        except Exception as call_exc:
+            # A run that failed BECAUSE of LLM errors is exactly when the
+            # trace matters — record the failed attempt, then re-raise.
+            accumulator = node_telemetry_var.get(None)
+            if accumulator is not None:
+                _record_trace_row(
+                    accumulator, kwargs, time.perf_counter() - t0,
+                    0, 0, 0.0, response_excerpt=f"CALL FAILED: {call_exc}",
+                )
+            raise
+        latency_s = time.perf_counter() - t0
         accumulator = node_telemetry_var.get(None)
         if accumulator is None:
             return resp  # not inside a node — nothing to record
+        tokens_in = tokens_out = 0
+        cost = 0.0
         try:
             usage = getattr(resp, "usage", None) or {}
             tokens_in = int(getattr(usage, "prompt_tokens", 0) or 0)
             tokens_out = int(getattr(usage, "completion_tokens", 0) or 0)
-            model = kwargs.get("model") or ""
-            cost = compute_cost(model, tokens_in, tokens_out)
+            cost = compute_cost(kwargs.get("model") or "", tokens_in, tokens_out)
             accumulator["tokens_in"] += tokens_in
             accumulator["tokens_out"] += tokens_out
             accumulator["cost_usd"] += cost
@@ -89,6 +151,18 @@ def _install_telemetry_interceptor(client: Any) -> Any:
             # Telemetry must never break the actual LLM call. A failed
             # accumulator is a debugging miss, not an outage.
             pass
+        response_excerpt = ""
+        try:
+            choices = getattr(resp, "choices", None) or []
+            if choices:
+                response_excerpt = str(
+                    getattr(getattr(choices[0], "message", None), "content", "") or ""
+                )
+        except Exception:
+            pass
+        _record_trace_row(
+            accumulator, kwargs, latency_s, tokens_in, tokens_out, cost, response_excerpt
+        )
         return resp
 
     client.chat.completions.create = _wrapped_create

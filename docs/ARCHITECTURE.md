@@ -359,6 +359,29 @@ FINAQ, why it was chosen, and any later revisions.
   to POSTPONED §2 because they require schema changes / new pipelines.
   We picked B + D as the lowest-cost-highest-value subset.
 
+### 5.3b `last_reviewed` + review-age nag (2026-09-07)
+
+Nothing tracked whether a *thesis* (summary, universe, thresholds) was
+still what Juan believed — only whether the data behind it was fresh.
+Curated theses were 3–4 months unedited with no signal anywhere.
+
+- **Decision:** optional `last_reviewed` (ISO date) on the `Thesis`
+  schema. `data.theses.review_age_days(slug)` reads it, falling back to
+  the file's mtime for pre-field theses; `mark_reviewed(slug)` stamps
+  today; `overdue_theses(slugs)` lists anything older than
+  `REVIEW_MAX_DAYS = 90`. Stamped automatically on promotion (a human
+  judgement) and by the New Thesis page; `/analyze` output is NOT
+  stamped — the LLM wrote it, nobody reviewed it. Surfaces: an age
+  badge + "Mark reviewed" button per row in Theses Admin, an overdue
+  count + warning at the top of that page, and a line in the CIO cycle
+  summary + Telegram message (`Plan.overdue_theses`). Existing thesis
+  JSONs were backfilled with their last-edit date.
+- **Why nag, not act:** the system can't judge whether a thesis is
+  right; it can only tell you how long since you did. Auto-archiving a
+  stale thesis would silently shrink the sweep.
+- **Why mtime fallback:** honest for old files, but fragile (a git
+  checkout resets it) — hence the backfill.
+
 ### 5.4 Halo · NVDA universe is 7 tickers (NVDA not included)
 
 - **Decision:** `theses/nvda_halo.json` has `universe = [SMCI, DELL,
@@ -1121,9 +1144,19 @@ FINAQ, why it was chosen, and any later revisions.
     process boot.
 - **Why two layers**: state.db answers "did the system run, how long, did
   it fail" (operational) — LangSmith answers "what did this specific LLM
-  call cost / look like" (per-call audit). Trying to do both in SQLite
-  would duplicate LangSmith's work for no gain. Skipping LangSmith would
+  call cost / look like" (per-call audit). Skipping LangSmith would
   blind us to per-call costs (which are the dominant FINAQ expense).
+- **Revision (schema v6, run traceability):** the original "don't
+  duplicate LangSmith in SQLite" rule had a hole — LangSmith traces only
+  exist when `LANGSMITH_TRACING=true` was set *at run time*, so a failed
+  run executed with tracing off had no per-call record at all. Schema v6
+  adds an `llm_calls` table: one row per chat-completion call (node,
+  model, latency, tokens, cost, **truncated** prompt/response excerpts,
+  clipped to `LLM_EXCERPT_MAX_CHARS`), written by the telemetry
+  interceptor in `utils/openrouter.py` whenever a node accumulator is
+  bound. Local excerpts are the always-on debugging baseline; LangSmith
+  remains the source of full untruncated traces with replay. The Run
+  Inspector shows both.
 - **Why not Postgres / DataDog / Sentry**: single-user single-box. Adding
   hosted observability requires either an SaaS account or a daemon — both
   multiply maintenance. SQLite + LangSmith covers the operational and
@@ -1138,6 +1171,7 @@ FINAQ, why it was chosen, and any later revisions.
   | `alerts` | Phase 1 Triage alerts. severity, signal, status (pending/acked/dismissed/actioned). | Phase 1 `agents/triage.py` |
   | `triage_runs` | One row per scheduled Triage run. items_scanned, alerts_emitted, duration. | Phase 1 `scripts/run_triage.py` |
   | `errors` | Centralised error log. Backs the Mission Control "Recent errors" panel. | `_safe_node`, agents on demand |
+  | `llm_calls` | Schema v6 — one row per chat-completion call: node, model, latency, tokens, cost, truncated prompt/response excerpts. `run_id` NULL for calls outside the graph (CIO planner, ad-hoc Q&A). Backs the Run Inspector's "LLM call trace" panel. | `utils/openrouter.py` interceptor |
   | `meta` | Schema version + future migration markers. | `init_db()` |
 
   Migration is idempotent (`CREATE TABLE IF NOT EXISTS`); calling
@@ -1180,7 +1214,29 @@ FINAQ, why it was chosen, and any later revisions.
 - **Why deep-link instead of mirror**: LangSmith already has a
   full-featured UI for traces. Re-implementing it inside Streamlit would
   be a multi-week project for marginal gain. A button that opens the
-  external dashboard with the right project filter is enough.
+  external dashboard with the right project filter is enough. (Schema v6
+  softens this: truncated per-call excerpts are mirrored locally — see
+  §11.1 revision — but full traces/replay stay LangSmith-only.)
+
+### 11.6 Run traceability (runs table → Run Inspector)
+
+- **Decision:** Mission Control's "Recent drill-in runs" table shows
+  per-run duration, LLM-call count, tokens, summed cost, failed-agent
+  names, and a three-way status — `failed` / `degraded` / `completed`,
+  where **degraded** = the graph finished but at least one agent failed or
+  logged a run-scoped soft error. Selecting a row opens the Run Inspector
+  (`st.switch_page` + `inspect_run_id` session key); the inspector is also
+  deep-linkable via `?run_id=<uuid>` for Telegram alerts / bookmarks.
+- **Why the derived 'degraded' state**: `graph_runs.status` alone hid
+  runs that "completed" with dead agents — they looked identical to
+  healthy runs, which is exactly how a multi-front failure went unnoticed.
+- **Run Inspector additions**: failure banner (failed-agent names + first
+  error), matplotlib agent-timeline gantt from `node_runs` timestamps,
+  local LLM call trace panel from `llm_calls`, and a CIO lineage backlink
+  ("triggered by CIO heartbeat &lt;ts&gt; — decision: drill") resolved via
+  `state.cio_action_for_run()` joining `cio_actions` ↔ `cio_runs`. The
+  CIO cycles panel's drill/reuse rows carry Inspect buttons jumping to
+  the corresponding run, closing the lineage loop in both directions.
 
 ---
 
@@ -1249,8 +1305,9 @@ before any LLM call:
    cooldown).
 2. **Recent CIO actions** — last 5 actions for the pair, given to the
    LLM as context so it doesn't yo-yo.
-3. **Yo-yo guard** — ≥3 dismissals for the pair in the last 7 days
-   short-circuits the LLM with a deterministic `dismiss`. Saves a
+3. **Yo-yo guard** — ≥3 *LLM-judged* dismissals for the pair in the
+   last 7 days short-circuits the LLM with a deterministic `dismiss`,
+   unless a filing landed on disk since the pair's last action. Saves a
    per-pair LLM call AND prevents the planner from drifting into
    contradictory decisions on a quiet pair.
 
@@ -1260,6 +1317,39 @@ before any LLM call:
   exactly the case where we want to override cooldown. Folding cooldown
   into the prompt lets the LLM weigh it; making it a hard gate would
   block legitimate refreshes.
+- **Revised because (2026-09-06):** the guard counted its *own* shortcut
+  dismissals. `_record_decision` writes every decision to `cio_actions`,
+  so at two heartbeats a day a quiet pair reached three dismissals in
+  ~36h and the shortcut itself then kept the count ≥3 forever. 98% of
+  all `cio_actions` rows (12.6k) were guard shortcuts; the LLM made its
+  last decision on 2026-06-05 and no drill or auto-ingest ran after
+  2026-06-04. Fix: `cio_actions.source` (schema v5) tags each row
+  `llm | gate | budget_cap | fallback` and `dismissals_in_window` counts
+  `llm` rows only. Two companion changes let the gate *see* new
+  evidence: the orchestrator runs the EDGAR freshness check
+  (auto-ingest) once per ticker *before* the planner decides, instead of
+  inside `_drill_one` after the decision it was meant to inform; and
+  `evaluate_gates` stands down when a filing landed since the pair's
+  last action. Tavily news is fetched lazily — only past the gate,
+  memoised per ticker, `search_depth="basic"`, 14-day / 8-headline
+  window — and queries the company name rather than the thesis name
+  (every ticker in the `wen` thesis used to search for "Wendy's").
+  Eager fetching had burned the monthly Tavily quota in ~4 days.
+- **Revised because (2026-09-07):** the first heartbeat after the
+  2026-09-06 fix auto-ingested every stale curated ticker — 43 of 46,
+  30 of them never ingested before — and was still running 3.5h later
+  (104k chunks embedded). Juan does not want the whole universe
+  embedded, only the tickers he cares about. Freshness is now split:
+  `_probe_freshness` (one EDGAR index round-trip, no download) runs for
+  every candidate and reaches the planner as `edgar_freshness`, so a
+  filing in EDGAR's index dated after the pair's last action wakes the
+  yo-yo guard even for a ticker we never ingest; `_auto_ingest` (the
+  expensive download + embed) runs only for **anchor tickers** on the
+  heartbeat, the requested ticker on `/cio TICKER`, and a stale ticker
+  the planner actually picks for a drill (right before `_drill_one`,
+  bounded by the drill budget). Separately, `data.chroma.ingest_filing`
+  now skips a filing whose last chunk id is already in the collection —
+  before that, one new 10-Q re-embedded all six of a ticker's filings.
 
 ### 12.4 Drill budget cap (post-LLM, pre-execute)
 

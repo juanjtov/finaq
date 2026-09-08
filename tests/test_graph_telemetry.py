@@ -8,16 +8,12 @@ The autouse `_isolated_state_db` fixture in conftest.py points
 
 from __future__ import annotations
 
-import json
 import time
-from pathlib import Path
 
 import pytest
 
 from agents import build_graph, invoke_with_telemetry
 from data import state as state_db
-
-THESES_DIR = Path(__file__).parents[1] / "theses"
 
 
 # Reuse the same stub fixture from test_graph.py — replaces real agent run()
@@ -164,7 +160,16 @@ def _stub_agents(monkeypatch):
 
 @pytest.fixture
 def ai_cake() -> dict:
-    return json.loads((THESES_DIR / "ai_cake.json").read_text())
+    """Minimal valid thesis, built inline. Was `theses/ai_cake.json`, but
+    thesis JSONs are user-managed (renamed/archived over time) — telemetry
+    tests must not depend on which theses currently exist on disk."""
+    return {
+        "name": "AI cake",
+        "slug": "ai_cake",
+        "summary": "Stub thesis for telemetry wiring tests.",
+        "anchor_tickers": ["NVDA"],
+        "universe": ["NVDA", "MSFT"],
+    }
 
 
 # --- Telemetry assertions --------------------------------------------------
@@ -177,7 +182,9 @@ async def test_invoke_with_telemetry_writes_one_graph_runs_row(ai_cake):
     runs = state_db.recent_runs(limit=10)
     assert len(runs) == 1
     assert runs[0]["ticker"] == "NVDA"
-    assert runs[0]["thesis"] == "AI cake"
+    # invoke_with_telemetry stores the SLUG (canonical join key for the
+    # CIO cooldown gate), falling back to name only when slug is absent.
+    assert runs[0]["thesis"] == "ai_cake"
     assert runs[0]["status"] == "completed"
     assert runs[0]["confidence"] == "medium"
     assert runs[0]["duration_s"] is not None

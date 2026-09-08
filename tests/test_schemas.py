@@ -258,3 +258,27 @@ def test_evidence_accepts_optional_as_of_freshness_marker():
     # Optional — schema must still accept evidence without it (e.g., for derived metrics).
     e2 = Evidence(source="yfinance", note="historical CAGR")
     assert e2.as_of is None
+
+
+# --- last_reviewed (2026-09-07) --------------------------------------------
+
+
+def test_thesis_accepts_optional_last_reviewed():
+    from datetime import date
+
+    base = {
+        "name": "t", "summary": "s", "anchor_tickers": ["AAPL"], "universe": ["AAPL"],
+    }
+    assert Thesis.model_validate(base).last_reviewed is None
+    t = Thesis.model_validate({**base, "last_reviewed": "2026-09-07"})
+    assert t.last_reviewed == date(2026, 9, 7)
+
+
+def test_thesis_rejects_garbage_last_reviewed():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Thesis.model_validate(
+            {"name": "t", "summary": "s", "anchor_tickers": ["AAPL"],
+             "universe": ["AAPL"], "last_reviewed": "last spring"}
+        )

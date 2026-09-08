@@ -249,13 +249,21 @@ def test_chroma_get_collection_passes_name_through_to_client(monkeypatch):
             return _FakeCollection()
 
     monkeypatch.setattr(ch.chromadb, "PersistentClient", lambda **kwargs: _FakeClient())
+    # _persistent_client caches one client per path for the process — clear
+    # it around the fake so this test neither reuses a real client nor
+    # leaks the fake to later tests.
+    ch._persistent_client.cache_clear()
+    try:
+        coll = ch._get_collection()
+        # _get_collection returns a thread-safe proxy (Rust-client segfault
+        # mitigation); the wrapped collection must be the fake's.
+        assert isinstance(coll._coll, _FakeCollection)
+        assert captured["name"] == "filings"  # default
 
-    coll = ch._get_collection()
-    assert isinstance(coll, _FakeCollection)
-    assert captured["name"] == "filings"  # default
-
-    coll = ch._get_collection(name="synthesis_reports")
-    assert captured["name"] == "synthesis_reports"
+        coll = ch._get_collection(name="synthesis_reports")
+        assert captured["name"] == "synthesis_reports"
+    finally:
+        ch._persistent_client.cache_clear()
 
 
 def test_ingest_filing_batches_upsert_when_chunk_count_exceeds_chroma_limit(
@@ -500,3 +508,111 @@ def test_chroma_build_where_clause_no_filters_returns_none():
     from data.chroma import _build_where_clause
 
     assert _build_where_clause(None, None) is None
+
+
+# --- ingest_filing skips filings already in ChromaDB (2026-09-07) ---------
+
+
+def _stub_chunking(monkeypatch, ch, n_chunks: int) -> None:
+    monkeypatch.setattr(ch, "_extract_text", lambda p: "x")
+    monkeypatch.setattr(ch, "_split_into_items", lambda text: [("1A", "Risk Factors", "body")])
+    monkeypatch.setattr(
+        ch, "_chunk_tokens", lambda body, encoder: [f"c{i}" for i in range(n_chunks)]
+    )
+    monkeypatch.setattr(ch, "_filing_meta_from_path", lambda path: ("10-Q", "0001-26-001"))
+    monkeypatch.setattr(ch, "parse_filed_date", lambda path: "2026-08-05")
+    monkeypatch.setattr(ch.tiktoken, "get_encoding", lambda name: object())
+
+
+def test_ingest_filing_skips_when_last_chunk_already_present(tmp_path, monkeypatch):
+    """A filing whose final chunk id is already in the collection was
+    fully ingested before → no re-embed. Re-embedding every on-disk
+    filing whenever one new 10-Q landed multiplied ingest cost ~6x."""
+    from data import chroma as ch
+
+    upserts: list[int] = []
+
+    class _FakeCollection:
+        def get(self, ids, include=None):
+            return {"ids": [i for i in ids if i == "CRDO-0001-26-001-4"]}
+
+        def upsert(self, ids, documents, metadatas):
+            upserts.append(len(ids))
+
+    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
+    _stub_chunking(monkeypatch, ch, n_chunks=5)
+    fake_path = tmp_path / "full-submission.txt"
+    fake_path.write_text("ignored")
+
+    assert ch.ingest_filing("CRDO", fake_path) == 0
+    assert upserts == []
+
+
+def test_ingest_filing_reembeds_partial_ingest(tmp_path, monkeypatch):
+    """Only the FIRST chunk exists (a run killed mid-upsert) → the last
+    id is missing → the filing is embedded again in full."""
+    from data import chroma as ch
+
+    upserts: list[int] = []
+
+    class _FakeCollection:
+        def get(self, ids, include=None):
+            return {"ids": [i for i in ids if i == "CRDO-0001-26-001-0"]}
+
+        def upsert(self, ids, documents, metadatas):
+            upserts.append(len(ids))
+
+    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
+    _stub_chunking(monkeypatch, ch, n_chunks=5)
+    fake_path = tmp_path / "full-submission.txt"
+    fake_path.write_text("ignored")
+
+    assert ch.ingest_filing("CRDO", fake_path) == 5
+    assert upserts == [5]
+
+
+def test_ingest_filing_embeds_when_presence_check_fails(tmp_path, monkeypatch):
+    """A collection without `get` (or a read error) must not block
+    ingest — embedding anyway is the safe direction."""
+    from data import chroma as ch
+
+    upserts: list[int] = []
+
+    class _FakeCollection:
+        def upsert(self, ids, documents, metadatas):
+            upserts.append(len(ids))
+
+    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
+    _stub_chunking(monkeypatch, ch, n_chunks=3)
+    fake_path = tmp_path / "full-submission.txt"
+    fake_path.write_text("ignored")
+
+    assert ch.ingest_filing("CRDO", fake_path) == 3
+    assert upserts == [3]
+
+
+# --- Freshness kill-switch (FINAQ_SKIP_FRESHNESS_PROBES) --------------------
+
+
+def test_check_ingest_freshness_kill_switch_short_circuits(monkeypatch):
+    """With the probes kill-switch set, check_ingest_freshness must report
+    'unknown, not stale' WITHOUT touching EDGAR or ChromaDB. Regression:
+    an earlier version only gated the chroma probe — an empty chroma dict
+    plus a live EDGAR date then read as 'stale' for every ticker, funnelling
+    the UI / Telegram / CIO straight into the ingest path the switch exists
+    to avoid (chromadb Rust segfault, POSTPONED §2)."""
+    from data import freshness as fr
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("probe called despite kill-switch")
+
+    monkeypatch.setattr(fr, "latest_filing_dates", _boom)
+    monkeypatch.setattr(fr, "last_filings_by_type", _boom)
+    monkeypatch.setenv("FINAQ_SKIP_FRESHNESS_PROBES", "1")
+
+    report = fr.check_ingest_freshness("NVDA")
+    assert report.is_stale is False
+    assert report.edgar_error is not None
+    assert "FINAQ_SKIP_FRESHNESS_PROBES" in report.edgar_error
+    assert report.per_form == []
+    assert report.stale_forms() == []

@@ -50,6 +50,34 @@ Three categories:
 Each item has a **trigger**: the observable condition that should cause us to
 revisit. If the trigger never fires, we never build it.
 
+### chromadb Rust-client segfault (macOS) — durable fix
+
+**Status (2026-09-07):** chromadb 1.5.8/1.5.9's Rust binding segfaults the
+whole Python process (exit 139, no traceback) on this Mac when collection ops
+run inside Streamlit or pytest — the drill-time freshness probes
+(`has_ticker`, `last_filings_by_type`) added in the EDGAR freshness gate
+were killing the dashboard server on every page load. Reproduces
+deterministically on any thread created after `threading.stack_size(<any
+explicit value>)`; plain processes and default threads are fine.
+**Mitigations shipped:** all collection ops route through one dedicated
+default-stack worker with a process-cached PersistentClient
+(`data/chroma.py:_chroma_executor`), and unit tests stub the probe layer
+(`tests/conftest.py`) so the suite is hermetic and crash-free. The live
+Streamlit process still dies, so **set `FINAQ_SKIP_FRESHNESS_PROBES=1` in
+`.env`** until the durable fix lands: `check_ingest_freshness` then
+short-circuits to "unknown, not stale" (no EDGAR call, no Rust client), the
+UI/Telegram/CIO gates all soft-pass, and the dashboard renders normally.
+The cost while it's on: nothing warns you when the corpus trails EDGAR.
+
+| Option | Notes |
+|---|---|
+| **Version bisect + pin + re-ingest** | 1.0.21 cannot open the 1.5.x-migrated store (Rust panic on the migrations table), so any downgrade means re-ingesting the 7.2GB corpus (`scripts/ingest_universe.py`, embedding cost applies). |
+| **Subprocess isolation** | Run chroma ops in a worker subprocess (crash can't take down Streamlit). ~1 day; adds IPC + import latency per worker restart. |
+| **Upstream fix** | Watch chromadb releases/issues for a Rust-binding segfault fix on macOS; retest with the repro above (`threading.stack_size(512*1024)` + one `coll.get`). |
+
+**Trigger:** immediately — the dashboard crashes on pages that touch the
+freshness probes until one of these lands.
+
 ### RAG / retrieval enhancements (within Step 5b's scope)
 
 | Item | Trigger | Estimated effort |
@@ -132,7 +160,8 @@ revisit. If the trigger never fires, we never build it.
 | **CIO evidence retention** | Today the CIO's evidence bundle (RAG chunks + news + filings) is built fresh per call and not persisted. When you read a `cio_actions` rationale and want to know what the CIO *saw*, there's no record. Trigger to add a `cio_evidence` table: ≥3 times you wanted to audit a decision and couldn't reproduce the inputs. | ~3-4h: write evidence dict to a JSON column, surface it in Run Inspector. |
 | **Per-action LLM telemetry on cio_actions rows** | Today CIO planner LLM calls are not in `node_runs` (which has a FK to `graph_runs`). Cost / token tracking exists on graph drills triggered by the CIO but not on the planner's own calls. Trigger: monthly OpenRouter bill diverges from `state.db.daily_cost` by ≥$2. | ~2h: add `tokens_in/out/cost_usd` columns to `cio_actions`, wire planner to write them via the same ContextVar accumulator pattern. |
 | **CIO multi-thesis batching** | Today on-demand `/cio TICKER` decides per-thesis serially. For a ticker in 3 theses, that's 3 LLM calls. Could be one batched call. Trigger: a heartbeat regularly does ≥6 LLM calls for cross-thesis tickers (NVDA in ai_cake + nvda_halo). | ~1 day: design the batched prompt, validate it returns N decisions in one shot, update `decide()`. |
-| **Budget-cap demotion preserves original confidence** | Today `apply_drill_budget` overwrites a demoted decision's confidence to `low` to signal "this isn't a real LLM-decision". Empirically that misleads the dashboard — 21% of dismisses (15 of 70) appeared as `low` confidence in cycle #2 but were actually high-confidence drills clipped by the budget cap. The rationale already prefixes `[budget cap]` — that's enough. Trigger to ship: dashboard reader misreads CIO confidence distribution, OR a confidence-calibration loop (entry above) needs to distinguish real LLM uncertainty from cap-induced low. | ~10 min: in `cio/planner.py:apply_drill_budget`, drop the `confidence="low"` overwrite on demoted rows; preserve `d.confidence`. Optionally add a `was_demoted` boolean column to `cio_actions` for cleaner UI separation. |
+| **Budget-cap demotion preserves original confidence** | Today `apply_drill_budget` overwrites a demoted decision's confidence to `low` to signal "this isn't a real LLM-decision". Empirically that misleads the dashboard — 21% of dismisses (15 of 70) appeared as `low` confidence in cycle #2 but were actually high-confidence drills clipped by the budget cap. The rationale already prefixes `[budget cap]` — that's enough. Trigger to ship: dashboard reader misreads CIO confidence distribution, OR a confidence-calibration loop (entry above) needs to distinguish real LLM uncertainty from cap-induced low. | ~10 min: in `cio/planner.py:apply_drill_budget`, drop the `confidence="low"` overwrite on demoted rows; preserve `d.confidence`. `cio_actions.source='budget_cap'` (schema v5, 2026-09-06) already gives the UI that separation — no extra column needed. |
+| **Every 5am cycle is labelled `catchup`** | `CATCHUP_THRESHOLD_HOURS=8` was sized for the 8h gap between the 5am and 1pm slots, but the overnight gap (1pm → 5am) is 16h, so `--mode auto` always picks `catchup` in the morning even when nothing was missed (observed 2026-09-06: 127 catchups vs 117 heartbeats over four months). Cosmetic — both modes run the same sweep. Trigger: the label is used for anything beyond display (e.g. a Mission Control "missed slot" alert). | ~1 line: raise the threshold to ~20h in `cio/dispatcher.py`, update the plist comment + `test_cio_dispatcher`. |
 
 ### CIO alternative-data sources (Phase 2-aligned)
 

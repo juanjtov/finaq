@@ -85,5 +85,6 @@
     "terminal_growth_basis": "Above-GDP growth assumption for successful digital banking disruptors",
     "discount_rate_floor": 0.095,
     "discount_rate_cap": 0.175
-  }
+  },
+  "last_reviewed": "2026-05-09"
 }

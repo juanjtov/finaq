@@ -345,13 +345,33 @@ def render_eval_runs() -> None:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 
+def _run_status_label(r: dict) -> str:
+    """Derive the three-way status a run row renders: failed / degraded /
+    completed. 'Degraded' = the graph finished but at least one agent
+    failed or logged a run-scoped error (soft failure) — previously these
+    looked identical to healthy runs."""
+    status = str(r.get("status") or "")
+    if status == "failed":
+        return "❌ failed"
+    if status == "completed":
+        if int(r.get("failed_nodes") or 0) > 0 or int(r.get("n_errors") or 0) > 0:
+            return "⚠️ degraded"
+        return "✅ completed"
+    return status or "?"
+
+
+def _fmt_tokens(n: int) -> str:
+    return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
+
+
 def render_state_db_panel() -> None:
     """Step 5z observability — reads from data/state.py SQLite telemetry."""
     st.markdown("### Drill-in runs")
     st.caption(
         "Every full LangGraph drill-in (the dashboard's 🔍 Run drill-in "
-        "button), with timing, status, and per-node telemetry. Backed by "
-        "`data_cache/state.db`."
+        "button), with timing, status, cost, and per-node telemetry. Backed "
+        "by `data_cache/state.db`. **Select a row to open it in the Run "
+        "Inspector** (agent timeline, errors, LLM call trace)."
     )
     from data import state as state_db
 
@@ -367,7 +387,8 @@ def render_state_db_panel() -> None:
         return
 
     summary = state_db.health_summary()
-    cols = st.columns(4)
+    spend = state_db.cost_today()
+    cols = st.columns(5)
     with cols[0]:
         cols[0].metric("Total graph runs", summary["total_runs"])
     with cols[1]:
@@ -382,51 +403,86 @@ def render_state_db_panel() -> None:
             f"{rate:.0%}" if rate is not None else "—",
         )
     with cols[3]:
+        cols[3].metric(
+            "Spend today",
+            f"${spend['cost_usd']:.2f}",
+            help="Summed from node_runs.cost_usd for today's UTC date.",
+        )
+    with cols[4]:
         # Quick LangSmith deep-link if the user has it configured.
         proj = os.environ.get("LANGSMITH_PROJECT", "")
         if proj and os.environ.get("LANGSMITH_TRACING", "").lower() == "true":
-            cols[3].link_button(
+            cols[4].link_button(
                 "🔗 LangSmith",
                 f"https://smith.langchain.com/o/-/projects/p/{proj}",
                 use_container_width=True,
             )
         else:
-            cols[3].caption("LangSmith disabled")
+            cols[4].caption("LangSmith disabled")
 
     section_divider()
 
-    # Daily-runs chart
-    st.markdown("#### Daily run counts (last 14 days)")
-    daily = state_db.daily_run_counts(days=14)
-    if daily:
-        df = pd.DataFrame(daily).set_index("day")
-        st.bar_chart(df[["completed", "failed"]])
-    else:
-        st.caption("No daily-run data yet.")
+    # Daily-runs + daily-cost charts, side by side.
+    chart_cols = st.columns(2)
+    with chart_cols[0]:
+        st.markdown("#### Daily run counts (last 14 days)")
+        daily = state_db.daily_run_counts(days=14)
+        if daily:
+            df = pd.DataFrame(daily).set_index("day")
+            st.bar_chart(df[["completed", "failed"]])
+        else:
+            st.caption("No daily-run data yet.")
+    with chart_cols[1]:
+        st.markdown("#### Daily LLM cost (last 14 days)")
+        cost_rows = state_db.daily_cost(days=14)
+        if cost_rows:
+            cost_df = pd.DataFrame(cost_rows).set_index("date")
+            st.bar_chart(cost_df[["cost_usd"]])
+        else:
+            st.caption("No cost data yet.")
 
     section_divider()
 
-    # Recent runs table
+    # Recent runs table — row selection opens the Run Inspector.
     st.markdown("#### Recent drill-in runs")
     runs = state_db.recent_runs(limit=25)
     if runs:
         rows = []
         for r in runs:
+            failed_names = str(r.get("failed_node_names") or "").replace(",", ", ")
             rows.append(
                 {
                     "started": str(r.get("started_at") or "")[:19].replace("T", " "),
                     "ticker": str(r.get("ticker") or "?"),
                     "thesis": str(r.get("thesis") or "?"),
-                    "status": str(r.get("status") or ""),
-                    "confidence": str(r.get("confidence") or "—"),
+                    "status": _run_status_label(r),
+                    "failed agents": failed_names or "—",
                     "duration_s": (
                         f"{r['duration_s']:.1f}" if r.get("duration_s") else "—"
                     ),
-                    "nodes": int(r.get("node_runs_count") or 0),
-                    "failed": int(r.get("failed_nodes") or 0),
+                    "calls": int(r.get("n_calls") or 0),
+                    "tokens": (
+                        f"{_fmt_tokens(int(r.get('tokens_in') or 0))} / "
+                        f"{_fmt_tokens(int(r.get('tokens_out') or 0))}"
+                    ),
+                    "cost": f"${float(r.get('cost_usd') or 0.0):.4f}",
+                    "confidence": str(r.get("confidence") or "—"),
+                    "errors": int(r.get("n_errors") or 0),
                 }
             )
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        event = st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="drill_runs_table",
+        )
+        selected = getattr(getattr(event, "selection", None), "rows", None) or []
+        if selected:
+            chosen = runs[selected[0]]
+            st.session_state["inspect_run_id"] = chosen.get("run_id")
+            st.switch_page("pages/run_inspector.py")
     else:
         st.caption("No runs recorded.")
 
@@ -437,9 +493,17 @@ def render_state_db_panel() -> None:
     st.caption(
         "Each row is one drill / reuse / dismiss decision the CIO made on a "
         "heartbeat or `/cio` invocation. Model + cost + latency capture the "
-        "LLM call that produced the decision."
+        "LLM call that produced the decision. `source` says who decided: "
+        "`llm`, `budget_cap` (demoted drill) or `fallback` (planner error). "
+        "Yo-yo-guard shortcuts (`gate`) are hidden — they'd otherwise fill "
+        "the table with one cycle's 'nothing changed' rows."
     )
-    cio_actions = state_db.recent_cio_actions(limit=25)
+    # Pull a few cycles' worth so the 25 shown are real judgements, not
+    # the tail of the latest sweep's gate shortcuts.
+    cio_actions = [
+        a for a in state_db.recent_cio_actions(limit=400)
+        if a.get("source") != "gate"
+    ][:25]
     if cio_actions:
         action_rows = []
         for a in cio_actions:
@@ -453,6 +517,7 @@ def render_state_db_panel() -> None:
                     "ticker": str(a.get("ticker") or ""),
                     "thesis": str(a.get("thesis") or "—"),
                     "action": str(a.get("action") or ""),
+                    "source": str(a.get("source") or "—"),
                     "confidence": str(a.get("confidence") or "—"),
                     "model": str(a.get("model_used") or "—"),
                     "tok_in": int(a.get("tokens_in") or 0),

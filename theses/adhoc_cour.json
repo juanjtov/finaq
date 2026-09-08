@@ -93,5 +93,6 @@
     "terminal_growth_basis": "Above-GDP growth assumption for digital education adoption curve",
     "discount_rate_floor": 0.085,
     "discount_rate_cap": 0.15
-  }
+  },
+  "last_reviewed": "2026-05-15"
 }

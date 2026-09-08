@@ -261,3 +261,24 @@ def test_drill_dashboard_url_includes_query_params(monkeypatch):
     assert "thesis=ai_cake" in url
     assert "run_id=rid-1" in url
     assert "127.0.0.1" in url  # localhost rewritten
+
+
+# --- Overdue-thesis nag (2026-09-07) ---------------------------------------
+
+
+def test_format_lists_overdue_theses_when_present():
+    plan = _plan(_dismiss("NVDA"))
+    plan.overdue_theses = [
+        {"slug": "construction", "age_days": 131},
+        {"slug": "saas<x>", "age_days": 125},
+    ]
+    out = cio_notify.format_for_telegram(plan, trigger="heartbeat", duration_s=1.0)
+    assert "Theses overdue for review" in out
+    assert "<code>construction</code> (131d)" in out
+    assert "saas&lt;x&gt;" in out  # HTML-escaped slug
+    assert "Mark reviewed" in out
+
+
+def test_format_omits_overdue_line_when_none():
+    out = cio_notify.format_for_telegram(_plan(_dismiss("NVDA")), trigger="heartbeat", duration_s=1.0)
+    assert "overdue" not in out.lower()

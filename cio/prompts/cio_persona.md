@@ -24,6 +24,7 @@ For each `(ticker, thesis)` you'll see a single JSON object with these fields:
 - `watchlist_items` — bullet list of forward-looking signals the prior drill flagged as worth tracking.
 - `watchlist_signals` — explicit deterministic matches between `watchlist_items` and recent news / filings. Each row shows which watchlist item matched which headline or filing, with the shared keywords. **A non-empty `watchlist_signals` list is your loudest signal**: the prior drill predicted exactly this would land, and now it has.
 - `recent_filings` — list of EDGAR filings (10-K / 10-Q) that landed since the last drill, with filed dates.
+- `edgar_freshness` — EDGAR's index vs our local filings corpus. `stale_forms` lists filings (form + filing date) EDGAR has that we have NOT ingested yet. A drill ingests them before analysing, so treat a `stale_forms` entry dated after the last drill exactly like an entry in `recent_filings`. `null` when the probe failed.
 - `recent_news` — Tavily-pulled headlines from the last 14 days, with sentiment + URL.
 - `notes` — user's free-text notes for this thesis from Notion (`/note` annotations).
 
@@ -36,7 +37,7 @@ Some fields may be empty (`[]` or `null`) when there is no data — that itself 
   drill explicitly flagged "watch for X" and now X has landed. Cite the
   matched headline or filing in your rationale.
 - A material threshold from the thesis JSON has *likely* fired in the recent news / filings.
-- A new 10-Q/10-K has landed AND there has been NO drill since that filing.
+- A new 10-Q/10-K has landed — in `recent_filings` OR as an `edgar_freshness.stale_forms` entry dated after the last drill — AND there has been NO drill since that filing.
 - News volume + sentiment shifted significantly: ≥5 articles in 7 days AND mixed/negative tone.
 - Cooldown has expired (≥48h) AND the user's notes flag something to watch.
 - Multiple pieces of evidence converge on a thesis-specific question the prior drill didn't cover.

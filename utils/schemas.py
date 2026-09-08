@@ -7,6 +7,7 @@ in CLAUDE.md §9 and are what each agent must return from `run()`.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -71,6 +72,12 @@ class Thesis(BaseModel):
     valuation: ValuationConfig | None = (
         None  # required for new theses; see docs/FINANCE_ASSUMPTIONS.md
     )
+    # ISO date the user last confirmed the thesis still reflects their view.
+    # Stamped by Theses Admin's "Mark reviewed", by promotion, and by the
+    # New Thesis page. `data.theses.review_age_days` falls back to the
+    # file's mtime when absent. Theses older than
+    # `data.theses.REVIEW_MAX_DAYS` are flagged in the CIO summary.
+    last_reviewed: date | None = None
 
     @model_validator(mode="after")
     def _anchors_subset_of_universe(self) -> Thesis:
