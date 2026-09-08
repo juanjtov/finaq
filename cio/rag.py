@@ -7,9 +7,8 @@ retrieve at the granularity of "the bull case from the prior NVDA / ai_cake
 drill" without having to re-parse the full report.
 
 Retrieval reuses `data.vectors`' tokeniser + BM25 + RRF helpers on top of
-the reports index; the ticker-scoped lookups (`latest_watchlist_section`,
-`latest_report_excerpts`) list a ticker's chunks by id prefix and need no
-embedding call.
+the reports index; the ticker-scoped lookup (`latest_watchlist_section`)
+lists a ticker's chunks by id prefix and needs no embedding call.
 
 Output shape:
   list[{
@@ -107,57 +106,3 @@ def latest_watchlist_section(
         return None
     best = max(chunks, key=_date_of)
     return {"text": best["text"], "metadata": best["metadata"]}
-
-
-def latest_report_excerpts(
-    *,
-    ticker: str,
-    thesis: str | None = None,
-    k: int = 3,
-) -> list[dict]:
-    """Quick "what does the most recent report say" view — pulls the top
-    `k` sections of the most recent drill-in for a (ticker, thesis) pair.
-
-    The planner uses this when the user invokes `/cio TICKER` and we
-    want to give the LLM a single report's worth of context, not a
-    cross-report RAG cocktail.
-
-    Implementation: pull every chunk for the pair, group by `run_id`,
-    pick the run_id with the most-recent `date`, return its first `k`
-    sections (sorted by section weight: What this means → Thesis →
-    Top risks first).
-    """
-    if not ticker:
-        return []
-    try:
-        chunks = fetch_reports(ticker, thesis=thesis, limit=200)
-    except Exception:
-        return []
-
-    # Group by run_id; pick most recent by date.
-    by_run: dict[str, list[dict]] = {}
-    for chunk in chunks:
-        run_id = str((chunk.get("metadata") or {}).get("run_id") or "")
-        if run_id:
-            by_run.setdefault(run_id, []).append(chunk)
-    if not by_run:
-        return []
-
-    most_recent_run = max(by_run, key=lambda rid: _date_of(by_run[rid][0]))
-    sections = by_run[most_recent_run]
-
-    # Section ordering — most decision-relevant first. Anything not in
-    # the priority list gets pushed to the bottom (stable sort).
-    priority = {
-        "What this means": 0,
-        "Thesis statement": 1,
-        "Top risks": 2,
-        "Action recommendation": 3,
-        "Monte Carlo fair value": 4,
-        "Bull case": 5,
-        "Bear case": 6,
-        "Watchlist": 7,
-        "Evidence": 8,
-    }
-    sections.sort(key=lambda s: priority.get(str(s["metadata"].get("section") or ""), 99))
-    return sections[:k]

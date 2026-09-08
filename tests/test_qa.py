@@ -466,7 +466,7 @@ async def test_ask_filings_propagates_llm_when_chunks_present(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ask_filings_handles_index_failure(monkeypatch):
-    """the filings index raise → tenacity retry → finally surfaces in errors."""
+    """A vector-store failure → tenacity retry → finally surfaces in errors."""
 
     monkeypatch.setattr(
         "data.vectors.query",

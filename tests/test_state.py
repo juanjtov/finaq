@@ -1145,3 +1145,40 @@ def test_ingest_manifest_summary(tmp_path: Path):
     summary = st.ingest_manifest_summary(db_path=db)
     assert (summary["tickers"], summary["filings"], summary["chunks"]) == (2, 2, 15)
     assert summary["last_ingested_at"]
+
+
+def test_ingested_filings_reads_tolerate_pre_v7_db(tmp_path: Path):
+    """Reads never migrate: a DB without the manifest table reads as
+    "nothing ingested" instead of raising (the dashboard reads DBs that only
+    get migrated on their next write)."""
+    db = tmp_path / "old.db"
+    st.init_db(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE ingested_filings")
+    assert st.ingested_filings("NKE", db_path=db) == []
+    assert st.ingested_filing_chunks("NKE", "acc", db_path=db) is None
+    assert st.ingest_manifest_summary(db_path=db)["filings"] == 0
+    with sqlite3.connect(db) as conn:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "ingested_filings" not in names
+
+
+def test_clear_ingested_filings_forgets_one_ticker(tmp_path: Path):
+    db = tmp_path / "test.db"
+    for ticker in ("NKE", "COUR"):
+        st.record_ingested_filing(
+            ticker=ticker, accession="a", filing_type="10-K", filed_date="", chunks=3, db_path=db
+        )
+    assert st.clear_ingested_filings("nke", db_path=db) == 1
+    assert st.ingested_filings("NKE", db_path=db) == []
+    assert len(st.ingested_filings("COUR", db_path=db)) == 1
+
+
+def test_manifest_reads_do_not_create_a_missing_db(tmp_path: Path):
+    """Mission Control's state.db panel treats "file exists" as "recording";
+    a read-only manifest probe must not conjure an empty file."""
+    db = tmp_path / "absent.db"
+    assert st.ingested_filings("NKE", db_path=db) == []
+    assert st.ingested_filing_chunks("NKE", "acc", db_path=db) is None
+    assert st.ingest_manifest_summary(db_path=db)["tickers"] == 0
+    assert not db.exists()

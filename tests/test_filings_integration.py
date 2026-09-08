@@ -1,4 +1,4 @@
-"""Step 5b integration tests — real the filings index hybrid retrieval + real LLM synthesis.
+"""Step 5b integration tests — real Pinecone hybrid retrieval + real LLM synthesis.
 
 Run via:  pytest -m integration tests/test_filings_integration.py
 
@@ -36,7 +36,7 @@ async def test_filings_real_run_on_nvda_ai_cake():
     out = FilingsOutput.model_validate(result["filings"])
 
     if out.errors and any("no chunks" in e for e in out.errors):
-        pytest.skip("the filings index has no NVDA chunks; run data-layer integration first")
+        pytest.skip("filings index has no NVDA chunks; run data-layer integration first")
 
     # Sanity-check the output shape
     assert out.summary, "summary is empty"

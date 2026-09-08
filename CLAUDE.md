@@ -163,7 +163,7 @@ def has_ticker(ticker: str) -> bool: ...              # reads the state.db manif
 def last_filings_by_type(ticker: str) -> dict[str, str]: ...
 ```
 
-One index (`PINECONE_INDEX_FILINGS`, default `finaq-filings`) with **one namespace per ticker**: every query is scoped to a few hundred vectors and a ticker can be re-ingested by wiping its namespace. Ids are `{TICKER}-{accession}-{n}`; a filing whose chunk count already matches the `ingested_filings` row in `state.db` is skipped, otherwise its old ids are deleted by prefix and it is embedded again in full. Past Synthesis reports live in a second index (`PINECONE_INDEX_REPORTS`, default `finaq-reports`) for the CIO planner.
+One index (`PINECONE_INDEX_FILINGS`, default `finaq-filings`) with **one namespace per ticker**: every query is scoped to a few hundred vectors and a ticker can be re-ingested by wiping its namespace. Ids are `{TICKER}-{accession}-{n}`; a filing whose chunk count already matches the `ingested_filings` row in `state.db` is skipped, otherwise its old ids are deleted by prefix and it is embedded again in full. The manifest alone decides "already ingested": after wiping or renaming the index, run `python -m scripts.ingest_universe TICKER --force` to clear it and embed again. Past Synthesis reports live in a second index (`PINECONE_INDEX_REPORTS`, default `finaq-reports`) for the CIO planner.
 
 ## 7. Thesis JSON schema
 

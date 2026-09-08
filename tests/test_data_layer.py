@@ -173,7 +173,7 @@ def test_yfin_returns_partial_dict_with_errors_field_on_failure(tmp_path, monkey
     assert all(k in result for k in yfin.EXPECTED_KEYS)
 
 
-# --- data/vectors.py (pure-logic helpers, no real the filings index) -------------------
+# --- data/vectors.py (pure-logic helpers, no real vector store) -------------------
 
 
 def test_vectors_split_into_items_extracts_codes_and_bodies():
@@ -282,6 +282,17 @@ def test_vectors_primary_documents_keep_form_and_press_release_only():
     assert "press release" in kept[1]
 
 
+def test_vectors_primary_documents_keep_ex13_annual_report():
+    """Some 10-K filers incorporate MD&A and the financials by reference to an
+    EX-13 annual-report exhibit; dropping it would drop the narrative."""
+    from data.vectors import _primary_documents
+
+    raw = _sgml(("10-K", "cover only"), ("EX-13", "annual report narrative"), ("EX-21", "subsidiaries"))
+    kept = _primary_documents(raw, "10-K")
+    assert len(kept) == 2
+    assert "annual report narrative" in kept[1]
+
+
 def test_vectors_primary_documents_accept_amendments_and_fall_back():
     from data.vectors import _primary_documents
 
@@ -377,6 +388,19 @@ def _stub_ingest(monkeypatch, vec, n_chunks: int, *, accession: str, filing_type
     fake = _FakeIndex()
     monkeypatch.setattr(vec, "_index", lambda name: fake)
     return fake
+
+
+def test_vectors_list_ids_ignores_empty_pages():
+    """A page whose `vectors` list is empty must contribute nothing — never
+    the dict's keys (a stray id "vectors" would then be deleted)."""
+    from data.vectors import _list_ids
+
+    class _Index:
+        def list(self, *, prefix=None, limit=None, namespace=""):
+            yield {"vectors": []}
+            yield {"vectors": [{"id": "A-1-0"}]}
+
+    assert _list_ids(_Index(), prefix="A-", namespace="A") == ["A-1-0"]
 
 
 def test_vectors_ingest_batches_upserts_and_records_manifest(tmp_path, monkeypatch):

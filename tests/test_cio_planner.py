@@ -2,7 +2,7 @@
 
 The LLM call is stubbed in every test so this suite is deterministic and
 runs in <1s. RAG retrieval is also stubbed because the synthesis_reports
-collection depends on the live the filings index state.
+collection depends on the live reports-index state.
 """
 
 from __future__ import annotations
@@ -511,7 +511,7 @@ def test_build_evidence_bundle_includes_watchlist_fields(isolated_db, monkeypatc
 
 
 def test_build_evidence_bundle_empty_watchlist_when_no_chunk(isolated_db, monkeypatch):
-    """When the filings index has no Watchlist chunk for the pair (cold start),
+    """When the reports index has no Watchlist chunk for the pair (cold start),
     bundle still has the keys but the lists are empty."""
     from cio import rag as cio_rag
     from cio import memory as cio_memory

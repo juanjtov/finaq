@@ -207,6 +207,12 @@ FINAQ, why it was chosen, and any later revisions.
 - **Idempotency:** a filing whose chunk count matches the manifest is
   skipped; otherwise its old ids are deleted by prefix (serverless indexes
   cannot delete by metadata filter) and it is embedded again in full.
+- **Manifest/index drift:** the manifest is the only source of truth for
+  "already ingested", so a wiped or renamed index looks fully ingested
+  until `scripts/ingest_universe --force` clears the ticker's rows. The
+  unit suite's live integration test writes NVDA into the index against
+  an isolated test DB, which is exactly this drift; the next real NVDA
+  drill heals it (count mismatch → delete by prefix → re-embed).
 
 ### 3.6 Cosine distance (explicit) over L2 default
 

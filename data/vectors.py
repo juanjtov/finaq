@@ -44,11 +44,13 @@ from pathlib import Path
 import tiktoken
 from bs4 import BeautifulSoup
 from pinecone import Pinecone, ServerlessSpec
+from pinecone.exceptions import PineconeException
 from rank_bm25 import BM25Okapi
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from data import state as state_db
 from data.edgar import parse_filed_date
-from utils import logger, tenacity_retry
+from utils import RETRYABLE_EXCEPTIONS, logger, tenacity_retry
 from utils.models import MODEL_EMBEDDINGS
 from utils.openrouter import get_client
 
@@ -66,7 +68,8 @@ ID_BATCH_SIZE = 100  # list() page size; also used for fetch / delete-by-id batc
 TOKENIZER = "cl100k_base"
 DEFAULT_CANDIDATE_POOL = 60  # semantic top-N, pre-fusion
 RRF_K = 60  # standard reciprocal-rank-fusion constant
-PRIMARY_EXHIBIT_PREFIX = "EX-99"  # press releases attached to 6-K / 8-K submissions
+PRIMARY_EXHIBIT_PREFIXES = ("EX-99", "EX-13")  # 6-K/8-K press releases; annual report by reference
+INDEX_CREATE_TIMEOUT_S = 120  # create_index blocks until ready; never hang a read path forever
 
 # Hard cap on chunks per filing — a safety net against a pathological
 # submission. With primary-document extraction a typical 10-K runs a few
@@ -293,6 +296,15 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 # --- Pinecone client -------------------------------------------------------
 
+# The SDK wraps transport failures in its own exception tree (not OSError), so
+# the shared `tenacity_retry` would never fire for Pinecone. Same policy, wider net.
+_pinecone_retry = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type((PineconeException, *RETRYABLE_EXCEPTIONS)),
+    reraise=True,
+)
+
 
 @lru_cache(maxsize=1)
 def _client() -> Pinecone:
@@ -324,6 +336,7 @@ def _index(name: str):
             dimension=_embedding_dim(),
             metric=DISTANCE_METRIC,
             spec=ServerlessSpec(cloud=PINECONE_CLOUD, region=PINECONE_REGION),
+            timeout=INDEX_CREATE_TIMEOUT_S,
         )
     return pc.Index(name)
 
@@ -335,16 +348,21 @@ def _get(obj, key: str, default=None):
     return getattr(obj, key, default)
 
 
-@tenacity_retry
+@_pinecone_retry
 def _query_index(index, **kwargs):
     return index.query(include_metadata=True, **kwargs)
+
+
+@_pinecone_retry
+def _upsert_batch(index, *, vectors: list[dict], namespace: str) -> None:
+    index.upsert(vectors=vectors, namespace=namespace, show_progress=False)
 
 
 def _list_ids(index, *, prefix: str, namespace: str) -> list[str]:
     """Every vector id in `namespace` starting with `prefix`."""
     ids: list[str] = []
     for page in index.list(prefix=prefix, limit=ID_BATCH_SIZE, namespace=namespace):
-        for item in _get(page, "vectors", None) or page:
+        for item in _get(page, "vectors", None) or []:
             ids.append(item if isinstance(item, str) else _get(item, "id"))
     return ids
 
@@ -369,13 +387,13 @@ def _upsert(index, *, namespace: str, ids: list[str], docs: list[str], metas: li
     for i in range(0, len(ids), UPSERT_BATCH_SIZE):
         sl = slice(i, i + UPSERT_BATCH_SIZE)
         vectors = embed_texts(docs[sl])
-        index.upsert(
+        _upsert_batch(
+            index,
             vectors=[
                 {"id": _id, "values": vec, "metadata": {**meta, "text": doc}}
                 for _id, vec, meta, doc in zip(ids[sl], vectors, metas[sl], docs[sl], strict=True)
             ],
             namespace=namespace,
-            show_progress=False,
         )
 
 
@@ -393,10 +411,13 @@ def _unpack_matches(response) -> list[dict]:
 
 
 def _is_primary(doc_type: str, filing_type: str) -> bool:
-    """The form itself (incl. amendments such as 10-K/A) or an EX-99 press release."""
+    """The form itself (incl. amendments such as 10-K/A), an EX-99 press release,
+    or an EX-13 annual report incorporated by reference."""
     t = doc_type.upper()
     return (
-        t == filing_type or t.startswith(f"{filing_type}/") or t.startswith(PRIMARY_EXHIBIT_PREFIX)
+        t == filing_type
+        or t.startswith(f"{filing_type}/")
+        or t.startswith(PRIMARY_EXHIBIT_PREFIXES)
     )
 
 
@@ -404,8 +425,9 @@ def _primary_documents(raw: str, filing_type: str) -> list[str]:
     """Return the <TEXT> bodies of the primary document(s) in an SGML submission.
 
     A full-submission.txt bundles the form plus every attachment as
-    `<DOCUMENT><TYPE>…<TEXT>…</TEXT></DOCUMENT>` blocks. Only the form (and
-    EX-99 press releases) carry narrative worth embedding. Falls back to the
+    `<DOCUMENT><TYPE>…<TEXT>…</TEXT></DOCUMENT>` blocks. Only the form (plus
+    EX-99 press releases and EX-13 annual reports) carries narrative worth
+    embedding. Falls back to the
     first block when no type matches, and to the whole file when it has no
     <DOCUMENT> envelope at all.
     """
@@ -498,7 +520,9 @@ def ingest_filing(ticker: str, filing_path: Path) -> int:
     is skipped without an embed call; anything else (never ingested, killed
     mid-run, or chunked differently by a newer parser) has its prior vectors
     dropped by id prefix and is embedded again in full. Returns the number of
-    chunks written (0 when skipped).
+    chunks written (0 when skipped). The manifest is the only source of truth
+    for "already ingested" — after wiping or renaming the index, clear it with
+    `scripts/ingest_universe --force` so filings are embedded again.
     """
     ticker = ticker.upper()
     text = _extract_text(filing_path)
