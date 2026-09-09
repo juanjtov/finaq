@@ -532,6 +532,10 @@ Read surfaces (each unlocked by an existing build step):
 
 Logging via stdlib `logging` is for *operational* output (what just happened); telemetry via `data/state.py` is for *historical / aggregate* queries. Don't conflate the two.
 
+### 16.8 Concurrent Claude Code sessions
+
+When more than one line of work runs against this project through Claude Code at the same time, **before starting a new action, verify which sessions are already active** and, if there is any risk of overlap, **create a new git worktree or branch off `main` first** so the sessions don't collide. Never let two active sessions edit the same working tree/branch. Check active sessions (`ListAgents`, `/tasks`, or the session list), branch from `main` for isolated work, and only then begin.
+
 ---
 
 **Last updated:** see git log. Update this file before adding any new architectural decision so future Claude Code sessions stay on-spec.
