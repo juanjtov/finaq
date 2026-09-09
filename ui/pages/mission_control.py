@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import html
 import json
 import os
 from datetime import UTC, datetime
@@ -345,22 +346,17 @@ def render_eval_runs() -> None:
 
 
 def _run_status_label(r: dict) -> str:
-    """Derive the three-way status a run row renders: failed / degraded /
-    completed. 'Degraded' = the graph finished but at least one agent
-    failed or logged a run-scoped error (soft failure) — previously these
-    looked identical to healthy runs."""
-    status = str(r.get("status") or "")
-    if status == "failed":
-        return "❌ failed"
-    if status == "completed":
-        if int(r.get("failed_nodes") or 0) > 0 or int(r.get("n_errors") or 0) > 0:
-            return "⚠️ degraded"
-        return "✅ completed"
-    return status or "?"
-
-
-def _fmt_tokens(n: int) -> str:
-    return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
+    """Emoji three-way status label (used by the KPI breakdown + filter).
+    Shares its classification with `_status_bits` so the two can't drift:
+    'degraded' = the graph finished but an agent failed or a run-scoped
+    error was logged (soft failure), previously indistinguishable from a
+    clean completed run."""
+    text, _, _ = _status_bits(r)
+    return {
+        "failed": "❌ failed",
+        "degraded": "⚠️ degraded",
+        "completed": "✅ completed",
+    }.get(text, text)
 
 
 # Graph topology order — the runs table renders one status dot per agent in
@@ -515,14 +511,17 @@ def _render_runs_table(runs_all: list[dict]) -> None:
         text, spill, rowcls = _status_bits(r)
         # MM-DD HH:MM (drop the year) — matches the mockup and saves width.
         started = str(r.get("started_at") or "")[5:16].replace("T", " ")
-        thesis = str(r.get("thesis") or "?")
+        # Escape DB text — the row is emitted with unsafe_allow_html, and a
+        # Phase-1 ad-hoc thesis name can contain '<' (e.g. "P/E < 10").
+        ticker = html.escape(str(r.get("ticker") or "?"))
+        thesis = html.escape(str(r.get("thesis") or "?"))
         dur = f"{r['duration_s']:.0f}s" if r.get("duration_s") else "—"
         cost = f"${float(r.get('cost_usd') or 0.0):.4f}"
         trig = "🤖 cio" if rid in cio_run_ids else "🖱 manual"
         row_html = (
             f'<div class="mcrow {rowcls}">'
             f'<span class="mono">{started}</span>'
-            f'<span><span class="tk">{r.get("ticker") or "?"}</span>'
+            f'<span><span class="tk">{ticker}</span>'
             f'<span class="muted"> · {thesis}</span></span>'
             f'<span><span class="tpill">{trig}</span></span>'
             f'<span>{_dots_html(statuses.get(rid, {}))}</span>'
