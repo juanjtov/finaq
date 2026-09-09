@@ -51,7 +51,9 @@ from utils.schemas import Thesis
 
 st.set_page_config(page_title="FINAQ — Halo graph", page_icon="🕸️", layout="wide")
 
-THESES_DIR = Path("theses")
+# Anchor to the repo root (like every sibling page), not CWD, so the page finds
+# the theses no matter which directory `streamlit run ui/app.py` is launched from.
+THESES_DIR = Path(__file__).resolve().parents[2] / "theses"
 
 # The relationship type always rides in the edge label so all four types stay
 # legible without adding colours — CLAUDE.md §13 keeps a single sage accent
@@ -211,7 +213,10 @@ def _mermaid(nodes: list[VizNode], edges: list[VizEdge], *, show_ungrounded: boo
     for i, e in enumerate(shown):
         conf = f" · {e.confidence:.2f}" if e.confidence is not None else ""
         arrow = "-->" if e.grounded else "-.->"
-        frm, to = ids.get(e.frm, _safe_id(e.frm)), ids.get(e.to, _safe_id(e.to))
+        # Endpoints are always declared nodes (_build_model's invariant), so
+        # resolve through the same id map — no _safe_id fallback that could
+        # silently re-collide the ids _node_id_map just disambiguated.
+        frm, to = ids[e.frm], ids[e.to]
         lines.append(f'    {frm} {arrow}|"{e.type}{conf}"| {to}')
         color = SAGE if e.grounded else TAUPE
         width = "2px" if e.grounded else "1.5px"
@@ -232,7 +237,7 @@ def _render_mermaid(code: str, n_nodes: int) -> None:
     Python dep), themed with the CLAUDE.md §13 palette so it matches the rest
     of the dashboard. Height scales with node count."""
     height = max(420, min(150 + n_nodes * 62, 1100))
-    html = f"""
+    doc = f"""
     <div style="background:{EGGSHELL}; padding:1rem; border-radius:6px;
         border:1px solid {TAUPE};">
       <pre class="mermaid">
@@ -257,7 +262,7 @@ def _render_mermaid(code: str, n_nodes: int) -> None:
       }});
     </script>
     """
-    components.html(html, height=height, scrolling=True)
+    components.html(doc, height=height, scrolling=True)
 
 
 def _legend() -> None:
@@ -397,8 +402,10 @@ def main() -> None:
         ),
     )
 
-    # Selector — mark theses that have a persisted (grounded) graph.
-    has_graph = {slug: bool(graph.get_nodes(slug)) for slug, _ in theses}
+    # Selector — mark theses whose stored graph has edges. Keyed off edges (not
+    # nodes) to match `_build_model`'s source decision: a slug with persisted
+    # nodes but no edges renders from the thesis file, so it must not show the ●.
+    has_graph = {slug: bool(graph.get_edges(slug)) for slug, _ in theses}
     labels = [f"{'● ' if has_graph[slug] else '○ '}{name}  ·  {slug}" for slug, name in theses]
     default_idx = next((i for i, (slug, _) in enumerate(theses) if has_graph[slug]), 0)
     choice = st.selectbox(
