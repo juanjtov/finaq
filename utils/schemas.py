@@ -335,3 +335,45 @@ class SynthesisOutput(BaseModel):
     gaps: list[str] = []
     watchlist: list[str] = []
     errors: list[str] = []
+
+
+# --- Halo graph (Phase 2 Discovery; ARCHITECTURE §13) ------------------------
+
+
+class GraphNode(BaseModel):
+    """A ticker node in a discovered thesis's halo graph.
+
+    Persisted to `state.db.graph_nodes` (one row per (thesis_slug, ticker)) by
+    `data.graph`. `name` is the yfinance-cache company name used for grounding
+    co-mention matching.
+    """
+
+    ticker: str
+    name: str = ""
+    thesis_slug: str
+    first_seen: str  # ISO timestamp first discovered
+    last_seen: str  # ISO timestamp of the latest discovery run
+
+
+class GraphEdge(BaseModel):
+    """A directed, grounded relationship between two tickers in a halo graph.
+
+    Persisted to `state.db.graph_edges`. `confidence` in [0, 1] is the
+    retrieval-grounding score (ARCHITECTURE §13.2); `grounded` is
+    `confidence >= discovery.GROUND_THRESHOLD`; `evidence` carries the filing /
+    news citations that corroborated the edge. Only grounded edges enter the
+    emitted `Thesis.relationships`; the full set (grounded or not) is stored in
+    the graph for audit.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(alias="from")
+    to: str
+    type: RelationshipType
+    note: str = ""
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    grounded: bool = False
+    evidence: list[Evidence] = []
+    thesis_slug: str
+    as_of: str  # ISO timestamp the edge was grounded
