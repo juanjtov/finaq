@@ -67,6 +67,43 @@ _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,6}$")
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 # Words that never distinguish a company for co-mention matching.
 _NAME_STOP = {"THE", "AND"}
+# Real tickers that are also common English words: matched as bare symbols in
+# prose they produce false co-mentions, so for these we require the company-name
+# token instead of the bare ticker. A denylist heuristic (not exhaustive) — the
+# durable fix is the deferred per-edge LLM adjudication (ARCHITECTURE §13.2).
+# 1-2 char tickers (A, ON, IT, GO, ...) are handled by the length>=3 guard in
+# `_mention_hit`, so they don't need listing here.
+_TICKER_STOPWORDS = {
+    "ALL",
+    "AND",
+    "ANY",
+    "ARE",
+    "BIG",
+    "CAR",
+    "CAT",
+    "DAY",
+    "FOR",
+    "GET",
+    "GOOD",
+    "HAS",
+    "HOW",
+    "KEY",
+    "LOW",
+    "MAN",
+    "NEW",
+    "NOW",
+    "ONE",
+    "OUT",
+    "OWN",
+    "PLAN",
+    "REAL",
+    "RUN",
+    "SEE",
+    "THE",
+    "USE",
+    "WHO",
+    "WHY",
+}
 
 
 @dataclass
@@ -175,13 +212,20 @@ def _distinctive_name_token(name: str) -> str:
 
 
 def _mention_hit(text: str, ticker: str, name: str) -> bool:
-    """True when `text` names `ticker` (word-boundary) or the distinctive token
-    of its company name."""
+    """True when `text` co-mentions the company: its distinctive company-name
+    token, or its ticker symbol. The bare-ticker match is used only for symbols
+    unambiguous in prose (>= 3 chars and not a common English word), so a ticker
+    like `A` / `ON` / `IT` / `ALL` / `CAT` can't be "grounded" by ordinary text
+    — for those only the name token counts. Confirming an edge's direction/type
+    (beyond mere co-occurrence) is the deferred LLM-adjudication step (§13.2)."""
     hay = (text or "").upper()
-    if re.search(rf"\b{re.escape(ticker.upper())}\b", hay):
-        return True
     token = _distinctive_name_token(name)
-    return bool(token and re.search(rf"\b{re.escape(token)}\b", hay))
+    if token and re.search(rf"\b{re.escape(token)}\b", hay):
+        return True
+    tk = ticker.upper()
+    if len(tk) >= 3 and tk not in _TICKER_STOPWORDS:
+        return bool(re.search(rf"\b{re.escape(tk)}\b", hay))
+    return False
 
 
 def _name_map(tickers: list[str]) -> dict[str, str]:
@@ -346,7 +390,7 @@ async def discover(
                 n_universe=len(cached.universe),
                 n_edges_grounded=len(cached.relationships),
             )
-        except (ValidationError, json.JSONDecodeError) as e:
+        except (ValidationError, json.JSONDecodeError, OSError) as e:
             logger.warning(f"[discovery] stale cache at {cached_path}: {e}; regenerating")
 
     # (A) Propose.
@@ -375,26 +419,46 @@ async def discover(
             dropped_tickers=dropped,
         )
     universe_set = set(universe)
+    # Ticker mode: enforce the contract that the seed is in the universe and
+    # leads the anchors (the prompt asks for it, but the model may drop it).
+    seed = ticker.strip().upper() if ticker else ""
+    if seed and _TICKER_RE.match(seed) and seed not in universe_set:
+        universe.insert(0, seed)
+        universe_set.add(seed)
     anchors_clean, _ = _clean_tickers(parsed.get("anchor_tickers", []))
     anchors = [a for a in anchors_clean if a in universe_set] or universe[:1]
+    if seed and seed in universe_set:
+        anchors = [seed] + [a for a in anchors if a != seed]
 
     # (B) Ground each proposed edge against filings + news.
     name_map = await asyncio.to_thread(_name_map, universe)
+    # Grounding runs sequentially (each edge awaited before the next), which is
+    # why the shared `news_cache` is race-free; parallelising with gather()
+    # later would need to synchronise it. `to_thread` keeps the blocking
+    # filings/news I/O off the event loop.
     news_cache: dict[str, list] = {}
     now = datetime.now(UTC).isoformat()
     all_edges: list[GraphEdge] = []
     grounded_edges: list[GraphEdge] = []
+    seen_pairs: set[tuple[str, str]] = set()
     for rel in parsed.get("relationships", []):
         frm = str(rel.get("from", "")).strip().upper()
         to = str(rel.get("to", "")).strip().upper()
         etype = str(rel.get("type", "peer")).strip().lower()
         if frm not in universe_set or to not in universe_set or frm == to:
             continue
+        if (frm, to) in seen_pairs:  # graph_edges is UNIQUE(slug, from, to)
+            continue
+        seen_pairs.add((frm, to))
         if etype not in ("supplier", "customer", "peer", "competitor"):
             etype = "peer"
-        confidence, evidence = await asyncio.to_thread(
-            _ground_edge, frm, to, etype, name_map, news_cache
-        )
+        try:
+            confidence, evidence = await asyncio.to_thread(
+                _ground_edge, frm, to, etype, name_map, news_cache
+            )
+        except Exception as e:  # noqa: BLE001 — an uncheckable edge is just ungrounded
+            logger.warning(f"[discovery] grounding failed for {frm}->{to}: {e}")
+            confidence, evidence = 0.0, []
         edge = GraphEdge(
             **{"from": frm},
             to=to,
@@ -432,7 +496,20 @@ async def discover(
             error=f"grounded thesis failed schema validation: {e.errors()[:2]}",
         )
 
-    path = _save_to_disk(slug, thesis)
+    try:
+        path = _save_to_disk(slug, thesis)
+    except OSError as e:
+        logger.error(f"[discovery] could not save thesis {slug}: {e}")
+        return DiscoveryResult(
+            slug=slug,
+            thesis=None,
+            path=cached_path,
+            n_universe=len(universe),
+            n_edges_proposed=len(all_edges),
+            n_edges_grounded=len(grounded_edges),
+            dropped_tickers=dropped,
+            error=f"could not save thesis: {e}",
+        )
 
     # Persist the full graph (grounded or not) for audit + traversal.
     nodes = [

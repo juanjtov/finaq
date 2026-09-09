@@ -199,3 +199,67 @@ async def test_force_refresh_regenerates(stub):
     res = await disc.discover(topic="ai power", db_path=stub / "s.db", force_refresh=True)
     assert res.cached is False
     assert res.thesis.name == "Test halo"
+
+
+def test_mention_hit_rejects_stopword_and_short_tickers():
+    # A common-word ticker (CAT) or single-letter ticker (A) must NOT be
+    # grounded by ordinary prose that merely contains those letters.
+    assert disc._mention_hit("The firm runs a strong CAT business.", "CAT", "") is False
+    assert disc._mention_hit("It operates on a thin margin.", "A", "Agilent Technologies") is False
+    # ...but the distinctive company-name token still grounds them.
+    assert disc._mention_hit("Agilent posted record revenue.", "A", "Agilent Technologies") is True
+    # A distinctive symbol (>=3 chars, not a stopword) still matches directly.
+    assert disc._mention_hit("Our racks use VRT cooling.", "VRT", "Vertiv Holdings Co") is True
+
+
+async def test_duplicate_pair_does_not_lose_graph(stub, monkeypatch):
+    # The LLM proposing the same (from, to) twice must not violate the
+    # UNIQUE(slug, from, to) constraint and roll back the whole graph write.
+    def _dup(*, topic, ticker):
+        return (
+            {
+                "name": "Dup",
+                "summary": "s",
+                "anchor_tickers": ["NVDA"],
+                "universe": ["NVDA", "VRT"],
+                "relationships": [
+                    {"from": "NVDA", "to": "VRT", "type": "supplier", "note": "a"},
+                    {"from": "NVDA", "to": "VRT", "type": "customer", "note": "b"},
+                ],
+                "valuation": _VALUATION,
+                "material_thresholds": [],
+            },
+            "raw",
+        )
+
+    monkeypatch.setattr(disc, "_propose", _dup)
+    db = stub / "state.db"
+    res = await disc.discover(topic="dup", db_path=db)
+    assert res.error is None
+    assert res.n_edges_proposed == 1  # the duplicate pair was collapsed
+    # Graph persisted intact (the pre-fix bug rolled back to 0 nodes + 0 edges).
+    assert len(graph.get_nodes(res.slug, db_path=db)) == 2
+    assert len(graph.get_edges(res.slug, db_path=db)) == 1
+
+
+async def test_ticker_mode_forces_seed_into_universe(stub, monkeypatch):
+    # Model omits the seed ticker; discover must inject it and lead the anchors.
+    def _no_seed(*, topic, ticker):
+        return (
+            {
+                "name": "Halo",
+                "summary": "s",
+                "anchor_tickers": ["VRT"],
+                "universe": ["VRT", "CEG"],
+                "relationships": [],
+                "valuation": _VALUATION,
+                "material_thresholds": [],
+            },
+            "raw",
+        )
+
+    monkeypatch.setattr(disc, "_propose", _no_seed)
+    res = await disc.discover(ticker="NVDA", db_path=stub / "s.db")
+    assert res.error is None
+    assert "NVDA" in res.thesis.universe
+    assert res.thesis.anchor_tickers[0] == "NVDA"

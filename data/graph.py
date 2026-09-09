@@ -31,14 +31,18 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _connect(db_path: Path | None = None) -> sqlite3.Connection:
-    """Open a connection to the (migrated) state.db.
+def _connect(db_path: Path | None = None, *, migrate: bool = False) -> sqlite3.Connection:
+    """Open a connection to state.db, resolving `state.DB_PATH` at call time so
+    the conftest monkeypatch to a tmp DB is respected.
 
-    Mirrors `data.state._connect` but resolves `state.DB_PATH` at call time so
-    the conftest monkeypatch to a tmp DB is respected. Calls `state.init_db`
-    first so the graph tables exist even on a fresh database.
+    `migrate=True` runs `state.init_db` first (schema create + forward
+    migrations) so the graph tables exist — used by the writer. Readers pass
+    `migrate=False` (the default) to avoid a write transaction on every read
+    and to keep working against a read-only DB; they tolerate a missing-table
+    `OperationalError` instead.
     """
-    state.init_db(db_path)
+    if migrate:
+        state.init_db(db_path)
     target = Path(db_path) if db_path is not None else state.DB_PATH
     conn = sqlite3.connect(target, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -65,7 +69,7 @@ def save_graph(
     `grounded` when they only want the thesis-worthy ones.
     """
     now = _now_iso()
-    with _connect(db_path) as conn:
+    with _connect(db_path, migrate=True) as conn:
         conn.execute("DELETE FROM graph_edges WHERE thesis_slug = ?", (thesis_slug,))
         conn.execute("DELETE FROM graph_nodes WHERE thesis_slug = ?", (thesis_slug,))
         conn.executemany(
@@ -76,9 +80,13 @@ def save_graph(
                 for n in nodes
             ],
         )
+        # OR IGNORE: a duplicate (slug, from, to) — e.g. the LLM proposing the
+        # same pair twice — is dropped rather than aborting the whole
+        # transaction (which would roll back nodes too and silently lose the
+        # graph). Discovery also de-dups upstream; this is defence in depth.
         conn.executemany(
-            """INSERT INTO graph_edges (thesis_slug, from_ticker, to_ticker, type, note,
-                   confidence, grounded, evidence_json, as_of)
+            """INSERT OR IGNORE INTO graph_edges (thesis_slug, from_ticker, to_ticker, type,
+                   note, confidence, grounded, evidence_json, as_of)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (

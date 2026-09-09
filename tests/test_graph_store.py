@@ -134,3 +134,13 @@ def test_missing_db_returns_empty(tmp_path):
     assert graph.get_edges("adhoc_t", db_path=db) == []
     assert graph.get_nodes("adhoc_t", db_path=db) == []
     assert graph.neighbors("A", db_path=db) == []
+
+
+def test_save_tolerates_duplicate_pair(tmp_path):
+    db = tmp_path / "g.db"
+    # Two edges for the same (slug, from, to) — the second is ignored, not an
+    # IntegrityError that would roll back the whole graph (nodes included).
+    edges = [_edge("A", "B", rel_type="supplier"), _edge("A", "B", rel_type="customer")]
+    graph.save_graph("adhoc_t", [_node("A"), _node("B")], edges, db_path=db)
+    assert len(graph.get_edges("adhoc_t", db_path=db)) == 1
+    assert [n.ticker for n in graph.get_nodes("adhoc_t", db_path=db)] == ["A", "B"]
