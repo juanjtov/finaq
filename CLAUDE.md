@@ -16,11 +16,11 @@ These are non-negotiable for the hackathon build. Do not invent alternatives wit
 - **Single-user, no auth.** The whole system runs as `juan`. No login, no users table.
 - **All LLM calls go through OpenRouter** using its OpenAI-compatible endpoint (`base_url="https://openrouter.ai/api/v1"`). Never call `anthropic` or `openai` SDKs directly.
 - **LangGraph for orchestration.** Use `StateGraph` with a TypedDict state. Parallel branches via separate edges from a single source node, joined by a `join` reducer. No CrewAI, no AutoGen.
-- **ChromaDB on local disk** for filings RAG. Persistent collections, one per ticker. Embeddings via OpenRouter's `text-embedding-3-small` (or whichever embedding model is available — confirm at build time).
+- **Pinecone (serverless) is the vector store.** Filings RAG lives in a `finaq-filings` index with one namespace per ticker; past Synthesis reports in `finaq-reports`. Embeddings via OpenRouter (`MODEL_EMBEDDINGS`). The ingest manifest (which accessions are indexed, chunk counts) lives in `data_cache/state.db`. Chosen 2026-09-07 after the local ChromaDB store hit 7 GB and its Rust client segfaulted the dashboard — the one hosted dependency allowed before Phase 1 hosting; see ARCHITECTURE §3.5.
 - **Notion as memory of record (post-hackathon).** For Phase 0, write to local `JSON` files in `./data_cache/memory/` with the same shape Notion will eventually hold.
 - **Telegram for alerts (post-hackathon).** For Phase 0, alerts surface inside the Streamlit dashboard only.
 - **Streamlit for the demo UI.** Don't reach for FastAPI + React. The demo runs locally.
-- **Local-first.** The hackathon build runs on the developer's laptop. Do not introduce hosted dependencies (Cloud Run, Vercel, etc.). `langgraph dev` for LangGraph Studio is local-only and explicitly allowed; LangSmith tracing (opt-in via `LANGSMITH_TRACING=true`) is the only outbound observability dependency permitted in Phase 0. Phase 1 hosting on a single DigitalOcean droplet is the eventual deployment target — single-box, single-tenant, no managed services beyond what's in `requirements.txt`.
+- **Local-first.** The hackathon build runs on the developer's laptop. Do not introduce hosted dependencies (Cloud Run, Vercel, etc.); the Pinecone Starter tier for the vector store is the sole exception. `langgraph dev` for LangGraph Studio is local-only and explicitly allowed; LangSmith tracing (opt-in via `LANGSMITH_TRACING=true`) is the only outbound observability dependency permitted in Phase 0. Phase 1 hosting on a single DigitalOcean droplet is the eventual deployment target — single-box, single-tenant, no managed services beyond what's in `requirements.txt`.
 
 ## 3. Model routing
 
@@ -39,7 +39,7 @@ All model strings below are passed as the `model` argument to OpenRouter. Confir
 | Judge (RAG eval) | `anthropic/claude-haiku-4.5` | `MODEL_JUDGE` | Used by `pytest -m eval` to score retrieval relevance and faithfulness; cheap-tier role |
 | Per-agent Q&A | `anthropic/claude-haiku-4.5` | `MODEL_AGENT_QA` | Powers `agents/qa.py.ask()` for the dashboard's Direct Agent panel + Phase 1 Telegram per-agent commands. Cheap-tier role since calls are frequent and scoped to a single agent's structured output. |
 | Discovery (Phase 2+) | `anthropic/claude-opus-4.7` | `MODEL_DISCOVERY` | Thesis decomposition, runs rarely |
-| Embeddings | `text-embedding-3-small` (via OpenRouter) | `MODEL_EMBEDDINGS` | ChromaDB filings collection |
+| Embeddings | `text-embedding-3-small` (via OpenRouter) | `MODEL_EMBEDDINGS` | Pinecone filings + reports indexes |
 
 Hard rule: **never hardcode model strings inside agent files**. Model strings live in `.env` (placeholders in `.env.example`); `utils/models.py` is a thin typed registry that reads them via `os.getenv()` and exposes typed constants. Agents import only from `utils/models.py`. Swapping a model is a one-line `.env` change, not a code change.
 
@@ -58,7 +58,7 @@ Hard rule: **never hardcode model strings inside agent files**. Model strings li
   /data
     edgar.py               # SEC EDGAR fetcher
     yfin.py                # yfinance wrapper
-    chroma.py              # ChromaDB ingest + query
+    vectors.py             # Pinecone ingest + hybrid query (filings + reports indexes)
     __init__.py
   /theses                  # hand-written JSONs for Phase 0
     ai_cake.json
@@ -76,7 +76,6 @@ Hard rule: **never hardcode model strings inside agent files**. Model strings li
     components.py          # reusable Streamlit widgets
   /data_cache              # gitignored; created at runtime
     /edgar/{ticker}/       # downloaded filings
-    /chroma/               # ChromaDB persistent dir
     /memory/               # JSON files standing in for Notion
   CLAUDE.md
   README.md
@@ -89,7 +88,7 @@ Hard rule: **never hardcode model strings inside agent files**. Model strings li
 
 Python 3.11+. **`requirements.txt` is the dependency manifest** — every new top-level import must be added there in the same change. `pyproject.toml` is kept *only* for tool config (ruff / black / pytest), not for deps. Install via `pip install -r requirements.txt` (or `uv pip install -r requirements.txt` if `uv` is available).
 
-Required packages (Phase 0): `langgraph`, `langchain-openai`, `openai` (for the OpenAI-compatible OpenRouter client), `chromadb`, `yfinance`, `sec-edgar-downloader`, `streamlit`, `numpy`, `pandas`, `reportlab`, `pydantic`, `python-dotenv`, `tavily-python`, `tenacity`, `httpx`, `matplotlib`.
+Required packages (Phase 0): `langgraph`, `langchain-openai`, `openai` (for the OpenAI-compatible OpenRouter client), `pinecone`, `beautifulsoup4`, `tiktoken`, `yfinance`, `sec-edgar-downloader`, `streamlit`, `numpy`, `pandas`, `reportlab`, `pydantic`, `python-dotenv`, `tavily-python`, `tenacity`, `httpx`, `matplotlib`.
 
 Phase 1 additions: `notion-client`, `python-telegram-bot`.
 
@@ -98,6 +97,7 @@ Phase 1 additions: `notion-client`, `python-telegram-bot`.
 # API keys
 OPENROUTER_API_KEY=sk-or-v1-...
 TAVILY_API_KEY=tvly-...
+PINECONE_API_KEY=pcsk_...
 SEC_EDGAR_USER_AGENT="FINAQ/0.1 juan@example.com"
 
 # Model strings — swap any of these to swap models. Defaults are 2026-04-26 latest.
@@ -144,21 +144,26 @@ def get_financials(ticker: str) -> dict:
 
 Cache responses to `./data_cache/yfin/{ticker}.json` with a 24-hour TTL. yfinance is rate-limited and flaky — wrap in `tenacity` retries with exponential backoff.
 
-### 6.3 ChromaDB (`data/chroma.py`)
+### 6.3 Pinecone (`data/vectors.py`)
 
-**Chunking strategy:** split each filing on Item headers (`Item 1A. Risk Factors`, `Item 7. MD&A`, `Item 7A`, etc.). Within each section, split into ~800-token chunks with 100-token overlap. Each chunk's metadata: `{ticker, filing_type, accession, item, filed_date}`.
+**Parsing:** only the primary document of each EDGAR submission is parsed — the `<DOCUMENT>` block whose `<TYPE>` is the form itself (10-K, 10-Q, 20-F, 6-K, amendments) plus `EX-99` press-release exhibits. XBRL taxonomy XML, contract exhibits, officer certifications, uuencoded graphics and ZIPs are skipped; before this rule they were 94% of the corpus.
 
-**Embeddings:** use OpenRouter's `/v1/embeddings` endpoint with `text-embedding-3-small` (model string in `MODEL_EMBEDDINGS`). Confirmed available 2026-04-26.
+**Chunking strategy:** split the parsed text on Item headers (`Item 1A. Risk Factors`, `Item 7. MD&A`, `Item 7A`, etc.). Within each section, split into ~800-token chunks with 100-token overlap. Each chunk's metadata: `{ticker, filing_type, accession, filed_date, filed_date_int, item_code, item_label, text}` — the text rides in metadata so retrieval needs no second store.
+
+**Embeddings:** OpenRouter's `/v1/embeddings` endpoint with the model in `MODEL_EMBEDDINGS`. The index is created on first use with that model's dimension.
 
 ```python
 def ingest_filing(ticker: str, filing_path: Path) -> int:
-    """Chunk, embed via OpenRouter, write to collection 'filings'. Returns chunk count."""
+    """Chunk, embed via OpenRouter, upsert into the ticker's namespace. Returns chunk count (0 when already indexed)."""
 
-def query(ticker: str, question: str, k: int = 8, item_filter: str | None = None) -> list[dict]:
-    """Returns top-k chunks as [{text, metadata, score}, ...]."""
+def query(ticker: str, question: str, k: int = 8, item_filter: str | None = None, *, as_of: str | None = None) -> list[dict]:
+    """Returns top-k chunks as [{text, metadata, score}, ...]. `ticker` is required — it selects the namespace."""
+
+def has_ticker(ticker: str) -> bool: ...              # reads the state.db manifest, no network
+def last_filings_by_type(ticker: str) -> dict[str, str]: ...
 ```
 
-Single collection named `filings` with metadata-based filtering by ticker, not one collection per ticker — this makes cross-ticker queries trivial later.
+One index (`PINECONE_INDEX_FILINGS`, default `finaq-filings`) with **one namespace per ticker**: every query is scoped to a few hundred vectors and a ticker can be re-ingested by wiping its namespace. Ids are `{TICKER}-{accession}-{n}`; a filing whose chunk count already matches the `ingested_filings` row in `state.db` is skipped, otherwise its old ids are deleted by prefix and it is embedded again in full. The manifest alone decides "already ingested": after wiping or renaming the index, run `python -m scripts.ingest_universe TICKER --force` to clear it and embed again. Past Synthesis reports live in a second index (`PINECONE_INDEX_REPORTS`, default `finaq-reports`) for the CIO planner.
 
 ## 7. Thesis JSON schema
 
@@ -232,7 +237,7 @@ Inputs: `ticker`, `thesis`. Calls `data.yfin.get_financials()`, computes 5-year 
 
 ### 9.2 Filings (`agents/filings.py`)
 
-RAG over the ChromaDB `filings` collection. Three subqueries per drill-in: risk factors, MD&A trajectory, segment performance. Each subquery returns top-8 chunks; LLM synthesizes a thesis-aware summary (e.g., "for the AI cake thesis, what does the latest 10-Q say about data-center demand?"). Output:
+RAG over the ticker's namespace in the Pinecone filings index. Three subqueries per drill-in: risk factors, MD&A trajectory, segment performance. Each subquery returns top-8 chunks; LLM synthesizes a thesis-aware summary (e.g., "for the AI cake thesis, what does the latest 10-Q say about data-center demand?"). Output:
 
 ```python
 {"filings": {"summary": str, "risk_themes": list[str], "mdna_quotes": list[dict], "evidence": list[dict]}}
@@ -421,8 +426,8 @@ Build in this order. Do not skip ahead. Each step has a concrete acceptance test
 1. **Scaffolding (1–2h).** Create the repo structure from `§4`. Install dependencies. Write `utils/openrouter.py` with a `get_client()` factory.
    - **Test:** `python -c "from utils.openrouter import get_client; print(get_client().chat.completions.create(model='anthropic/claude-haiku-4.5', messages=[{'role':'user','content':'say hi'}], max_tokens=20).choices[0].message.content)"` returns text.
 
-2. **Data layer (3–4h).** Implement `data/edgar.py`, `data/yfin.py`, `data/chroma.py`. **Kick off ChromaDB ingestion of the 11-ticker AI cake universe in the background while you do step 3 and 4.**
-   - **Test:** `chroma.query("NVDA", "data center capex outlook", k=5)` returns 5 chunks with non-empty `text`.
+2. **Data layer (3–4h).** Implement `data/edgar.py`, `data/yfin.py`, `data/vectors.py`. **Kick off ingestion of the 11-ticker AI cake universe in the background while you do step 3 and 4.**
+   - **Test:** `vectors.query("NVDA", "data center capex outlook", k=5)` returns 5 chunks with non-empty `text`.
 
 3. **Thesis JSONs (1h).** Hand-write the three JSON files in `/theses/` matching `§7`.
    - **Test:** `pydantic` validation passes for all three files.

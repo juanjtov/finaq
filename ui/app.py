@@ -542,7 +542,7 @@ def _run_ingestion_for(ticker: str) -> tuple[bool, str]:
         return False, f"Ingestion failed for {ticker}: {e}"
 
 
-# --- Pre-drill freshness gate (EDGAR-vs-ChromaDB) -------------------------
+# --- Pre-drill freshness gate (EDGAR-vs-index) -------------------------
 
 
 @st.dialog("EDGAR has newer filings — confirm before drilling")
@@ -561,14 +561,14 @@ def _freshness_dialog(diff_rows: list[dict], ticker: str, thesis_slug: str) -> N
     )
     st.markdown("---")
     for row in diff_rows:
-        if row["chroma_date"] is None:
+        if row["ingested_date"] is None:
             st.markdown(
-                f"  • **{row['form']}** — missing in ChromaDB · "
+                f"  • **{row['form']}** — missing in the filings index · "
                 f"EDGAR has **{row['edgar_date']}**"
             )
         else:
             st.markdown(
-                f"  • **{row['form']}** — ChromaDB **{row['chroma_date']}** → "
+                f"  • **{row['form']}** — index **{row['ingested_date']}** → "
                 f"EDGAR **{row['edgar_date']}** "
                 f"(`{row['behind_days']}d behind`)"
             )
@@ -600,7 +600,7 @@ def _freshness_dialog(diff_rows: list[dict], ticker: str, thesis_slug: str) -> N
 def _gate_or_kick_off_drill(ticker: str, thesis_slug: str) -> None:
     """Pre-drill freshness check.
 
-    If EDGAR has newer filings than what's in ChromaDB, open a modal asking
+    If EDGAR has newer filings than what's in the filings index, open a modal asking
     whether to ingest first or cancel. Otherwise kick off the drill graph
     immediately. EDGAR-unreachable falls through to drill on cached data
     (with a toast) so a transient SEC outage doesn't block the user.
@@ -613,7 +613,7 @@ def _gate_or_kick_off_drill(ticker: str, thesis_slug: str) -> None:
         if report.edgar_error:
             st.toast(
                 f"Freshness check unavailable ({report.edgar_error}). "
-                "Drilling on whatever's in ChromaDB.",
+                "Drilling on whatever's in the filings index.",
                 icon="⚠️",
             )
         _kick_off_drill(ticker, thesis_slug)
@@ -627,7 +627,7 @@ def _gate_or_kick_off_drill(ticker: str, thesis_slug: str) -> None:
         {
             "form": d.form,
             "edgar_date": d.edgar_date,
-            "chroma_date": d.chroma_date,
+            "ingested_date": d.ingested_date,
             "behind_days": d.behind_days,
         }
         for d in report.stale_forms()
@@ -636,7 +636,7 @@ def _gate_or_kick_off_drill(ticker: str, thesis_slug: str) -> None:
 
 
 def _render_ingest_banner(ticker: str) -> bool:
-    """If `ticker` isn't in ChromaDB, render a banner explaining what to do.
+    """If `ticker` isn't in the filings index, render a banner explaining what to do.
 
     Three branches:
       - Foreign issuer (e.g. TSM, ASML): files 20-F/6-K, not 10-K/10-Q.
@@ -646,11 +646,11 @@ def _render_ingest_banner(ticker: str) -> bool:
         "📥 Ingest now" button to download + chunk + embed.
       - Already ingested: short-circuit, return False.
 
-    Result is cached in session_state so we don't recheck ChromaDB on every
+    Result is cached in session_state so we don't recheck the filings index on every
     rerun.
     """
-    from data.chroma import has_ticker
     from data.edgar import has_filings_in_unsupported_kinds
+    from data.vectors import has_ticker
 
     cache_key = f"_ingest_check::{ticker}"
     if st.session_state.get(cache_key) == "ingested":
@@ -675,7 +675,7 @@ def _render_ingest_banner(ticker: str) -> bool:
                 <div style="color:#1A1611; margin-top:0.4rem; line-height:1.45;">
                     <b>{ticker}</b> files <b>{kinds_str}</b> with the SEC,
                     not 10-K/10-Q. The current ingest pipeline only handles
-                    10-K + 10-Q, so {ticker}'s filings are NOT in ChromaDB.
+                    10-K + 10-Q, so {ticker}'s filings are NOT in the filings index.
                 </div>
                 <div style="color:#1A1611; opacity:0.75; font-size:0.85rem;
                     margin-top:0.5rem;">
@@ -700,14 +700,14 @@ def _render_ingest_banner(ticker: str) -> bool:
             <div style="color:#2D4F3A; font-weight:700; font-size:1rem;
                 letter-spacing:0.04em;">📥 INGEST REQUIRED</div>
             <div style="color:#1A1611; margin-top:0.4rem; line-height:1.45;">
-                <b>{ticker}</b> isn't in ChromaDB yet. Filings retrieval
+                <b>{ticker}</b> isn't in the filings index yet. Filings retrieval
                 will return zero chunks → Risk and Synthesis will run on a
                 Filings-less state and the report will be incomplete.
             </div>
             <div style="color:#1A1611; opacity:0.75; font-size:0.85rem;
                 margin-top:0.5rem;">
                 Click below to download {ticker}'s recent 10-K + 10-Q from SEC
-                EDGAR, chunk + embed them, and add to ChromaDB. ~5-10 min the
+                EDGAR, chunk + embed them, and add to the filings index. ~5-10 min the
                 first time; subsequent ingests of the same ticker are no-ops.
             </div>
         </div>
@@ -987,7 +987,7 @@ def main() -> None:
             st.warning("Enter a ticker first.")
             return
         # Run drill-in always runs the agents fresh. The freshness gate
-        # consults SEC EDGAR first; if the local ChromaDB ingest is behind
+        # consults SEC EDGAR first; if the local filings-index ingest is behind
         # the most recent 10-K/10-Q, a modal asks the user whether to
         # ingest before drilling, otherwise it kicks off the graph directly.
         # The use_cached toggle only governs the no-click default-view path below.

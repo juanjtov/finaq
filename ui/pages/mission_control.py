@@ -4,7 +4,7 @@ Reads from existing artefacts (no Step 5z dependency):
   - data_cache/eval/runs/*.json — eval run history (Tier 1 + Tier 2 + RAGAS)
   - data_cache/edgar/ — last-touched timestamps per ticker
   - data_cache/yfin/ — last-touched per ticker
-  - data_cache/chroma/ — collection size + last modified
+  - data_cache/state.db ingested_filings — filings-index manifest (tickers, filings, chunks)
   - data_cache/demos/ — cached drill-in count
 
 When Step 5z lands, this page will additionally read `data_cache/state.db`
@@ -35,7 +35,6 @@ EVAL_DIR = Path(__file__).parents[2] / "data_cache" / "eval" / "runs"
 DEMO_DIR = Path(__file__).parents[2] / "data_cache" / "demos"
 EDGAR_DIR = Path(__file__).parents[2] / "data_cache" / "edgar"
 YFIN_DIR = Path(__file__).parents[2] / "data_cache" / "yfin"
-CHROMA_DIR = Path(__file__).parents[2] / "data_cache" / "chroma"
 
 
 # --- Freshness probes -------------------------------------------------------
@@ -109,15 +108,15 @@ def _curated_universe_tickers() -> list[str]:
 
 def render_filings_freshness_panel() -> None:
     """Per-ticker RAG corpus freshness — latest filed dates ingested into
-    ChromaDB. Surfaces stale ingest before a drill-in runs and the user
+    the filings index. Surfaces stale ingest before a drill-in runs and the user
     wonders why the Filings agent missed last quarter's 10-Q.
     """
-    from data.chroma import last_filings_by_type
+    from data.vectors import last_filings_by_type
 
     st.markdown("### Filings freshness (per ticker)")
     st.caption(
         "Latest `filed_date` per filing type across every curated thesis's "
-        "universe, read from ChromaDB metadata. `—` means no chunks for that "
+        "universe, read from the ingest manifest in state.db. `—` means no chunks for that "
         "type are ingested yet — run `scripts/ingest_universe.py` to backfill."
     )
 
@@ -152,6 +151,8 @@ def render_filings_freshness_panel() -> None:
 
 
 def render_freshness_panel() -> None:
+    from data import state as state_db
+
     st.markdown("### Data-source freshness")
     cols = st.columns(4)
     with cols[0]:
@@ -170,15 +171,13 @@ def render_freshness_panel() -> None:
         )
         freshness_card("yfinance cache", str(n_yfin), latest_str)
     with cols[2]:
-        if CHROMA_DIR.exists():
-            size_bytes = sum(f.stat().st_size for f in CHROMA_DIR.rglob("*") if f.is_file())
-            freshness_card(
-                "ChromaDB",
-                f"{size_bytes / 1e6:.1f} MB",
-                _last_modified_iso(CHROMA_DIR),
-            )
-        else:
-            freshness_card("ChromaDB", "—", "—")
+        manifest = state_db.ingest_manifest_summary()
+        freshness_card(
+            "Filings index",
+            f"{manifest['tickers']} tickers · {manifest['filings']} filings · "
+            f"{manifest['chunks']:,} chunks",
+            manifest["last_ingested_at"] or "—",
+        )
     with cols[3]:
         n_demos = len(list(DEMO_DIR.glob("*.json"))) if DEMO_DIR.exists() else 0
         latest = max(

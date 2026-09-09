@@ -41,9 +41,9 @@ AGENT_CARDS = [
         "name": "Filings",
         "model_env": "MODEL_FILINGS",
         "role": "Hybrid RAG (semantic + BM25 + RRF) over the company's recent 10-K + 10-Qs. Three subqueries per drill-in: risk factors, MD&A trajectory, segment performance.",
-        "inputs": "ticker · thesis · ChromaDB filings collection",
+        "inputs": "ticker · thesis · Pinecone filings index",
         "outputs": "summary · risk_themes · mdna_quotes · evidence",
-        "external_calls": "ChromaDB · OpenRouter embeddings",
+        "external_calls": "Pinecone · OpenRouter embeddings",
     },
     {
         "name": "News",
@@ -83,7 +83,7 @@ AGENT_CARDS = [
         "role": "Free-text Q&A on any of the 4 worker agents. Reused by the dashboard's Direct Agent panel and the Phase 1 Telegram /fundamentals|/filings|/news|/risk commands.",
         "inputs": "state · agent name · question",
         "outputs": "AgentAnswer (answer · citations)",
-        "external_calls": "OpenRouter (Filings also re-runs ChromaDB RAG)",
+        "external_calls": "OpenRouter (Filings also re-runs filings RAG)",
     },
 ]
 
@@ -101,10 +101,10 @@ DATA_SOURCES = [
         "freshness": "24h TTL; bypass with cache_format_version bump",
     },
     {
-        "name": "ChromaDB",
-        "module": "data/chroma.py",
-        "role": "Persistent vector store for filings chunks. Single 'filings' collection with ticker metadata. Cosine distance.",
-        "freshness": "Updated when scripts/ingest_universe.py runs",
+        "name": "Pinecone",
+        "module": "data/vectors.py",
+        "role": "Serverless vector store for filings chunks (one namespace per ticker) and past report sections. Cosine distance; ingest manifest kept in state.db.",
+        "freshness": "Updated by scripts/ingest_universe.py and the drill-time auto-ingest",
     },
     {
         "name": "Tavily",

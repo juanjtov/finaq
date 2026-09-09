@@ -1,6 +1,6 @@
-"""Recall@K eval over the `synthesis_reports` ChromaDB corpus.
+"""Recall@K eval over the `synthesis_reports` corpus (Pinecone reports index).
 
-Reads `data_cache/chroma` directly — gated behind `pytest -m eval` since
+Hits the live index — gated behind `pytest -m eval` since
 it depends on a populated corpus (run
 `python -m scripts.index_existing_reports` first to backfill).
 
@@ -13,6 +13,7 @@ debug retrieval quality without re-running the eval.
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 
 import pytest
 
@@ -25,28 +26,36 @@ from tests.eval.cio_reports_golden_queries import (
 K = 5  # top-K to look at
 
 
-def _has_chroma_corpus() -> bool:
-    """Fast check whether a populated synthesis_reports collection exists."""
+@lru_cache(maxsize=1)
+def _has_reports_corpus() -> bool:
+    """Whether a populated reports index exists. Never creates one."""
     try:
-        from data.chroma import _get_collection
-        coll = _get_collection(name="synthesis_reports")
-        return coll.count() > 0
+        from data.vectors import INDEX_REPORTS, REPORTS_NAMESPACE, _client
+
+        pc = _client()
+        if not pc.has_index(INDEX_REPORTS):
+            return False
+        stats = pc.Index(INDEX_REPORTS).describe_index_stats()
+        namespaces = getattr(stats, "namespaces", None) or {}
+        entry = namespaces.get(REPORTS_NAMESPACE)
+        count = getattr(entry, "vector_count", None)
+        if count is None and isinstance(entry, dict):
+            count = entry.get("vector_count", 0)
+        return bool(count)
     except Exception:
         return False
 
 
 @pytest.mark.eval
-@pytest.mark.skipif(
-    not _has_chroma_corpus(),
-    reason=(
-        "synthesis_reports collection empty or unavailable — run "
-        "`python -m scripts.index_existing_reports` to populate."
-    ),
-)
 @pytest.mark.parametrize("gq", CIO_REPORTS_GOLDEN_QUERIES, ids=lambda g: g.description[:60])
 def test_recall_at_k_for_golden_query(gq: CIOReportsGoldenQuery):
     """Recall@K passes when ≥1 expected substring is found in any top-K
     chunk's text."""
+    if not _has_reports_corpus():  # checked lazily so unit runs never touch the network
+        pytest.skip(
+            "reports index empty or unavailable — run "
+            "`python -m scripts.index_existing_reports` to populate."
+        )
     chunks = query_past_reports(
         question=gq.query,
         ticker=gq.ticker,

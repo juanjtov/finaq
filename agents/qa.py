@@ -246,9 +246,7 @@ def _filings_context_from_chunks(chunks: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def _build_user_prompt(
-    ticker: str, thesis: dict, question: str, agent_context: str
-) -> str:
+def _build_user_prompt(ticker: str, thesis: dict, question: str, agent_context: str) -> str:
     parts = [
         f"TICKER: {ticker}",
         f"ACTIVE THESIS: {thesis.get('name', 'unknown')}",
@@ -291,9 +289,7 @@ def _parse_llm_response(raw: str) -> dict:
             raise ValueError(f"expected JSON object, got {type(parsed).__name__}")
         return parsed
     except (json.JSONDecodeError, ValueError) as parse_err:
-        logger.warning(
-            f"[qa] strict JSON parse failed ({parse_err}); attempting graceful recovery"
-        )
+        logger.warning(f"[qa] strict JSON parse failed ({parse_err}); attempting graceful recovery")
         # Try regex-extracting the answer field
         m = _ANSWER_FIELD_RE.search(cleaned)
         if m:
@@ -379,7 +375,7 @@ async def ask(state: FinaqState, agent: AgentName, question: str) -> AgentAnswer
     elif agent == "filings":
         # Re-run RAG with the user's question; cheaper than re-running the full
         # Filings agent because we use the Q&A-tier model and skip the synthesis.
-        from data.chroma import query as chroma_query
+        from data.vectors import query as vector_query
 
         if not ticker:
             return AgentAnswer(
@@ -390,7 +386,7 @@ async def ask(state: FinaqState, agent: AgentName, question: str) -> AgentAnswer
             )
         try:
             chunks = await asyncio.to_thread(
-                chroma_query,
+                vector_query,
                 ticker,
                 question,
                 FILINGS_ASK_K,
@@ -407,7 +403,7 @@ async def ask(state: FinaqState, agent: AgentName, question: str) -> AgentAnswer
                 question=question,
                 answer=(
                     f"No filings chunks retrieved for {ticker}. "
-                    "Has this ticker been ingested into ChromaDB?"
+                    "Has this ticker been ingested into the filings index?"
                 ),
                 errors=errors + ["no chunks retrieved"],
             )

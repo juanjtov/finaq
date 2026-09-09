@@ -24,7 +24,7 @@ import os
 
 import pytest
 
-from data.chroma import query
+from data.vectors import query
 from tests.eval.golden_queries import GOLDEN_QUERIES, GoldenQuery
 from utils.rag_eval import judge_relevance, serialise_judge_report, write_eval_run
 
@@ -44,7 +44,7 @@ def _require_keys_and_corpus():
         )
     chunks = query("NVDA", "anything", k=1)
     if not chunks:
-        pytest.skip("ChromaDB has no NVDA corpus; run data-layer integration first")
+        pytest.skip("the filings index has no NVDA corpus; run data-layer integration first")
 
 
 @pytest.mark.parametrize("gq", GOLDEN_QUERIES, ids=lambda q: q.query[:40])

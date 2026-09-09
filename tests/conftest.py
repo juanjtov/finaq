@@ -46,10 +46,9 @@ for _name in _MODEL_STUB_VARS:
 # Tests that assert tracing-enabled behaviour monkeypatch the var themselves.
 os.environ["LANGSMITH_TRACING"] = ""
 
-# Same treatment for the freshness-probe kill-switch (may be set in the
-# user's .env while the chromadb segfault is unfixed — POSTPONED §2): tests
-# must exercise the real gating logic by default; the kill-switch test
-# monkeypatch.setenv's it explicitly.
+# Same treatment for the freshness-gate kill-switch (an operator may set it in
+# .env): tests must exercise the real gating logic by default; the kill-switch
+# test monkeypatch.setenv's it explicitly.
 os.environ["FINAQ_SKIP_FRESHNESS_PROBES"] = ""
 
 
@@ -65,29 +64,36 @@ def _isolated_state_db(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_real_chroma_or_edgar_in_unit_tests(request, monkeypatch):
-    """Unit tests must not touch the real ChromaDB corpus or the live EDGAR
-    index. Beyond hermeticity, chromadb's Rust client segfaults under pytest
-    on macOS when unit tests reach `data_cache/chroma/` (observed at three
-    call sites: the drill-time freshness gate in agents/filings.py and
-    data/telegram.py, and the dashboard ingest banner / Mission Control
-    freshness sweep under AppTest) — a segfault kills the whole session, so
-    it can't even be caught per-test.
+def _no_real_vector_store_or_edgar_in_unit_tests(request, monkeypatch):
+    """Unit tests must not touch Pinecone, the embeddings API, or the live
+    EDGAR index. Opening an index or embedding text fails loudly so a test
+    that needs them stubs `data.vectors._index` / `embed_texts` itself.
 
-    Stubs the probe layer only; `check_ingest_freshness`'s real logic stays
-    testable because freshness tests monkeypatch these same seams themselves
-    (test-level monkeypatch is applied after autouse fixtures, so it wins).
+    The ingest-status probes are stubbed to "ingested, nothing stale" so the
+    UI / Telegram / CIO paths exercise their happy path by default. Freshness
+    tests monkeypatch these same seams themselves (test-level monkeypatch is
+    applied after autouse fixtures, so it wins); tests marked `real_probes`
+    get the real SQLite-backed probes against the isolated test DB.
     Integration and eval tests keep the real clients."""
     if request.node.get_closest_marker("integration") or request.node.get_closest_marker(
         "eval"
     ):
         yield
         return
-    from data import chroma as chroma_mod
     from data import freshness as freshness_mod
+    from data import vectors as vectors_mod
 
-    monkeypatch.setattr(chroma_mod, "has_ticker", lambda ticker: True)
-    monkeypatch.setattr(chroma_mod, "last_filings_by_type", lambda ticker: {})
+    def _no_pinecone(*args, **kwargs):
+        raise AssertionError("unit tests must not open a Pinecone index — stub data.vectors._index")
+
+    def _no_embeddings(*args, **kwargs):
+        raise AssertionError("unit tests must not embed text — stub data.vectors.embed_texts")
+
+    monkeypatch.setattr(vectors_mod, "_index", _no_pinecone)
+    monkeypatch.setattr(vectors_mod, "embed_texts", _no_embeddings)
+    if not request.node.get_closest_marker("real_probes"):
+        monkeypatch.setattr(vectors_mod, "has_ticker", lambda ticker: True)
+        monkeypatch.setattr(vectors_mod, "last_filings_by_type", lambda ticker: {})
     # data/freshness.py binds both probes at module top — patch its copies.
     monkeypatch.setattr(freshness_mod, "last_filings_by_type", lambda ticker: {})
     monkeypatch.setattr(

@@ -295,7 +295,7 @@ async def test_soft_failure_in_agent_payload_is_recorded_in_errors_table(
     monkeypatch, ai_cake
 ):
     """Real failure mode (CRDO case): Filings returns SUCCESSFULLY but with
-    `errors=['no chunks retrieved']` in its payload because ChromaDB has no
+    `errors=['no chunks retrieved']` in its payload because the filings index has no
     ingest for that ticker. Previously this completed silently (status='completed',
     no error row). The scan in _safe_node should now surface it."""
     from agents import filings as filings_mod

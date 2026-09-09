@@ -1,8 +1,8 @@
-"""Step 5b integration tests — real ChromaDB hybrid retrieval + real LLM synthesis.
+"""Step 5b integration tests — real Pinecone hybrid retrieval + real LLM synthesis.
 
 Run via:  pytest -m integration tests/test_filings_integration.py
 
-Requires NVDA filings already ingested into ChromaDB. The data layer integration
+Requires NVDA filings already ingested into the filings index. The data layer integration
 suite handles ingestion; if it hasn't run, this test will skip cleanly.
 """
 
@@ -36,7 +36,7 @@ async def test_filings_real_run_on_nvda_ai_cake():
     out = FilingsOutput.model_validate(result["filings"])
 
     if out.errors and any("no chunks" in e for e in out.errors):
-        pytest.skip("ChromaDB has no NVDA chunks; run data-layer integration first")
+        pytest.skip("filings index has no NVDA chunks; run data-layer integration first")
 
     # Sanity-check the output shape
     assert out.summary, "summary is empty"

@@ -19,7 +19,7 @@ import time
 from datetime import date
 from pathlib import Path
 
-from data.chroma import query as chroma_query
+from data.vectors import query as vector_query
 from utils import logger
 from utils.models import MODEL_FILINGS
 from utils.openrouter import get_client
@@ -89,7 +89,7 @@ def _retrieve_for_subquery(
     per-filing-type code mappings, we let semantic search find the right
     sections when the metadata pre-filter excludes everything.
     """
-    chunks = chroma_query(
+    chunks = vector_query(
         ticker,
         subquery["question"],
         k=SUBQUERY_K,
@@ -98,7 +98,7 @@ def _retrieve_for_subquery(
         as_of=as_of,
     )
     if not chunks and subquery.get("item_filter"):
-        chunks = chroma_query(
+        chunks = vector_query(
             ticker,
             subquery["question"],
             k=SUBQUERY_K,
@@ -198,7 +198,7 @@ async def run(state: FinaqState) -> dict:
     as_of_date = state.get("as_of_date")  # backtest mode if non-None
     errors: list[str] = []
 
-    # Step 1 — 3 RAG subqueries (each off-loop because chroma + BM25 are sync)
+    # Step 1 — 3 RAG subqueries (each off-loop because the vector query + BM25 are sync)
     subqueries = _build_subqueries(ticker, thesis)
     subqueries_with_chunks: list[tuple[dict, list[dict]]] = []
     for sq in subqueries:
@@ -223,18 +223,18 @@ async def run(state: FinaqState) -> dict:
         #       subqueries skip).
         # The Mission Control "Recent errors" panel + dashboard banner key
         # off these messages, so they need to be precise.
-        from data.chroma import has_ticker
+        from data.vectors import has_ticker
 
         ticker_ingested = await asyncio.to_thread(has_ticker, ticker)
 
         if not ticker_ingested:
             specific_error = (
-                f"ticker_not_ingested: {ticker} has zero chunks in ChromaDB. "
+                f"ticker_not_ingested: {ticker} has zero chunks in the filings index. "
                 f"Run `python -m scripts.ingest_universe {ticker}` "
                 f"(or `--thesis <slug>` for the whole thesis universe)."
             )
             summary = (
-                f"No filings data for {ticker}. ChromaDB has not been ingested "
+                f"No filings data for {ticker}. The filings index has not been ingested "
                 f"for this ticker — run `python -m scripts.ingest_universe "
                 f"{ticker}` to populate, then re-run the drill-in."
             )

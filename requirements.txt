@@ -2,7 +2,9 @@
 langgraph
 langchain-openai
 openai
-chromadb
+pinecone
+beautifulsoup4  # SEC filing HTML → text (data/vectors.py)
+tiktoken  # chunk sizing in cl100k tokens (data/vectors.py)
 yfinance
 sec-edgar-downloader
 streamlit

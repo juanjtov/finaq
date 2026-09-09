@@ -60,7 +60,7 @@ from data import state as state_db
 from data import theses as theses_lifecycle
 from utils import logger
 
-if TYPE_CHECKING:  # data.freshness pulls in chromadb; keep import-time thin.
+if TYPE_CHECKING:  # data.freshness pulls in the vector store; keep import-time thin.
     from data.freshness import FreshnessReport
 
 THESES_DIR = Path("theses")
@@ -174,7 +174,7 @@ def _fetch_news(ticker: str) -> list[dict]:
 _AUTO_INGEST_TIMEOUT_S = 90.0
 """Per-ticker cap on auto-ingest inside the heartbeat. A slow EDGAR
 response or chunking pass must not stall the rest of the cycle — on
-timeout we log and drill on whatever's already in ChromaDB."""
+timeout we log and drill on whatever's already in the filings index."""
 
 
 def _probe_freshness(ticker: str) -> FreshnessReport | None:
@@ -192,7 +192,7 @@ def _probe_freshness(ticker: str) -> FreshnessReport | None:
 
 
 async def _auto_ingest(ticker: str, report: FreshnessReport) -> None:
-    """Download + chunk + embed the filings EDGAR has and ChromaDB lacks.
+    """Download + chunk + embed the filings EDGAR has and the filings index lacks.
 
     The expensive half of freshness. The heartbeat runs it only for
     anchor tickers and for tickers the planner actually drills — a
@@ -209,7 +209,7 @@ async def _auto_ingest(ticker: str, report: FreshnessReport) -> None:
     import asyncio
 
     diff_str = ", ".join(
-        f"{d.form}({d.chroma_date or 'missing'}→{d.edgar_date})"
+        f"{d.form}({d.ingested_date or 'missing'}→{d.edgar_date})"
         for d in report.stale_forms()
     )
     logger.info(f"[cio.cio] auto-ingest triggered for {ticker} — {diff_str}")

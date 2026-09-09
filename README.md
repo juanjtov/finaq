@@ -7,7 +7,7 @@ Multi-agent drill-in over SEC filings, fundamentals, and news — orchestrated w
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-2D4F3A.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-2D4F3A.svg)](https://www.python.org/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-orchestration-2D4F3A.svg)](https://github.com/langchain-ai/langgraph)
-[![ChromaDB](https://img.shields.io/badge/ChromaDB-cosine_+_BM25-2D4F3A.svg)](https://www.trychroma.com/)
+[![Pinecone](https://img.shields.io/badge/Pinecone-cosine_+_BM25-2D4F3A.svg)](https://www.pinecone.io/)
 [![OpenRouter](https://img.shields.io/badge/LLM-swappable_via_env-2D4F3A.svg)](https://openrouter.ai/)
 [![Local-first](https://img.shields.io/badge/local--first-no_telemetry-2D4F3A.svg)](#stack)
 
@@ -111,7 +111,7 @@ Every node is wrapped by `_safe_node` — exceptions become `state.errors` entri
 The CIO meta-layer (replaces the Phase 0 Triage stub):
 
 - **`cio.planner`** — gates (cooldown, recent-dismissal velocity, drill budget) + persona-driven LLM decide per `(ticker, thesis)` pair → `CIODecision` (action: `drill | reuse | dismiss`, rationale, confidence, optional `reuse_run_id`). Gates can short-circuit to `dismiss` without touching the LLM (e.g. ≥3 dismissals in 7 days = yo-yo guard).
-- **`cio.rag`** — RAG over a separate `synthesis_reports` ChromaDB collection populated by `scripts/index_existing_reports.py` (each section of every prior drill-in is a chunk). Lets the planner cite specific past sections in its rationale.
+- **`cio.rag`** — RAG over a separate `synthesis_reports` Pinecone index populated by `scripts/index_existing_reports.py` (each section of every prior drill-in is a chunk). Lets the planner cite specific past sections in its rationale.
 - **`cio.cio`** — orchestrator: builds candidate list (curated theses for heartbeat; ticker-resolved for on-demand), pulls news (Tavily, soft-fail), calls `planner.decide` per pair, applies the drill-budget cap (default 3 — over-budget drills demote to reuse when a recent run exists, else dismiss), executes drills via `agents.invoke_with_telemetry`, persists every decision to `cio_actions`.
 - **`cio.notify`** — composes an HTML exec summary, sends to Telegram via the Bot API REST `sendMessage` endpoint (the long-poll bot doesn't have a "push" hook), mirrors the cycle to the Notion Alerts DB. Both targets soft-fail.
 - **`cio.dispatcher`** — CLI wrapping the cycles. Mode `auto` is the cron path: freshness check on `last_successful_cio_run_at` picks `heartbeat` (recent) vs `catchup` (>8h old). Combined with `RunAtLoad=true` in the launchd plist, this catches missed slots (lid-closed Mac) without stacking N missed cycles.
@@ -122,11 +122,11 @@ The CIO meta-layer (replaces the Phase 0 Triage stub):
 
 Single-vector RAG misses keyword-precise matches like "Blackwell" or "AI Diffusion". Pure BM25 misses semantic paraphrase. The fix is reciprocal rank fusion over a metadata-pre-filtered candidate pool.
 
-- Filings parsed by BeautifulSoup, chunked at **800 tokens with 100-token overlap** (`cl100k_base`), split on `Item` headers to preserve document structure.
+- Only the primary document of each EDGAR submission is parsed (the form block plus EX-99 press releases) — XBRL, graphics and exhibit attachments never reach the chunker. Text chunked at **800 tokens with 100-token overlap** (`cl100k_base`), split on `Item` headers to preserve document structure.
 - Each chunk carries metadata: `ticker`, `filing_type`, `accession`, `filed_date` (parsed from the **SGML header**, not directory timestamps), `item_code`, `item_label`.
-- Retrieval flow: metadata `where` pre-filter on `(ticker, item_code)` → cosine semantic top-60 → BM25 over the same 60 with a curated 200-word English stopword list → reciprocal rank fusion at `k=60` → top-8.
-- Embeddings via OpenRouter, batched at 100 inputs per call. Distance space **explicitly cosine** (not ChromaDB's default L2).
-- Ingestion is idempotent — re-running on the same accession replaces all prior chunks for that `(ticker, accession)` pair. Batched at 4,000 chunks per upsert; large filings exceed ChromaDB's per-call cap (SMCI's 10-K produces 7,000+ chunks).
+- Retrieval flow: ticker selects the Pinecone namespace, metadata filter on `item_code` → cosine semantic top-60 → BM25 over the same 60 with a curated 200-word English stopword list → reciprocal rank fusion at `k=60` → top-8.
+- Embeddings via OpenRouter, batched at 100 inputs per call. Cosine similarity in a Pinecone serverless index.
+- Ingestion is idempotent — re-running on the same accession replaces all prior chunks for that `(ticker, accession)` pair. Upserts batched at 100 chunks; a filing whose chunk count already matches the `state.db` manifest is skipped.
 
 The hybrid wins both ways: semantic search catches paraphrase, BM25 catches discriminative names ("Blackwell" beats "the"), and the metadata pre-filter keeps it fast by scoping the cosine scan before similarity computation.
 
@@ -218,7 +218,7 @@ Plus: PDF export with the brand palette (sage `#2D4F3A` / parchment `#F4ECDC`), 
 
 - **LangGraph** — visual debugging via `langgraph dev` Studio at <http://localhost:2024>
 - **OpenRouter** — single API key, swap Claude / GPT / Gemini / Llama via env var per agent
-- **ChromaDB** — local, persistent, no daemon
+- **Pinecone** — serverless vector store (free Starter tier), one namespace per ticker; ingest manifest in SQLite
 - **Streamlit** — single-process, desktop-feeling UI; brand palette in `.streamlit/config.toml`
 - **Pydantic** — every agent output is a typed contract validated at the boundary
 - **SQLite** (`data_cache/state.db`) — local telemetry for graph runs, node runs, alerts, errors. No external observability daemon.
@@ -241,7 +241,7 @@ See [`docs/POSTPONED.md`](./docs/POSTPONED.md) for the full deferred list with e
 
 A README readers can trust is one that admits gaps:
 
-- **Filing scope.** 10-K + 10-Q (domestic) and 20-F + 6-K (foreign-issuer) supported. No 8-K (current reports) yet. Each filing is hard-capped at 6,000 chunks during ingest — pathological 20-Fs (NU's first was 19k chunks of XBRL bloat) get truncated to keep ChromaDB sane. The Filings agent's three subqueries fall back to no-item-filter retrieval when the primary item codes don't match (10-K's 1A/7 vs 20-F's 3.D/5).
+- **Filing scope.** 10-K + 10-Q (domestic) and 20-F + 6-K (foreign-issuer) supported. No 8-K (current reports) yet. Only the primary document of each submission is parsed, so a typical 10-K runs a few hundred chunks; a 6,000-chunk safety cap per filing remains for anything malformed. The Filings agent's three subqueries fall back to no-item-filter retrieval when the primary item codes don't match (10-K's 1A/7 vs 20-F's 3.D/5).
 - **Sector multiples.** `data/sector_multiples.json` is hand-curated from Damodaran NYU Stern and refreshed quarterly (next refresh due 2026-07-28). No live feed yet.
 - **Cross-encoder re-ranking** is intentionally excluded — adds latency and cost beyond what RRF already buys you.
 - **Risk does not feed back into Monte Carlo.** Phase 0 simplification — Risk and MC are independent, both feeding Synthesis side-by-side. Future work could let MC tail-risk calibrate risk thresholds.
@@ -257,7 +257,7 @@ agents/        one file per agent — fundamentals, filings, news, risk, synthes
   prompts/     system prompts for each agent (.md), including qa_* per-agent variants
 cio/           CIO meta-layer — planner, rag, cio (orchestrator), notify, dispatcher, memory
   prompts/     CIO persona prompt
-data/          edgar.py, yfin.py, chroma.py, tavily.py, treasury.py, state.py, telegram.py, notion.py, theses.py
+data/          edgar.py, yfin.py, vectors.py, tavily.py, treasury.py, state.py, telegram.py, notion.py, theses.py
 theses/        hand-written thesis JSONs — ai_cake, nvda_halo, construction, general (+ adhoc_*, archive/)
 ui/            Streamlit app + 7 pages (mission_control, new_thesis, direct_agent, methodology, architecture, run_inspector, theses_admin)
 utils/         schemas, monte_carlo, charts, pdf_export, models, openrouter, rag_eval, rag_ragas, live_eval
@@ -267,7 +267,7 @@ docs/          ARCHITECTURE.md (decisions), FINANCE_ASSUMPTIONS.md (math), POSTP
   diagrams/    finaq_platform_v3.png (hero), graph.mmd, finaq_components.svg
 scripts/       ingest_universe.py, index_existing_reports.py, bootstrap_notion.py, run_telegram_bot.py
 deploy/        launchd/com.finaq.cio.plist — twice-daily CIO heartbeat schedule for macOS
-data_cache/    gitignored runtime cache (edgar/, yfin/, chroma/, demos/, eval/, state.db, cio.log)
+data_cache/    gitignored runtime cache (edgar/, yfin/, demos/, eval/, state.db, cio.log)
 .streamlit/    Streamlit theme — brand palette
 .env.example   API keys + per-agent MODEL_* env-var template (incl. MODEL_CIO)
 langgraph.json LangGraph Studio config — `langgraph dev` to debug

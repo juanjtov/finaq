@@ -107,15 +107,15 @@ def test_strip_code_fences(raw, expected):
 
 
 @pytest.mark.asyncio
-async def test_run_returns_ticker_not_ingested_message_when_chroma_empty(monkeypatch):
-    """When ChromaDB has no chunks for the ticker AT ALL, surface a precise
+async def test_run_returns_ticker_not_ingested_message_when_index_empty(monkeypatch):
+    """When the filings index has no chunks for the ticker AT ALL, surface a precise
     actionable error pointing at scripts.ingest_universe — not a generic
     'no chunks retrieved' message."""
     from agents import filings as f
 
     monkeypatch.setattr(f, "_retrieve_for_subquery", lambda *a, **kw: [])
     # has_ticker returns False → "ticker_not_ingested" path
-    monkeypatch.setattr("data.chroma.has_ticker", lambda ticker: False)
+    monkeypatch.setattr("data.vectors.has_ticker", lambda ticker: False)
 
     state = {"ticker": "ZZZZ", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
     result = await run(state)
@@ -129,13 +129,13 @@ async def test_run_returns_ticker_not_ingested_message_when_chroma_empty(monkeyp
 async def test_run_returns_empty_query_match_when_ticker_ingested_but_no_hits(
     monkeypatch,
 ):
-    """When ChromaDB DOES have chunks for the ticker but the 3 subqueries all
+    """When the filings index DOES have chunks for the ticker but the 3 subqueries all
     return 0 matches, emit a different (rare) error so we know the issue is
     the query templates, not the corpus."""
     from agents import filings as f
 
     monkeypatch.setattr(f, "_retrieve_for_subquery", lambda *a, **kw: [])
-    monkeypatch.setattr("data.chroma.has_ticker", lambda ticker: True)
+    monkeypatch.setattr("data.vectors.has_ticker", lambda ticker: True)
     monkeypatch.setattr("data.edgar.has_filings_in_unsupported_kinds", lambda t: [])
 
     state = {"ticker": "ABCD", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
@@ -164,7 +164,7 @@ def test_retrieve_for_subquery_falls_back_to_no_item_filter_on_empty(monkeypatch
             return []
         return [{"text": "Item 3.D Risk Factors prose", "metadata": {}, "score": 0.1}]
 
-    monkeypatch.setattr(f, "chroma_query", _stub_query)
+    monkeypatch.setattr(f, "vector_query", _stub_query)
     sq = {"label": "risk_factors", "item_filter": "1A", "question": "principal risks"}
 
     chunks = f._retrieve_for_subquery("NU", sq)
@@ -185,7 +185,7 @@ def test_retrieve_for_subquery_does_not_retry_when_filter_already_none(monkeypat
         calls.append({"item_filter": item_filter})
         return []
 
-    monkeypatch.setattr(f, "chroma_query", _stub_query)
+    monkeypatch.setattr(f, "vector_query", _stub_query)
     sq = {"label": "segment_performance", "item_filter": None, "question": "segments"}
 
     chunks = f._retrieve_for_subquery("NU", sq)
@@ -206,7 +206,7 @@ async def test_run_emits_actionable_error_when_ticker_ingested_but_subqueries_mi
     from agents import filings as f
 
     monkeypatch.setattr(f, "_retrieve_for_subquery", lambda *a, **kw: [])
-    monkeypatch.setattr("data.chroma.has_ticker", lambda ticker: True)
+    monkeypatch.setattr("data.vectors.has_ticker", lambda ticker: True)
 
     state = {"ticker": "ABCD", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
     result = await run(state)

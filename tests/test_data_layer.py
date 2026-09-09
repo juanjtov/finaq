@@ -42,6 +42,27 @@ def test_edgar_existing_filings_lists_full_submissions(tmp_path, monkeypatch):
     assert all(p.name == "full-submission.txt" for p in paths)
 
 
+def test_edgar_existing_filings_are_newest_first(tmp_path, monkeypatch):
+    """`download_filings` keeps `existing[:limit]`, so the order decides which
+    filings get ingested. Accession numbers sort oldest-first; the SGML filed
+    date must drive the order or a backtest-bumped corpus seeds stale 10-Ks."""
+    from data import edgar
+
+    monkeypatch.setattr(edgar, "EDGAR_DIR", tmp_path)
+    base = tmp_path / "sec-edgar-filings" / "NKE" / "10-K"
+    for accession, filed in [
+        ("0000320187-22-000038", "20220721"),
+        ("0000320187-25-000047", "20250717"),
+        ("0000320187-23-000039", "20230720"),
+    ]:
+        (base / accession).mkdir(parents=True)
+        (base / accession / "full-submission.txt").write_text(
+            f"<SEC-DOCUMENT>\nFILED AS OF DATE:\t{filed}\n<TYPE>10-K\n"
+        )
+    paths = edgar._existing_filings("NKE", "10-K")
+    assert [p.parent.name[-6:] for p in paths] == ["000047", "000039", "000038"]
+
+
 def test_edgar_parse_filed_date_extracts_iso_date(tmp_path):
     """SGML header line 'FILED AS OF DATE: 20240221' → '2024-02-21'."""
     from data.edgar import parse_filed_date
@@ -152,11 +173,11 @@ def test_yfin_returns_partial_dict_with_errors_field_on_failure(tmp_path, monkey
     assert all(k in result for k in yfin.EXPECTED_KEYS)
 
 
-# --- data/chroma.py (pure-logic helpers, no real ChromaDB) -------------------
+# --- data/vectors.py (pure-logic helpers, no real vector store) -------------------
 
 
-def test_chroma_split_into_items_extracts_codes_and_bodies():
-    from data.chroma import _split_into_items
+def test_vectors_split_into_items_extracts_codes_and_bodies():
+    from data.vectors import _split_into_items
 
     text = (
         "Item 1A. Risk Factors\n"
@@ -173,18 +194,18 @@ def test_chroma_split_into_items_extracts_codes_and_bodies():
     assert "MD&A talks" in items[1][2]
 
 
-def test_chroma_split_into_items_returns_misc_when_no_headers():
-    from data.chroma import _split_into_items
+def test_vectors_split_into_items_returns_misc_when_no_headers():
+    from data.vectors import _split_into_items
 
     text = "This document has no Item headers anywhere in it."
     items = _split_into_items(text)
     assert items == [("misc", "Unstructured", text)]
 
 
-def test_chroma_chunk_tokens_respects_target_and_overlap():
+def test_vectors_chunk_tokens_respects_target_and_overlap():
     import tiktoken
 
-    from data.chroma import CHUNK_OVERLAP_TOKENS, TARGET_CHUNK_TOKENS, _chunk_tokens
+    from data.vectors import CHUNK_OVERLAP_TOKENS, TARGET_CHUNK_TOKENS, _chunk_tokens
 
     encoder = tiktoken.get_encoding("cl100k_base")
     long_text = ("hello world " * 1000).strip()  # ~2000 tokens
@@ -197,10 +218,10 @@ def test_chroma_chunk_tokens_respects_target_and_overlap():
     assert sizes[0] >= TARGET_CHUNK_TOKENS - CHUNK_OVERLAP_TOKENS
 
 
-def test_chroma_chunk_tokens_empty_text_yields_no_chunks():
+def test_vectors_chunk_tokens_empty_text_yields_no_chunks():
     import tiktoken
 
-    from data.chroma import _chunk_tokens
+    from data.vectors import _chunk_tokens
 
     encoder = tiktoken.get_encoding("cl100k_base")
     assert _chunk_tokens("", encoder) == []
@@ -217,14 +238,14 @@ def test_chroma_chunk_tokens_empty_text_yields_no_chunks():
         ("7", "7"),
     ],
 )
-def test_chroma_normalize_item_filter_codes(raw, expected):
-    from data.chroma import _normalize_item_filter
+def test_vectors_normalize_item_filter_codes(raw, expected):
+    from data.vectors import _normalize_item_filter
 
     assert _normalize_item_filter(raw) == expected
 
 
-def test_chroma_filing_meta_from_path_extracts_kind_and_accession():
-    from data.chroma import _filing_meta_from_path
+def test_vectors_filing_meta_from_path_extracts_kind_and_accession():
+    from data.vectors import _filing_meta_from_path
 
     path = Path("data_cache/edgar/sec-edgar-filings/NVDA/10-K/0001-25-000123/full-submission.txt")
     kind, accession = _filing_meta_from_path(path)
@@ -232,200 +253,365 @@ def test_chroma_filing_meta_from_path_extracts_kind_and_accession():
     assert accession == "0001-25-000123"
 
 
-def test_chroma_get_collection_passes_name_through_to_client(monkeypatch):
-    """Step 11.4 — `_get_collection(name=...)` must request the named
-    collection from the chroma client. The CIO planner relies on this to
-    open `synthesis_reports` separately from the filings corpus."""
-    from data import chroma as ch
-
-    captured: dict = {}
-
-    class _FakeCollection:
-        pass
-
-    class _FakeClient:
-        def get_or_create_collection(self, *, name, embedding_function, configuration):
-            captured["name"] = name
-            return _FakeCollection()
-
-    monkeypatch.setattr(ch.chromadb, "PersistentClient", lambda **kwargs: _FakeClient())
-    # _persistent_client caches one client per path for the process — clear
-    # it around the fake so this test neither reuses a real client nor
-    # leaks the fake to later tests.
-    ch._persistent_client.cache_clear()
-    try:
-        coll = ch._get_collection()
-        # _get_collection returns a thread-safe proxy (Rust-client segfault
-        # mitigation); the wrapped collection must be the fake's.
-        assert isinstance(coll._coll, _FakeCollection)
-        assert captured["name"] == "filings"  # default
-
-        coll = ch._get_collection(name="synthesis_reports")
-        assert captured["name"] == "synthesis_reports"
-    finally:
-        ch._persistent_client.cache_clear()
+# --- data/vectors.py: primary-document extraction --------------------------
 
 
-def test_ingest_filing_batches_upsert_when_chunk_count_exceeds_chroma_limit(
-    tmp_path, monkeypatch
-):
-    """Real failure mode (SMCI/DELL ingestion): a 10-K can produce >5461
-    chunks in one filing — ChromaDB's `add`/`upsert` raises
-    `ValueError: Batch size … is greater than max batch size of 5461`.
-    The fix batches the upsert; this test asserts upsert is called multiple
-    times for a synthetic large filing, never with more than _UPSERT_BATCH_SIZE
-    items per call."""
-    from data import chroma as ch
+def _sgml(*docs: tuple[str, str]) -> str:
+    """Build an EDGAR full-submission.txt envelope from (TYPE, body) pairs."""
+    return "".join(
+        f"<DOCUMENT>\n<TYPE>{t}\n<SEQUENCE>1\n<TEXT>\n{body}\n</TEXT>\n</DOCUMENT>\n"
+        for t, body in docs
+    )
 
-    # Fake collection that just records every call.
-    upsert_calls: list[int] = []
 
-    class _FakeCollection:
-        def upsert(self, ids, documents, metadatas):
-            upsert_calls.append(len(ids))
+def test_vectors_primary_documents_keep_form_and_press_release_only():
+    """A submission bundles the form with XBRL, certifications, graphics and
+    ZIPs. Only the form block and EX-99 press releases carry narrative."""
+    from data.vectors import _primary_documents
 
-    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
+    raw = _sgml(
+        ("10-Q", "<p>Item 2. MD&A narrative</p>"),
+        ("EX-31.1", "officer certification"),
+        ("EX-101.SCH", "<xml>taxonomy</xml>"),
+        ("GRAPHIC", "begin 644 logo.jpg\nM4$Y'"),
+        ("EX-99.1", "press release"),
+    )
+    kept = _primary_documents(raw, "10-Q")
+    assert len(kept) == 2
+    assert "MD&A narrative" in kept[0]
+    assert "press release" in kept[1]
 
-    # Synthesize a fake "extracted text" that produces >5461 chunks. Bypass
-    # the SEC-filing parser by stubbing _extract_text + _split_into_items +
-    # _chunk_tokens to return a known number of chunks directly.
-    # 5500 sits above the 4000 batch limit (so we can verify batching) but
-    # below the 6000 chunk cap (so the cap doesn't fire and obscure the
-    # batched-upsert behaviour we're checking here).
-    n_chunks_total = 5500
-    monkeypatch.setattr(ch, "_extract_text", lambda p: "x")  # non-empty short-circuits the bail
+
+def test_vectors_primary_documents_keep_ex13_annual_report():
+    """Some 10-K filers incorporate MD&A and the financials by reference to an
+    EX-13 annual-report exhibit; dropping it would drop the narrative."""
+    from data.vectors import _primary_documents
+
+    raw = _sgml(("10-K", "cover only"), ("EX-13", "annual report narrative"), ("EX-21", "subsidiaries"))
+    kept = _primary_documents(raw, "10-K")
+    assert len(kept) == 2
+    assert "annual report narrative" in kept[1]
+
+
+def test_vectors_primary_documents_accept_amendments_and_fall_back():
+    from data.vectors import _primary_documents
+
+    assert len(_primary_documents(_sgml(("10-K/A", "amended")), "10-K")) == 1
+    # No block matches the form → the first block, never nothing.
+    kept = _primary_documents(_sgml(("EX-10.1", "contract"), ("XML", "<x/>")), "10-K")
+    assert len(kept) == 1 and "contract" in kept[0]
+    # No SGML envelope at all → the whole file.
+    assert _primary_documents("plain text", "10-K") == ["plain text"]
+
+
+def test_vectors_extract_text_drops_attachments(tmp_path):
+    """End to end: uuencoded graphics and XBRL labels never reach the text
+    that gets chunked — they were 94% of the old corpus."""
+    from data.vectors import _extract_text
+
+    folder = tmp_path / "sec-edgar-filings" / "NKE" / "10-K" / "0000320187-25-000001"
+    folder.mkdir(parents=True)
+    path = folder / "full-submission.txt"
+    path.write_text(
+        _sgml(
+            (
+                "10-K",
+                "<html><body><p>Item 1A. Risk Factors</p><p>Demand may soften.</p></body></html>",
+            ),
+            ("GRAPHIC", "begin 644 x\nM4$Y'#0H:"),
+            ("EX-101.LAB", "<link:label>CostOfRevenue</link:label>"),
+        )
+    )
+    text = _extract_text(path)
+    assert "Demand may soften." in text
+    assert "M4$Y'" not in text
+    assert "CostOfRevenue" not in text
+
+
+def test_vectors_date_int():
+    from data.vectors import _date_int
+
+    assert _date_int("2026-02-26") == 20260226
+    assert _date_int("") == 0
+    assert _date_int("garbage") == 0
+
+
+# --- data/vectors.py: ingest ------------------------------------------------
+
+
+class _FakeIndex:
+    """In-memory stand-in for a Pinecone Index: records upserts, serves
+    list / fetch / delete by id, and returns canned query matches."""
+
+    def __init__(self, matches: list[dict] | None = None):
+        self.store: dict[str, dict[str, dict]] = {}  # namespace → id → record
+        self.upsert_calls: list[tuple[str, int]] = []
+        self.queries: list[dict] = []
+        self._matches = matches or []
+
+    def upsert(self, *, vectors, namespace="", show_progress=True):
+        self.upsert_calls.append((namespace, len(vectors)))
+        ns = self.store.setdefault(namespace, {})
+        for v in vectors:
+            ns[v["id"]] = {"values": v["values"], "metadata": v["metadata"]}
+
+    def list(self, *, prefix=None, limit=None, namespace=""):
+        ids = [i for i in self.store.get(namespace, {}) if i.startswith(prefix or "")]
+        page = limit or 100
+        for i in range(0, len(ids), page):
+            yield {"vectors": [{"id": x} for x in ids[i : i + page]]}
+
+    def delete(self, *, ids=None, namespace="", **kwargs):
+        for i in ids or []:
+            self.store.get(namespace, {}).pop(i, None)
+
+    def fetch(self, *, ids, namespace=""):
+        ns = self.store.get(namespace, {})
+        return {"vectors": {i: {"id": i, "metadata": ns[i]["metadata"]} for i in ids if i in ns}}
+
+    def query(self, **kwargs):
+        self.queries.append(kwargs)
+        return {"matches": self._matches}
+
+
+def _stub_ingest(monkeypatch, vec, n_chunks: int, *, accession: str, filing_type: str = "10-Q"):
+    """Bypass the SEC parser + embeddings; return the fake index that receives writes."""
+    monkeypatch.setattr(vec, "_extract_text", lambda p: "x")
+    monkeypatch.setattr(vec, "_split_into_items", lambda text: [("1A", "Risk Factors", "body")])
     monkeypatch.setattr(
-        ch,
-        "_split_into_items",
-        lambda text: [("1A", "Risk Factors", "stub body")],
+        vec, "_chunk_tokens", lambda body, encoder: [f"c{i}" for i in range(n_chunks)]
     )
-    monkeypatch.setattr(
-        ch,
-        "_chunk_tokens",
-        lambda body, encoder: [f"chunk-{i}" for i in range(n_chunks_total)],
+    monkeypatch.setattr(vec, "_filing_meta_from_path", lambda path: (filing_type, accession))
+    monkeypatch.setattr(vec, "parse_filed_date", lambda path: "2026-08-05")
+    monkeypatch.setattr(vec.tiktoken, "get_encoding", lambda name: object())
+    monkeypatch.setattr(vec, "embed_texts", lambda texts: [[0.1, 0.2, 0.3] for _ in texts])
+    fake = _FakeIndex()
+    monkeypatch.setattr(vec, "_index", lambda name: fake)
+    return fake
+
+
+def test_vectors_list_ids_ignores_empty_pages():
+    """A page whose `vectors` list is empty must contribute nothing — never
+    the dict's keys (a stray id "vectors" would then be deleted)."""
+    from data.vectors import _list_ids
+
+    class _Index:
+        def list(self, *, prefix=None, limit=None, namespace=""):
+            yield {"vectors": []}
+            yield {"vectors": [{"id": "A-1-0"}]}
+
+    assert _list_ids(_Index(), prefix="A-", namespace="A") == ["A-1-0"]
+
+
+def test_vectors_ingest_batches_upserts_and_records_manifest(tmp_path, monkeypatch):
+    from data import state as state_db
+    from data import vectors as vec
+
+    fake = _stub_ingest(monkeypatch, vec, 250, accession="0001-26-250")
+    path = tmp_path / "full-submission.txt"
+    path.write_text("ignored")
+
+    assert vec.ingest_filing("crdo", path) == 250
+    assert [n for _, n in fake.upsert_calls] == [100, 100, 50]
+    assert {ns for ns, _ in fake.upsert_calls} == {"CRDO"}  # namespace per ticker
+    stored = fake.store["CRDO"]["CRDO-0001-26-250-0"]
+    assert stored["metadata"]["text"] == "c0"
+    assert stored["metadata"]["item_code"] == "1A"
+    assert stored["metadata"]["filed_date_int"] == 20260805
+    rows = state_db.ingested_filings("CRDO")
+    assert [(r["accession"], r["chunks"], r["filed_date"]) for r in rows] == [
+        ("0001-26-250", 250, "2026-08-05")
+    ]
+
+
+def test_vectors_ingest_skips_when_manifest_matches(tmp_path, monkeypatch):
+    """A filing whose chunk count is already in the manifest was fully
+    ingested before → no embed, no upsert. Re-embedding every on-disk
+    filing whenever one new 10-Q landed multiplied ingest cost ~6x."""
+    from data import state as state_db
+    from data import vectors as vec
+
+    fake = _stub_ingest(monkeypatch, vec, 5, accession="0001-26-005")
+    state_db.record_ingested_filing(
+        ticker="CRDO",
+        accession="0001-26-005",
+        filing_type="10-Q",
+        filed_date="2026-08-05",
+        chunks=5,
     )
-    monkeypatch.setattr(
-        ch,
-        "_filing_meta_from_path",
-        lambda path: ("10-K", "0001-25-000999"),
+    path = tmp_path / "full-submission.txt"
+    path.write_text("ignored")
+
+    assert vec.ingest_filing("CRDO", path) == 0
+    assert fake.upsert_calls == []
+
+
+def test_vectors_ingest_replaces_stale_chunks_when_count_differs(tmp_path, monkeypatch):
+    """A newer chunker (or a run killed mid-upsert) leaves the manifest count
+    different from the fresh count → the old ids are dropped by prefix and the
+    filing is embedded again in full. Other filings in the namespace survive."""
+    from data import state as state_db
+    from data import vectors as vec
+
+    fake = _stub_ingest(monkeypatch, vec, 3, accession="0001-26-003")
+    fake.store["CRDO"] = {
+        f"CRDO-0001-26-003-{i}": {"values": [], "metadata": {}} for i in range(7)
+    }
+    fake.store["CRDO"]["CRDO-0001-26-004-0"] = {"values": [], "metadata": {}}
+    state_db.record_ingested_filing(
+        ticker="CRDO",
+        accession="0001-26-003",
+        filing_type="10-Q",
+        filed_date="2026-08-05",
+        chunks=7,
     )
-    monkeypatch.setattr(ch, "parse_filed_date", lambda path: "2026-02-26")
+    path = tmp_path / "full-submission.txt"
+    path.write_text("ignored")
 
-    # Need a tiktoken encoder placeholder; the lambda above ignores it.
-    monkeypatch.setattr(
-        ch.tiktoken, "get_encoding", lambda name: object()
-    )
-
-    fake_path = tmp_path / "full-submission.txt"
-    fake_path.write_text("ignored — _extract_text is stubbed")
-
-    written = ch.ingest_filing("SMCI", fake_path)
-    assert written == n_chunks_total
-    # Multiple batches because total > _UPSERT_BATCH_SIZE
-    assert len(upsert_calls) >= 2, (
-        f"expected >=2 upsert calls for {n_chunks_total} chunks, got {len(upsert_calls)}"
-    )
-    # No single batch exceeds the configured limit (ChromaDB max is 5461;
-    # we use 4000 to stay well below it).
-    assert all(n <= ch._UPSERT_BATCH_SIZE for n in upsert_calls), (
-        f"a batch exceeded the upsert limit: {upsert_calls}"
-    )
-    # The total writes match.
-    assert sum(upsert_calls) == n_chunks_total
+    assert vec.ingest_filing("CRDO", path) == 3
+    assert set(fake.store["CRDO"]) == {
+        "CRDO-0001-26-003-0",
+        "CRDO-0001-26-003-1",
+        "CRDO-0001-26-003-2",
+        "CRDO-0001-26-004-0",
+    }
+    assert state_db.ingested_filing_chunks("CRDO", "0001-26-003") == 3
 
 
-def test_ingest_filing_single_upsert_when_chunk_count_below_limit(tmp_path, monkeypatch):
-    """Small filings (under the batch limit) should still produce exactly
-    one upsert call — no per-batch overhead when there's nothing to batch."""
-    from data import chroma as ch
+def test_vectors_ingest_embeds_when_stale_id_lookup_fails(tmp_path, monkeypatch):
+    """A list() error while looking for stale ids must not block ingest —
+    embedding anyway is the safe direction."""
+    from data import vectors as vec
 
-    upsert_calls: list[int] = []
+    fake = _stub_ingest(monkeypatch, vec, 3, accession="0001-26-013")
 
-    class _FakeCollection:
-        def upsert(self, ids, documents, metadatas):
-            upsert_calls.append(len(ids))
+    def _boom(**kwargs):
+        raise RuntimeError("namespace missing")
 
-    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
-    monkeypatch.setattr(ch, "_extract_text", lambda p: "x")
-    monkeypatch.setattr(
-        ch,
-        "_split_into_items",
-        lambda text: [("1A", "Risk Factors", "stub body")],
-    )
-    monkeypatch.setattr(
-        ch,
-        "_chunk_tokens",
-        lambda body, encoder: [f"chunk-{i}" for i in range(500)],
-    )
-    monkeypatch.setattr(ch, "_filing_meta_from_path", lambda path: ("10-Q", "0001-25-001"))
-    monkeypatch.setattr(ch, "parse_filed_date", lambda path: "2026-02-26")
-    monkeypatch.setattr(ch.tiktoken, "get_encoding", lambda name: object())
+    fake.list = _boom
+    path = tmp_path / "full-submission.txt"
+    path.write_text("ignored")
 
-    fake_path = tmp_path / "full-submission.txt"
-    fake_path.write_text("ignored")
-
-    ch.ingest_filing("CRDO", fake_path)
-    assert upsert_calls == [500]
+    assert vec.ingest_filing("CRDO", path) == 3
+    assert [n for _, n in fake.upsert_calls] == [3]
 
 
-def test_ingest_filing_caps_chunks_when_filing_is_pathologically_large(
-    tmp_path, monkeypatch, caplog
-):
-    """Real failure mode (NU 20-F): a single filing produced 19,423 chunks
-    because the 35MB filing included full XBRL inline content. ChromaDB's
-    HNSW index then ate 84GB of disk before the ingest was killed.
-
-    The cap caps each filing at `_MAX_CHUNKS_PER_FILING` so a pathological
-    20-F can no longer take the system out. The test simulates a 20,000-
-    chunk filing and asserts only `_MAX_CHUNKS_PER_FILING` land."""
+def test_vectors_ingest_caps_pathological_filings(tmp_path, monkeypatch, caplog):
+    """Safety net: a malformed submission that still chunks into tens of
+    thousands of pieces is truncated at `_MAX_CHUNKS_PER_FILING` with a
+    warning, keeping the head of the filing where the Items live."""
     import logging
 
-    from data import chroma as ch
+    from data import vectors as vec
 
-    upsert_calls: list[int] = []
-
-    class _FakeCollection:
-        def upsert(self, ids, documents, metadatas):
-            upsert_calls.append(len(ids))
-
-    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
-    monkeypatch.setattr(ch, "_extract_text", lambda p: "x")
-    monkeypatch.setattr(
-        ch,
-        "_split_into_items",
-        lambda text: [("MISC", "Unstructured", "stub body")],
+    fake = _stub_ingest(
+        monkeypatch, vec, 20_000, accession="0001292814-25-001517", filing_type="20-F"
     )
-    # 20,000 chunks — well above the cap.
-    monkeypatch.setattr(
-        ch,
-        "_chunk_tokens",
-        lambda body, encoder: [f"chunk-{i}" for i in range(20_000)],
-    )
-    monkeypatch.setattr(
-        ch, "_filing_meta_from_path", lambda path: ("20-F", "0001292814-25-001517"),
-    )
-    monkeypatch.setattr(ch, "parse_filed_date", lambda path: "2025-03-15")
-    monkeypatch.setattr(ch.tiktoken, "get_encoding", lambda name: object())
-
-    fake_path = tmp_path / "full-submission.txt"
-    fake_path.write_text("ignored")
+    path = tmp_path / "full-submission.txt"
+    path.write_text("ignored")
 
     with caplog.at_level(logging.WARNING):
-        written = ch.ingest_filing("NU", fake_path)
+        written = vec.ingest_filing("NU", path)
 
-    assert written == ch._MAX_CHUNKS_PER_FILING
-    assert sum(upsert_calls) == ch._MAX_CHUNKS_PER_FILING
-    # Warning log fired so the operator knows the filing was truncated.
-    assert any("hit chunk cap" in m for m in caplog.messages), (
-        f"expected chunk-cap warning in logs: {caplog.messages}"
-    )
+    assert written == vec._MAX_CHUNKS_PER_FILING
+    assert sum(n for _, n in fake.upsert_calls) == vec._MAX_CHUNKS_PER_FILING
+    assert any("hit chunk cap" in m for m in caplog.messages)
 
 
-# --- Hybrid retrieval: BM25 + RRF -------------------------------------------
+# --- data/vectors.py: query -------------------------------------------------
 
 
-def test_chroma_bm25_ranks_keyword_match_first():
-    from data.chroma import _bm25_rank
+def test_vectors_query_requires_ticker():
+    from data import vectors as vec
+
+    with pytest.raises(ValueError, match="ticker"):
+        vec.query(None, "anything")
+
+
+def test_vectors_query_scopes_namespace_filters_and_fuses(monkeypatch):
+    """The ticker selects the namespace; item + as_of become a server-side
+    metadata filter; BM25 over the candidate pool promotes the keyword hit
+    through RRF; chunk text is lifted out of metadata."""
+    from data import vectors as vec
+
+    common = {"item_code": "7", "filed_date": "2026-01-01"}
+    matches = [
+        {"id": "a", "score": 0.9, "metadata": {"text": "cooling supply for racks", **common}},
+        {
+            "id": "b",
+            "score": 0.8,
+            "metadata": {"text": "Blackwell ramp constrained by capacity", **common},
+        },
+        {"id": "c", "score": 0.7, "metadata": {"text": "capacity remarks", **common}},
+    ]
+    fake = _FakeIndex(matches=matches)
+    monkeypatch.setattr(vec, "_index", lambda name: fake)
+    monkeypatch.setattr(vec, "embed_texts", lambda texts: [[0.5, 0.5]])
+
+    out = vec.query("nvda", "Blackwell capacity", k=2, item_filter="Item 7", as_of="2026-03-01")
+
+    q = fake.queries[0]
+    assert q["namespace"] == "NVDA"
+    assert q["top_k"] == vec.DEFAULT_CANDIDATE_POOL
+    assert q["include_metadata"] is True
+    assert q["filter"] == {
+        "item_code": {"$eq": "7"},
+        "filed_date_int": {"$gte": 1, "$lte": 20260301},
+    }
+    assert len(out) == 2
+    assert out[0]["text"].startswith("Blackwell")
+    assert "text" not in out[0]["metadata"]
+    assert out[0]["metadata"]["item_code"] == "7"
+
+
+def test_vectors_query_returns_empty_when_no_matches(monkeypatch):
+    from data import vectors as vec
+
+    monkeypatch.setattr(vec, "_index", lambda name: _FakeIndex(matches=[]))
+    monkeypatch.setattr(vec, "embed_texts", lambda texts: [[0.5, 0.5]])
+    assert vec.query("NVDA", "anything") == []
+
+
+def test_vectors_build_filter():
+    from data.vectors import _build_filter
+
+    assert _build_filter(None, None) is None
+    assert _build_filter("Item 1A", None) == {"item_code": {"$eq": "1A"}}
+    assert _build_filter(None, "2025-09-05") == {
+        "filed_date_int": {"$gte": 1, "$lte": 20250905}
+    }
+
+
+# --- data/vectors.py: ingest-manifest probes --------------------------------
+
+
+@pytest.mark.real_probes
+def test_vectors_manifest_probes_read_state_db():
+    from data import state as state_db
+    from data import vectors as vec
+
+    assert vec.has_ticker("ZZZZ") is False
+    assert vec.last_filings_by_type("ZZZZ") == {}
+    assert vec.last_filing_date("ZZZZ") is None
+
+    for accession, ftype, fdate in [
+        ("a1", "10-K", "2025-02-01"),
+        ("a2", "10-Q", "2025-08-01"),
+        ("a3", "10-Q", ""),  # unparsed date — ignored by the probes
+    ]:
+        state_db.record_ingested_filing(
+            ticker="ZZZZ", accession=accession, filing_type=ftype, filed_date=fdate, chunks=4
+        )
+    assert vec.has_ticker("zzzz") is True
+    assert vec.last_filings_by_type("ZZZZ") == {"10-K": "2025-02-01", "10-Q": "2025-08-01"}
+    assert vec.last_filing_date("ZZZZ") == "2025-08-01"
+
+
+# --- data/vectors.py: BM25 + RRF --------------------------------------------
+
+
+def test_vectors_bm25_ranks_keyword_match_first():
+    from data.vectors import _bm25_rank
 
     docs = [
         "the cat sat on the mat",
@@ -436,24 +622,24 @@ def test_chroma_bm25_ranks_keyword_match_first():
     assert ranks[0] == 1, f"BM25 should rank doc 1 first, got order {ranks}"
 
 
-def test_chroma_bm25_handles_empty_corpus():
-    from data.chroma import _bm25_rank
+def test_vectors_bm25_handles_empty_corpus():
+    from data.vectors import _bm25_rank
 
     assert _bm25_rank([], "anything") == []
 
 
-def test_chroma_bm25_returns_full_ranking_with_no_matches():
+def test_vectors_bm25_returns_full_ranking_with_no_matches():
     """BM25 still returns a complete ranking even if no doc shares any terms with the query."""
-    from data.chroma import _bm25_rank
+    from data.vectors import _bm25_rank
 
     docs = ["alpha beta gamma", "delta epsilon zeta"]
     ranks = _bm25_rank(docs, "completely unrelated terms here")
     assert sorted(ranks) == [0, 1]
 
 
-def test_chroma_reciprocal_rank_fusion_promotes_consistently_high_items():
+def test_vectors_reciprocal_rank_fusion_promotes_consistently_high_items():
     """An item ranked #1 in both lists should outrank an item that's only #1 in one."""
-    from data.chroma import _reciprocal_rank_fusion
+    from data.vectors import _reciprocal_rank_fusion
 
     sem_ranks = [0, 1, 2, 3]  # doc 0 best in semantic
     bm25_ranks = [0, 2, 1, 3]  # doc 0 best in BM25 too
@@ -461,10 +647,10 @@ def test_chroma_reciprocal_rank_fusion_promotes_consistently_high_items():
     assert fused[0] == 0
 
 
-def test_chroma_reciprocal_rank_fusion_balances_disjoint_strengths():
+def test_vectors_reciprocal_rank_fusion_balances_disjoint_strengths():
     """If A is best semantically and B is best by keyword, the second item in each list
     (the consistent one) should rank higher than either pure-list winner."""
-    from data.chroma import _reciprocal_rank_fusion
+    from data.vectors import _reciprocal_rank_fusion
 
     # doc 1 is rank-2 in BOTH lists; doc 0 is rank-1 in list A but rank-3 in list B.
     sem = [0, 1, 2]
@@ -477,118 +663,17 @@ def test_chroma_reciprocal_rank_fusion_balances_disjoint_strengths():
     assert sorted(fused) == [0, 1, 2]
 
 
-def test_chroma_reciprocal_rank_fusion_handles_single_list():
-    from data.chroma import _reciprocal_rank_fusion
+def test_vectors_reciprocal_rank_fusion_handles_single_list():
+    from data.vectors import _reciprocal_rank_fusion
 
     assert _reciprocal_rank_fusion([[2, 0, 1]]) == [2, 0, 1]
 
 
-def test_chroma_reciprocal_rank_fusion_includes_items_unique_to_one_list():
-    from data.chroma import _reciprocal_rank_fusion
+def test_vectors_reciprocal_rank_fusion_includes_items_unique_to_one_list():
+    from data.vectors import _reciprocal_rank_fusion
 
     fused = _reciprocal_rank_fusion([[0, 1], [2, 3]])
     assert sorted(fused) == [0, 1, 2, 3]
-
-
-def test_chroma_build_where_clause_single_condition():
-    from data.chroma import _build_where_clause
-
-    assert _build_where_clause("NVDA", None) == {"ticker": "NVDA"}
-    assert _build_where_clause(None, "1A") == {"item_code": "1A"}
-
-
-def test_chroma_build_where_clause_multiple_conditions_uses_and():
-    from data.chroma import _build_where_clause
-
-    where = _build_where_clause("NVDA", "Item 1A")
-    assert where == {"$and": [{"ticker": "NVDA"}, {"item_code": "1A"}]}
-
-
-def test_chroma_build_where_clause_no_filters_returns_none():
-    from data.chroma import _build_where_clause
-
-    assert _build_where_clause(None, None) is None
-
-
-# --- ingest_filing skips filings already in ChromaDB (2026-09-07) ---------
-
-
-def _stub_chunking(monkeypatch, ch, n_chunks: int) -> None:
-    monkeypatch.setattr(ch, "_extract_text", lambda p: "x")
-    monkeypatch.setattr(ch, "_split_into_items", lambda text: [("1A", "Risk Factors", "body")])
-    monkeypatch.setattr(
-        ch, "_chunk_tokens", lambda body, encoder: [f"c{i}" for i in range(n_chunks)]
-    )
-    monkeypatch.setattr(ch, "_filing_meta_from_path", lambda path: ("10-Q", "0001-26-001"))
-    monkeypatch.setattr(ch, "parse_filed_date", lambda path: "2026-08-05")
-    monkeypatch.setattr(ch.tiktoken, "get_encoding", lambda name: object())
-
-
-def test_ingest_filing_skips_when_last_chunk_already_present(tmp_path, monkeypatch):
-    """A filing whose final chunk id is already in the collection was
-    fully ingested before → no re-embed. Re-embedding every on-disk
-    filing whenever one new 10-Q landed multiplied ingest cost ~6x."""
-    from data import chroma as ch
-
-    upserts: list[int] = []
-
-    class _FakeCollection:
-        def get(self, ids, include=None):
-            return {"ids": [i for i in ids if i == "CRDO-0001-26-001-4"]}
-
-        def upsert(self, ids, documents, metadatas):
-            upserts.append(len(ids))
-
-    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
-    _stub_chunking(monkeypatch, ch, n_chunks=5)
-    fake_path = tmp_path / "full-submission.txt"
-    fake_path.write_text("ignored")
-
-    assert ch.ingest_filing("CRDO", fake_path) == 0
-    assert upserts == []
-
-
-def test_ingest_filing_reembeds_partial_ingest(tmp_path, monkeypatch):
-    """Only the FIRST chunk exists (a run killed mid-upsert) → the last
-    id is missing → the filing is embedded again in full."""
-    from data import chroma as ch
-
-    upserts: list[int] = []
-
-    class _FakeCollection:
-        def get(self, ids, include=None):
-            return {"ids": [i for i in ids if i == "CRDO-0001-26-001-0"]}
-
-        def upsert(self, ids, documents, metadatas):
-            upserts.append(len(ids))
-
-    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
-    _stub_chunking(monkeypatch, ch, n_chunks=5)
-    fake_path = tmp_path / "full-submission.txt"
-    fake_path.write_text("ignored")
-
-    assert ch.ingest_filing("CRDO", fake_path) == 5
-    assert upserts == [5]
-
-
-def test_ingest_filing_embeds_when_presence_check_fails(tmp_path, monkeypatch):
-    """A collection without `get` (or a read error) must not block
-    ingest — embedding anyway is the safe direction."""
-    from data import chroma as ch
-
-    upserts: list[int] = []
-
-    class _FakeCollection:
-        def upsert(self, ids, documents, metadatas):
-            upserts.append(len(ids))
-
-    monkeypatch.setattr(ch, "_get_collection", lambda: _FakeCollection())
-    _stub_chunking(monkeypatch, ch, n_chunks=3)
-    fake_path = tmp_path / "full-submission.txt"
-    fake_path.write_text("ignored")
-
-    assert ch.ingest_filing("CRDO", fake_path) == 3
-    assert upserts == [3]
 
 
 # --- Freshness kill-switch (FINAQ_SKIP_FRESHNESS_PROBES) --------------------
@@ -596,11 +681,11 @@ def test_ingest_filing_embeds_when_presence_check_fails(tmp_path, monkeypatch):
 
 def test_check_ingest_freshness_kill_switch_short_circuits(monkeypatch):
     """With the probes kill-switch set, check_ingest_freshness must report
-    'unknown, not stale' WITHOUT touching EDGAR or ChromaDB. Regression:
-    an earlier version only gated the chroma probe — an empty chroma dict
+    'unknown, not stale' WITHOUT touching EDGAR or the filings index. Regression:
+    an earlier version only gated the ingest probe — an empty manifest dict
     plus a live EDGAR date then read as 'stale' for every ticker, funnelling
     the UI / Telegram / CIO straight into the ingest path the switch exists
-    to avoid (chromadb Rust segfault, POSTPONED §2)."""
+    to avoid."""
     from data import freshness as fr
 
     def _boom(*args, **kwargs):

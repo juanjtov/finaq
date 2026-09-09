@@ -57,7 +57,7 @@ FINAQ, why it was chosen, and any later revisions.
 ### 1.4 Async-first agents with `asyncio.to_thread` for sync I/O
 
 - **Decision:** Every agent is `async def run(state)`. Sync libraries
-  (yfinance, ChromaDB, sec-edgar-downloader, OpenAI SDK) are wrapped with
+  (yfinance, Pinecone, sec-edgar-downloader, OpenAI SDK) are wrapped with
   `asyncio.to_thread()` so they don't block the event loop.
 - **Why:** LangGraph's parallel branches are scheduled on `asyncio`, so
   sync code in one branch would serialise the others. `to_thread` is the
@@ -176,19 +176,49 @@ FINAQ, why it was chosen, and any later revisions.
   Step 5a's actual NVDA output (everything was null while the LLM
   hallucinated plausible numbers).
 
-### 3.5 ChromaDB local persistent store (no hosted vector DB)
+### 3.5 Vector store: Pinecone serverless (revised from local ChromaDB)
 
-- **Decision:** `chromadb.PersistentClient` writing to
-  `data_cache/chroma/`. Single collection named `filings`.
-- **Why:** Personal-tool scale (~10K chunks); no need for Pinecone /
-  Weaviate / Qdrant Cloud. Local-first per CLAUDE.md §2. ChromaDB has
-  metadata-where filtering and our custom embedding function works fine.
+- **Decision (2026-09-07):** `data/vectors.py` talks to two Pinecone
+  serverless indexes — `finaq-filings` and `finaq-reports` (Starter tier,
+  aws/us-east-1) — created on first use with the embedding model's
+  dimension. Filings live in one namespace per ticker with ids
+  `{TICKER}-{accession}-{n}`; chunk text rides in metadata. The ingest
+  manifest (which accessions are indexed, with how many chunks) lives in
+  `state.db::ingested_filings`, so `has_ticker` and the freshness gate
+  never pay a network round-trip.
+- **Original implementation:** `chromadb.PersistentClient` under
+  `data_cache/chroma/`, single `filings` collection, local-first per
+  CLAUDE.md §2.
+- **Revised because:** the local store had grown to 7.2 GB (5.6 GB of
+  SQLite for 660 MB of text) because the chunker embedded every attachment
+  in each EDGAR submission — 94% of the 333K chunks were XBRL, uuencoded
+  graphics and exhibits mislabelled as the filing's last Item (see §3.7).
+  Per-ticker ingests of 15-25K chunks blew the CIO's 90 s auto-ingest cap,
+  NU's 20-F once ate 84 GB of HNSW index, and chromadb 1.5.x's Rust client
+  segfaulted Streamlit on macOS (POSTPONED §2, now closed). The migration
+  was a re-embed, not a data move: NU, NKE and COUR were seeded; every
+  other ticker is ingested on demand by the drill-time freshness gate.
+- **Why Pinecone over pgvector or Azure AI Search:** at ~500-1,000 chunks
+  per ticker the corpus fits the free Starter tier for hundreds of tickers,
+  needs no memory sizing, and namespaces map 1:1 onto the old ticker
+  `where` filter. pgvector needs a paid instance for the index build and
+  Azure AI Search Basic is ~$75/mo. The `fabric-foundry` branch can still
+  swap the backend behind the same five public functions.
+- **Idempotency:** a filing whose chunk count matches the manifest is
+  skipped; otherwise its old ids are deleted by prefix (serverless indexes
+  cannot delete by metadata filter) and it is embedded again in full.
+- **Manifest/index drift:** the manifest is the only source of truth for
+  "already ingested", so a wiped or renamed index looks fully ingested
+  until `scripts/ingest_universe --force` clears the ticker's rows. The
+  unit suite's live integration test writes NVDA into the index against
+  an isolated test DB, which is exactly this drift; the next real NVDA
+  drill heals it (count mismatch → delete by prefix → re-embed).
 
 ### 3.6 Cosine distance (explicit) over L2 default
 
-- **Decision:** Collection created with
-  `configuration={"hnsw": {"space": "cosine"}}`. `DISTANCE_SPACE = "cosine"`
-  is the named constant.
+- **Decision:** Indexes are created with `metric="cosine"`;
+  `DISTANCE_METRIC = "cosine"` is the named constant (Pinecone returns
+  similarity, higher = closer).
 - **Original implementation:** ChromaDB default (L2).
 - **Revised because:** Discovered during Step 5b review that the
   collection was using L2. For unit-normalised text-embedding-3-small
@@ -210,10 +240,18 @@ FINAQ, why it was chosen, and any later revisions.
 - **Trigger to revisit:** Synthesis agent cites mid-sentence-cut
   chunks (lower size) or top-K is clearly redundant (lower size + add
   MMR). See POSTPONED §2.
+- **Revised 2026-09-07 — primary document only:** an EDGAR
+  `full-submission.txt` bundles ~90 `<DOCUMENT>` blocks (the form, XBRL
+  taxonomy XML, contracts, certifications, uuencoded graphics, ZIPs).
+  The parser used to run BeautifulSoup over the whole file, so binary
+  and tag soup became "text" and, sitting after the last Item header,
+  were labelled Item 16 (10-K), Item 6 (10-Q) or Item 19 (20-F): 312K of
+  333K chunks. `_primary_documents` now keeps only the block whose
+  `<TYPE>` is the form (amendments included) plus `EX-99` press releases.
 
 ### 3.8 Custom regex tokeniser + 150-word stopword list (over NLTK)
 
-- **Decision:** BM25 tokenisation in `data/chroma.py` uses a regex
+- **Decision:** BM25 tokenisation in `data/vectors.py` uses a regex
   word-extractor (`[a-z0-9]+`) plus an inline 150-word English stopword
   list. `lru_cache` on the tokenisation function.
 - **Original implementation:** Naive `doc.lower().split()`.
@@ -228,7 +266,7 @@ FINAQ, why it was chosen, and any later revisions.
 ### 3.9 Embedding model: `text-embedding-3-small` via OpenRouter
 
 - **Decision:** Use OpenRouter's `text-embedding-3-small` for all
-  ChromaDB embeddings. Configured via `MODEL_EMBEDDINGS` env var.
+  vector-store embeddings. Configured via `MODEL_EMBEDDINGS` env var.
 - **Why:** Cheapest decent embedding model on OpenRouter (~$0.02/M
   tokens), unit-normalised vectors (so cosine and L2 are equivalent),
   1536 dimensions (good signal/storage tradeoff), broadly competitive
@@ -254,8 +292,8 @@ FINAQ, why it was chosen, and any later revisions.
 
 - **Decision:** Every retrieved/computed datum carries a freshness
   timestamp. yfinance: `fetched_at` (UTC ISO when the API was hit).
-  EDGAR/Chroma: `filed_date` extracted from SGML header into chunk
-  metadata. Agent-level: `Evidence.as_of` is propagated downstream.
+  EDGAR/vector store: `filed_date` extracted from SGML header into chunk
+  metadata (plus `filed_date_int` for server-side backtest cutoffs). Agent-level: `Evidence.as_of` is propagated downstream.
   Fundamentals agent renders an "AS OF" block at the top of every
   prompt; soft warning if `fetched_at` > 7 days old.
 - **Why:** Stale data → bad analysis → bad investing decisions. The
@@ -269,7 +307,7 @@ FINAQ, why it was chosen, and any later revisions.
 
 ### 4.1 Hybrid retrieval: semantic + BM25 + RRF
 
-- **Decision:** ChromaDB returns a candidate pool of 60 chunks
+- **Decision:** Pinecone returns a candidate pool of 60 chunks
   (cosine-ranked). BM25 ranks the same pool by keyword score.
   Reciprocal Rank Fusion (k=60) merges both rankings; top-8 returned.
 - **Why both:** Pure semantic misses queries with rare/proper-noun
@@ -282,9 +320,10 @@ FINAQ, why it was chosen, and any later revisions.
 
 ### 4.2 Metadata filter applied BEFORE similarity scan
 
-- **Decision:** ChromaDB's `where` clause is constructed in
-  `_build_where_clause` and passed to `coll.query()`. ChromaDB applies
-  it before the similarity scan, not after.
+- **Decision:** the ticker selects the Pinecone namespace; the
+  remaining metadata filter (`item_code`, and `1 ≤ filed_date_int ≤ as_of`
+  for backtests) is built in `_build_filter` and applied server-side
+  before the similarity scan, not after.
 - **Why:** Filtering after retrieval would mean the top-K pool is
   dominated by other-ticker / other-item chunks that get *discarded*,
   leaving us with fewer than K relevant chunks. Pre-filtering ensures
@@ -947,7 +986,7 @@ Curated theses were 3–4 months unedited with no signal anywhere.
 - **Decision:** Three test categories:
   - default: pure unit, fast, runs in CI.
   - `-m integration`: hits real EDGAR / yfinance / OpenRouter /
-    ChromaDB / Tavily / Notion / Telegram. Requires `.env`.
+    Pinecone / Tavily / Notion / Telegram. Requires `.env`.
   - `-m eval`: opt-in RAG quality eval (Tier 2 + Tier 3). Costs
     money per run.
 - **Why three tiers, not two:** Eval costs vary enormously (Tier 1 is
@@ -1347,9 +1386,10 @@ before any LLM call:
   expensive download + embed) runs only for **anchor tickers** on the
   heartbeat, the requested ticker on `/cio TICKER`, and a stale ticker
   the planner actually picks for a drill (right before `_drill_one`,
-  bounded by the drill budget). Separately, `data.chroma.ingest_filing`
-  now skips a filing whose last chunk id is already in the collection —
-  before that, one new 10-Q re-embedded all six of a ticker's filings.
+  bounded by the drill budget). Separately, `data.vectors.ingest_filing`
+  skips a filing whose chunk count already matches the `ingested_filings`
+  manifest — before that, one new 10-Q re-embedded all six of a ticker's
+  filings.
 
 ### 12.4 Drill budget cap (post-LLM, pre-execute)
 
@@ -1368,14 +1408,13 @@ and prefixes with `[budget cap]`.
   confidence. Capping pre-LLM (e.g. by ticker count alphabetical) would
   be blind.
 
-### 12.5 RAG over past synthesis reports (`synthesis_reports` collection)
+### 12.5 RAG over past synthesis reports (`synthesis_reports` corpus)
 
 - **Decision:** Reports are chunked by H2 section and indexed in a
-  separate ChromaDB collection (`synthesis_reports`), not the filings
-  corpus. The CIO planner queries it via the same hybrid pipeline
+  separate Pinecone index (`finaq-reports`), not the filings corpus. The CIO planner queries it via the same hybrid pipeline
   (semantic + BM25 + RRF) as filings — just with a different metadata
   schema (`{run_id, ticker, thesis, section, date}`).
-- **Why separate collection:** Filings and reports have different
+- **Why separate index:** Filings and reports have different
   metadata fields and different optimal section sizes. Mixing them
   would force a lowest-common-denominator metadata schema and surprise
   the planner with "Item 1A" results when it asked for "what does the

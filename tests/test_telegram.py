@@ -1765,7 +1765,7 @@ async def test_drill_choice_callback_generic_routes_to_ingest_check(monkeypatch)
     """Generic button → edits the prompt to ack the choice, then routes
     through `_dispatch_drill_with_ingest_check` (which decides between
     silent drill and ingest-action keyboard based on whether the ticker
-    is in ChromaDB). Step 10c.8b — closes the gap where the previous
+    is in the filings index). Step 10c.8b — closes the gap where the previous
     direct-to-runner dispatch silently produced inaccurate drills for
     not-yet-ingested tickers like FROG."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
@@ -1857,7 +1857,7 @@ async def test_drill_command_single_match_dispatches_via_ingest_check(monkeypatc
     now routes through `_dispatch_drill_with_ingest_check` rather than
     silent dispatch. That helper decides between immediate drill (when
     ingested) and ingest-action keyboard (when not). This is the gap
-    the user reported with /drill FROG (not in ChromaDB) silently
+    the user reported with /drill FROG (not in the filings index) silently
     producing an inaccurate report."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
     monkeypatch.setattr(tg, "_list_matching_theses", lambda t: ["ai_cake"])
@@ -1878,11 +1878,11 @@ async def test_drill_command_single_match_dispatches_via_ingest_check(monkeypatc
 
 @pytest.mark.asyncio
 async def test_dispatch_drill_with_ingest_check_silent_when_ingested(monkeypatch):
-    """If ChromaDB already has the ticker, no keyboard — straight to drill."""
-    from data import chroma as _chroma
+    """If the filings index already has the ticker, no keyboard — straight to drill."""
     from data import edgar as _edgar
+    from data import vectors as _vectors
 
-    monkeypatch.setattr(_chroma, "has_ticker", lambda t: True)
+    monkeypatch.setattr(_vectors, "has_ticker", lambda t: True)
     monkeypatch.setattr(_edgar, "has_filings_in_unsupported_kinds", lambda t: [])
 
     captured: dict = {}
@@ -1907,10 +1907,10 @@ async def test_dispatch_drill_with_ingest_check_silent_when_ingested(monkeypatch
 async def test_dispatch_drill_with_ingest_check_warns_for_foreign_issuer(monkeypatch):
     """Foreign issuer (TSM, ASML) — ingestion won't help. Send a 1-line
     warning + drill anyway. No keyboard."""
-    from data import chroma as _chroma
     from data import edgar as _edgar
+    from data import vectors as _vectors
 
-    monkeypatch.setattr(_chroma, "has_ticker", lambda t: False)
+    monkeypatch.setattr(_vectors, "has_ticker", lambda t: False)
     monkeypatch.setattr(_edgar, "has_filings_in_unsupported_kinds", lambda t: ["20-F"])
 
     drill_called = {"n": 0}
@@ -1935,13 +1935,13 @@ async def test_dispatch_drill_with_ingest_check_warns_for_foreign_issuer(monkeyp
 async def test_dispatch_drill_with_ingest_check_offers_keyboard_when_not_ingested(
     monkeypatch,
 ):
-    """The user's reported case: ticker not in ChromaDB AND files
+    """The user's reported case: ticker not in the filings index AND files
     supported kinds → must show the action keyboard before drilling so
     they can pick ingest-first."""
-    from data import chroma as _chroma
     from data import edgar as _edgar
+    from data import vectors as _vectors
 
-    monkeypatch.setattr(_chroma, "has_ticker", lambda t: False)
+    monkeypatch.setattr(_vectors, "has_ticker", lambda t: False)
     monkeypatch.setattr(_edgar, "has_filings_in_unsupported_kinds", lambda t: [])
 
     drill_called = {"n": 0}
@@ -2060,7 +2060,7 @@ async def test_analyze_sends_ticker_picker_keyboard_no_auto_drill(monkeypatch):
     """After Step 10c.7, /analyze must NOT auto-drill the top anchor.
     Instead it sends an inline keyboard with each anchor as a button so
     the user picks the ticker explicitly. This prevents the wasted
-    drill-in on a ticker whose filings aren't yet in ChromaDB."""
+    drill-in on a ticker whose filings aren't yet in the filings index."""
     from agents import adhoc_thesis as at_mod
     from utils.schemas import Thesis
 
@@ -2132,10 +2132,10 @@ async def test_analyze_action_callback_pick_shows_action_keyboard(monkeypatch):
     show the action keyboard (drill now / ingest first / cancel)."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
     # has_ticker → False (not ingested) so both options should appear.
-    from data import chroma as _chroma
     from data import edgar as _edgar
+    from data import vectors as _vectors
 
-    monkeypatch.setattr(_chroma, "has_ticker", lambda t: False)
+    monkeypatch.setattr(_vectors, "has_ticker", lambda t: False)
     monkeypatch.setattr(_edgar, "has_filings_in_unsupported_kinds", lambda t: [])
 
     update, edit, answer, _ = _make_callback_query(
@@ -2165,10 +2165,10 @@ async def test_analyze_action_callback_pick_omits_ingest_for_ingested_ticker(
     """When the ticker is already ingested, the 'Ingest first' button
     must NOT appear — it's a no-op and would confuse."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
-    from data import chroma as _chroma
     from data import edgar as _edgar
+    from data import vectors as _vectors
 
-    monkeypatch.setattr(_chroma, "has_ticker", lambda t: True)
+    monkeypatch.setattr(_vectors, "has_ticker", lambda t: True)
     monkeypatch.setattr(_edgar, "has_filings_in_unsupported_kinds", lambda t: [])
 
     update, edit, answer, _ = _make_callback_query(
