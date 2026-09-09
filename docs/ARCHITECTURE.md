@@ -285,15 +285,24 @@ FINAQ, why it was chosen, and any later revisions.
   60-90 days back; one parallel call each) so a mega-cap's sample spans
   the quarter instead of one afternoon; keeps only articles whose
   headline or summary contains the ticker (case-sensitive) or the first
-  distinctive company-name token; de-duplicates headlines; gives each
+  two name words as a phrase ("Nu Holdings", "Restaurant Brands"; a bare
+  ticker only counts when 3+ chars, a 2-char one must appear as "(NU)" or
+  "NYSE:NU"); de-duplicates headlines; gives each
   slice an equal share of `max_results`, newest first, backfilling from
   leftovers; and, for the drill-in, follows Finnhub's redirect to the
   publisher page and pulls the first 1,500 chars of body paragraphs
-  (`httpx` + `beautifulsoup4`, 10 s timeout, soft-fail to the summary).
+  (`httpx` + `beautifulsoup4`, 10 s timeout; on any error or a stub page
+  the summary and the finnhub.io redirect link stand). The News agent's
+  prompt excerpt cap is 2,000 chars so the fetched body is actually seen.
   On success the citation URL becomes the publisher URL, and the News
   agent's evidence `source` is the publisher (Yahoo, Benzinga, ...)
   rather than a fixed provider label. The CIO planner passes
   `with_body=False` because it only reads headlines.
+  The API key is sent as the `X-Finnhub-Token` header, never a query
+  parameter, so an HTTP error message (which carries the URL into the
+  agent's `errors`, state.db and Mission Control) cannot leak it; 4xx
+  other than 429 is not retried. "Today" is the UTC date because article
+  timestamps are UTC.
 - **Why Finnhub:** free tier has no monthly cap (60 calls/min), takes
   explicit `from`/`to` dates so backtest `as_of` windows still work
   (one year of history on the free tier), and is ticker-native so the

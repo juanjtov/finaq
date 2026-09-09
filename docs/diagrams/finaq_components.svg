@@ -127,7 +127,7 @@
     </text>
   </g>
 
-  <!-- ======== CARD 03 — Tavily News ======== -->
+  <!-- ======== CARD 03 — Finnhub News ======== -->
   <g>
     <rect x="936" y="240" width="413" height="155" rx="10"
           fill="#FFFFFF" stroke="#E0D5C2" stroke-width="1.5"/>
@@ -137,7 +137,7 @@
       <circle cx="10" cy="10" r="7"/>
       <line x1="15" y1="15" x2="22" y2="22"/>
     </g>
-    <text x="1008" y="285" font-size="17" font-weight="600" fill="#1A1611">Tavily News</text>
+    <text x="1008" y="285" font-size="17" font-weight="600" fill="#1A1611">Finnhub News</text>
     <text x="1008" y="304" font-size="9" font-weight="700" fill="#2D4F3A"
           letter-spacing="2.2" font-family="Helvetica, Arial, sans-serif">
       DATA  CONNECTOR  ·  90-DAY WINDOW
@@ -395,7 +395,7 @@
           font-family="Helvetica, Arial, sans-serif">+ LLM</text>
     <text x="960" y="863" font-size="11.5" fill="#1A1611" opacity="0.75"
           font-style="italic">
-      <tspan x="960" dy="0">Watches EDGAR + Tavily across all theses;</tspan>
+      <tspan x="960" dy="0">Watches EDGAR + Finnhub across all theses;</tspan>
       <tspan x="960" dy="17">auto-fires drill-ins on material breach.</tspan>
     </text>
   </g>

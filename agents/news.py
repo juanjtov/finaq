@@ -36,6 +36,7 @@ SYSTEM_PROMPT = (PROMPTS_DIR / "news.md").read_text()
 LLM_MAX_TOKENS = 2500
 NEWS_DAYS = 90
 NEWS_MAX_RESULTS = 15
+EXCERPT_CHARS = 2000  # summary + fetched body (data/finnhub.py BODY_MAX_CHARS) fit in full
 
 
 # --- Prompt assembly ---------------------------------------------------------
@@ -46,7 +47,7 @@ def _format_article(idx: int, article: dict) -> str:
     url = article.get("url", "")
     pub = article.get("published_date") or "unknown"
     source = article.get("source") or "unknown"
-    content = (article.get("content") or "")[:600]
+    content = (article.get("content") or "")[:EXCERPT_CHARS]
     return (
         f"\n[article {idx}] published_date={pub} source={source}\n"
         f"  title: {title}\n"
@@ -144,8 +145,11 @@ async def run(state: FinaqState) -> dict:
     company_name = await asyncio.to_thread(_company_name_for, ticker, as_of=as_of_date)
     try:
         articles = await asyncio.to_thread(
-            search_news, ticker, company_name,
-            days=NEWS_DAYS, max_results=NEWS_MAX_RESULTS,
+            search_news,
+            ticker,
+            company_name,
+            days=NEWS_DAYS,
+            max_results=NEWS_MAX_RESULTS,
             as_of=as_of_date,
         )
     except Exception as e:
@@ -165,7 +169,11 @@ async def run(state: FinaqState) -> dict:
     else:
         try:
             llm_out = await asyncio.to_thread(
-                _call_llm, ticker, company_name, thesis, articles,
+                _call_llm,
+                ticker,
+                company_name,
+                thesis,
+                articles,
                 as_of_date=as_of_date,
             )
             out = NewsOutput.model_validate(llm_out)

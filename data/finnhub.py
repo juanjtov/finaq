@@ -49,7 +49,8 @@ BODY_MAX_CHARS = 1500
 BODY_TIMEOUT_S = 10.0
 BODY_WORKERS = 6
 BACKTEST_CACHE_DIR = Path("data_cache/news_backtest")
-_NAME_STOPWORDS = frozenset(
+HISTORY_DAYS = 365  # Finnhub's free tier serves one year of company news
+_NAME_SUFFIXES = frozenset(
     {
         "inc",
         "inc.",
@@ -63,21 +64,17 @@ _NAME_STOPWORDS = frozenset(
         "ltd.",
         "limited",
         "plc",
-        "group",
-        "holdings",
-        "holding",
-        "the",
-        "and",
-        "&",
         "sa",
+        "s.a.",
         "nv",
+        "n.v.",
         "ag",
         "se",
         "lp",
         "llc",
         "trust",
     }
-)
+)  # legal-form suffixes, stripped from the END of a company name; "Holdings" stays — it is the name
 _UA = {"User-Agent": "Mozilla/5.0 (Macintosh) FINAQ/0.1"}
 
 
@@ -93,22 +90,25 @@ def _parse_as_of(as_of: str | date | None) -> date | None:
     raise TypeError(f"as_of must be str, date, or None — got {type(as_of)!r}")
 
 
-def _backtest_cache_path(ticker: str, as_of: date) -> Path:
-    return BACKTEST_CACHE_DIR / f"{ticker}__as_of_{as_of.isoformat()}.json"
+def _backtest_cache_path(ticker: str, as_of: date, with_body: bool) -> Path:
+    suffix = "" if with_body else "__headlines"
+    return BACKTEST_CACHE_DIR / f"{ticker}__as_of_{as_of.isoformat()}{suffix}.json"
 
 
 @tenacity_retry
 def _fetch_page(symbol: str, start: date, end: date, api_key: str) -> list[dict[str, Any]]:
+    """One Finnhub call. The key travels in a header, never the URL, so an
+    HTTP error message (which embeds the URL and ends up in the agent's
+    `errors`, state.db and Mission Control) cannot leak it. 4xx other than
+    429 is raised as a plain RuntimeError so tenacity does not retry it."""
     resp = httpx.get(
         FINNHUB_URL,
-        params={
-            "symbol": symbol,
-            "from": start.isoformat(),
-            "to": end.isoformat(),
-            "token": api_key,
-        },
+        params={"symbol": symbol, "from": start.isoformat(), "to": end.isoformat()},
+        headers={"X-Finnhub-Token": api_key},
         timeout=30.0,
     )
+    if 400 <= resp.status_code < 500 and resp.status_code != 429:
+        raise RuntimeError(f"finnhub returned HTTP {resp.status_code} for {symbol}")
     resp.raise_for_status()
     body = resp.json()
     return body if isinstance(body, list) else []
@@ -136,23 +136,39 @@ def _fetch_window(symbol: str, end: date, days: int, api_key: str) -> list[dict[
         if len(page) >= PAGE_CAP:
             logger.info(f"[finnhub] {symbol}: slice [{s_}, {e_}] truncated at {len(page)} items")
         for item in page:
-            if item.get("id") in seen:
+            key = item.get("id") or (item.get("url"), item.get("datetime"))
+            if key in seen:
                 continue
-            seen.add(item.get("id"))
+            seen.add(key)
             out.append(item)
     return out
 
 
 def _mention_pattern(ticker: str, company_name: str | None) -> re.Pattern[str]:
-    """Match the ticker (case-sensitive) or the company's first distinctive
-    name token (case-insensitive) on a word boundary. "NVIDIA Corporation" →
-    NVIDIA; "Nu Holdings Ltd." → nothing usable, so the ticker alone."""
-    parts = [re.escape(ticker)]
-    for tok in (company_name or "").replace(",", " ").split():
-        if tok.lower() not in _NAME_STOPWORDS and len(tok) >= 3:
-            parts.append(f"(?i:{re.escape(tok)})")
-            break
-    return re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(parts) + r")(?![A-Za-z0-9])")
+    """Match a real mention of the company, not a passing tag.
+
+    Three alternatives, any of which counts:
+      * the ticker in citation form — "(NVDA)", "NYSE:NU", "NASDAQ: AI" — for
+        any ticker length (that is how headlines name short tickers);
+      * the bare ticker on a word boundary, case-sensitive, only when it is
+        3+ chars ("AI" and "S" would otherwise match every market wrap);
+      * the company's first two name words as a phrase, case-insensitive,
+        after trailing legal-form suffixes are dropped — "Nu Holdings",
+        "Restaurant Brands", "Advanced Micro", or just "NVIDIA" / "Coursera"
+        when the name is one word. Two words because the first alone
+        ("American", "Banco", "Martin") matches generic sector prose.
+    """
+    t = re.escape(ticker)
+    parts = [rf"[(:]\s?{t}(?![A-Za-z0-9])"]
+    if len(ticker) >= 3:
+        parts.append(rf"(?<![A-Za-z0-9]){t}(?![A-Za-z0-9])")
+    words = [w for w in (company_name or "").replace(",", " ").split() if w]
+    while words and words[-1].lower() in _NAME_SUFFIXES:
+        words.pop()
+    if words and len("".join(words[:2])) >= 3:
+        phrase = r"\s+".join(re.escape(w) for w in words[:2])
+        parts.append(rf"(?i:(?<![A-Za-z0-9]){phrase}(?![A-Za-z0-9]))")
+    return re.compile("|".join(parts))
 
 
 def _normalise(item: dict[str, Any]) -> dict[str, Any]:
@@ -198,9 +214,10 @@ def _select(
 
 def _fetch_body(article: dict[str, Any]) -> dict[str, Any]:
     """Follow Finnhub's redirect to the publisher and pull the article
-    paragraphs. Soft-fail: on any error the summary stands and the Finnhub
-    link is kept. On success `url` becomes the publisher URL (what the
-    report cites) and `content` gains the first BODY_MAX_CHARS of body."""
+    paragraphs. Soft-fail: on any error, or when the page yields no more
+    text than the summary (paywall, consent page), the summary stands and
+    the Finnhub redirect link is kept. Otherwise `url` becomes the publisher
+    URL (what the report cites) and `content` gains BODY_MAX_CHARS of body."""
     from bs4 import BeautifulSoup
 
     try:
@@ -212,9 +229,10 @@ def _fetch_body(article: dict[str, Any]) -> dict[str, Any]:
     except Exception as e:
         logger.debug(f"[finnhub] body fetch failed for {article.get('url')}: {e}")
         return article
-    if len(body) > len(article["content"]):
-        article["content"] = f"{article['content']} {body[:BODY_MAX_CHARS]}".strip()
-    article["url"] = str(resp.url) or article["url"]
+    if len(body) <= len(article["content"]):
+        return article  # consent page / stub — keep the summary and the redirect link
+    article["content"] = f"{article['content']} {body[:BODY_MAX_CHARS]}".strip()
+    article["url"] = str(resp.url)
     return article
 
 
@@ -231,8 +249,8 @@ def search_news(
 
     Returns dicts with `title`, `url`, `content`, `source`, `score` (always
     None — Finnhub has no relevance score), `published_date` (ISO-8601 UTC).
-    Missing FINNHUB_API_KEY or a persistent API failure (after retries) yields
-    an empty list — callers treat "no news" as a soft signal.
+    A missing FINNHUB_API_KEY yields an empty list; an API failure that
+    survives the retries raises, so the caller can record it in `errors`.
 
     `with_body=True` fetches the selected articles' bodies in parallel (the
     News agent reads excerpts); the CIO planner passes False since it only
@@ -243,9 +261,10 @@ def search_news(
         logger.warning(f"[finnhub] FINNHUB_API_KEY not set; skipping news search for {ticker}")
         return []
 
+    days = max(days, 1)
     as_of_d = _parse_as_of(as_of)
     if as_of_d is not None:
-        cache = _backtest_cache_path(ticker, as_of_d)
+        cache = _backtest_cache_path(ticker, as_of_d, with_body)
         if cache.exists():
             try:
                 cached = json.loads(cache.read_text())
@@ -256,8 +275,9 @@ def search_news(
             except Exception as e:
                 logger.warning(f"[finnhub] backtest cache read failed: {e}; refetching")
 
-    end = as_of_d or date.today()
+    end = as_of_d or datetime.now(UTC).date()  # article timestamps are UTC
     start = end - timedelta(days=days)
+    end_of_history = datetime.now(UTC).date() - timedelta(days=HISTORY_DAYS)
     raw = _fetch_window(ticker, end, days, api_key)
     pattern = _mention_pattern(ticker, company_name)
     start_iso, end_iso = start.isoformat(), end.isoformat()
@@ -270,7 +290,7 @@ def search_news(
             continue
         if not pattern.search(f"{art['title']} {art['content']}"):
             continue
-        key = re.sub(r"[^a-z0-9]", "", art["title"].lower())
+        key = re.sub(r"\W+", "", art["title"].casefold())
         if not key or key in seen_titles:
             continue
         seen_titles.add(key)
@@ -285,7 +305,9 @@ def search_news(
         f"{len(out)} selected, window [{start_iso}, {end_iso}]"
     )
 
-    if as_of_d is not None:
+    if as_of_d is not None and (out or as_of_d >= end_of_history):
+        # An empty window inside Finnhub's one-year history is a real answer
+        # worth caching; an empty window beyond it is the provider's horizon.
         BACKTEST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _backtest_cache_path(ticker, as_of_d).write_text(json.dumps(out, indent=2))
+        _backtest_cache_path(ticker, as_of_d, with_body).write_text(json.dumps(out, indent=2))
     return out

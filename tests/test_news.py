@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from agents.news import (
+    EXCERPT_CHARS,
     NEWS_DAYS,
     _build_user_prompt,
     _company_name_for,
@@ -49,6 +50,14 @@ def test_format_article_handles_missing_published_date():
     art = _fake_article(1, published_date=None)
     out = _format_article(1, art)
     assert "unknown" in out
+
+
+def test_format_article_keeps_summary_plus_fetched_body():
+    """data/finnhub.py appends up to 1,500 chars of article body to the summary;
+    the prompt cap must leave room for it or the body fetch is wasted."""
+    assert EXCERPT_CHARS >= 1500 + 300
+    art = _fake_article(1, content="s" * 300 + " " + "b" * 1500)
+    assert ("b" * 1500) in _format_article(1, art)
 
 
 def test_format_article_renders_source_or_unknown():
@@ -109,7 +118,9 @@ def test_company_name_falls_back_to_ticker_when_yfinance_fails(monkeypatch):
 def test_company_name_uses_long_name_when_present(monkeypatch):
     from agents import news as n
 
-    monkeypatch.setattr(n, "get_financials", lambda _, **kw: {"info": {"longName": "NVIDIA Corporation"}})
+    monkeypatch.setattr(
+        n, "get_financials", lambda _, **kw: {"info": {"longName": "NVIDIA Corporation"}}
+    )
     assert _company_name_for("NVDA") == "NVIDIA Corporation"
 
 

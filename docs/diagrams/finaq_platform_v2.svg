@@ -82,14 +82,14 @@
           opacity="0.72" font-style="italic">price · financials · sector multiples</text>
   </g>
 
-  <!-- 03 Tavily Search -->
+  <!-- 03 Finnhub News -->
   <g>
     <rect x="50" y="424" width="220" height="92" rx="8"
           fill="#FBF5E8" stroke="#2D4F3A" stroke-width="1.5"/>
     <text x="65" y="447" font-size="9" font-weight="700" fill="#2D4F3A"
           letter-spacing="1.5" font-family="Helvetica, Arial, sans-serif">03</text>
     <text x="160" y="475" font-size="15" font-weight="600" fill="#1A1611"
-          text-anchor="middle">Tavily Search</text>
+          text-anchor="middle">Finnhub News</text>
     <text x="160" y="499" font-size="11" fill="#1A1611" text-anchor="middle"
           opacity="0.72" font-style="italic">news catalysts · 90-day window</text>
   </g>
