@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 DB_PATH = Path("data_cache/state.db")
-SCHEMA_VERSION = 7  # ingested_filings — manifest of what the vector store holds per ticker
+SCHEMA_VERSION = 8  # graph_nodes + graph_edges — persistent halo graph (Phase 2 Discovery, §13)
 
 # Prompt / response excerpts stored per LLM call are clipped to this many
 # characters. Full traces live in LangSmith when tracing is on; the local
@@ -234,6 +234,39 @@ CREATE TABLE IF NOT EXISTS cio_actions (
 CREATE INDEX IF NOT EXISTS idx_cio_actions_ts ON cio_actions(ts);
 CREATE INDEX IF NOT EXISTS idx_cio_actions_cio_run_id ON cio_actions(cio_run_id);
 CREATE INDEX IF NOT EXISTS idx_cio_actions_ticker_thesis ON cio_actions(ticker, thesis, ts);
+
+-- Persistent halo graph (schema v8; Phase 2 Discovery, ARCHITECTURE §13.3).
+-- `graph_nodes` = the tickers in a discovered thesis; `graph_edges` = the
+-- supplier/customer/peer/competitor links the Discovery agent proposed and
+-- then grounded against filings + news. Scoped per thesis slug so re-running
+-- Discovery for a slug replaces its rows (delete-by-slug then insert). Read +
+-- written by `data/graph.py`; traversal uses recursive CTEs, no graph library.
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    thesis_slug  TEXT NOT NULL,
+    ticker       TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT '',   -- resolved company name (yfinance cache)
+    first_seen   TEXT NOT NULL,              -- ISO ts first discovered
+    last_seen    TEXT NOT NULL,              -- ISO ts of the latest discovery run
+    PRIMARY KEY (thesis_slug, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS graph_edges (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    thesis_slug   TEXT NOT NULL,
+    from_ticker   TEXT NOT NULL,
+    to_ticker     TEXT NOT NULL,
+    type          TEXT NOT NULL,              -- supplier | customer | peer | competitor
+    note          TEXT NOT NULL DEFAULT '',
+    confidence    REAL NOT NULL DEFAULT 0.0,  -- [0,1] retrieval-grounding score (§13.2)
+    grounded      INTEGER NOT NULL DEFAULT 0, -- 1 when confidence >= GROUND_THRESHOLD
+    evidence_json TEXT NOT NULL DEFAULT '[]', -- serialised list[Evidence] citations
+    as_of         TEXT NOT NULL,              -- ISO ts the edge was grounded
+    UNIQUE (thesis_slug, from_ticker, to_ticker)
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_nodes_slug ON graph_nodes(thesis_slug);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_slug ON graph_edges(thesis_slug);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(thesis_slug, from_ticker);
 """
 
 

@@ -1563,6 +1563,147 @@ and prefixes with `[budget cap]`.
 
 ---
 
+## §13 Discovery agent (Phase 2)
+
+The full Discovery agent is the Phase 2 successor to Step 10's
+`/analyze` "Discovery-lite" (§9.2). Discovery-lite asks one LLM to
+invent a `Thesis` (universe + relationships) purely from model memory;
+the halo graph it emits is only as trustworthy as the model's training
+data, and edges are frequently plausible-but-wrong. Discovery replaces
+"trust the LLM" with "propose, then verify against primary sources".
+
+### 13.1 Propose-then-verify ("B grounds A")
+
+- **Decision:** Discovery is a two-stage pipeline. **(A) Propose** — one
+  LLM call (model resolved via `MODEL_DISCOVERY`) proposes a candidate
+  `Thesis`: name, summary, anchors, a 6–15 ticker universe, and a
+  *generous* set (8–15) of candidate relationships, each `note` phrased
+  as a concrete checkable claim. **(B) Verify** — for every proposed
+  edge, the system independently gathers evidence from the two
+  companies' real SEC filings and news, scores the edge, and prunes the
+  ones it cannot corroborate. B grounds A.
+- **Why:** the earlier question "which companies are the winners?" is
+  only useful if the relationship map is real. Pure-A (Discovery-lite)
+  hallucinates suppliers/customers; pure-B (extract every edge from
+  filings) can't propose a universe from a free-text topic and drowns in
+  entity-resolution noise. Propose-then-verify keeps the LLM's strength
+  (spanning a value chain from a topic) while making every retained edge
+  cite a primary source. The prompt tells the model it is the propose
+  half, so it proposes freely — a wrong edge is cheap (pruned), a missing
+  edge is a lost lead.
+- **Alternatives considered:** (1) a commercial supply-chain graph API
+  (Bloomberg SPLC, FactSet) — richest edges but paid + licensed, against
+  the local-first / free-tier stance (CLAUDE.md §2); rejected. (2) LLM
+  proposes *and* self-verifies in one call — no independent grounding, so
+  it just re-asserts its own hallucinations; rejected.
+
+### 13.2 Grounding is retrieval-based and deterministic (per-edge LLM adjudication deferred)
+
+- **Decision:** an edge `from → to` is grounded by *retrieval*, not by an
+  extra LLM call. For each edge we (a) query `from`'s filings namespace
+  (`data.vectors.query`) and `to`'s, checking whether the counterpart's
+  ticker or resolved company name co-occurs in the retrieved chunks, and
+  (b) check `from`'s recent news (`data.finnhub`) for co-mention of `to`.
+  Each corroboration contributes to a `confidence` in [0, 1]; the edge is
+  retained in the emitted `Thesis.relationships` when
+  `confidence >= GROUND_THRESHOLD`. Every corroboration attaches an
+  `Evidence` record (accession/item/excerpt/as_of for filings; url/as_of
+  for news) so the edge is auditable.
+- **Why deterministic:** it adds zero LLM calls beyond the single
+  proposal, so grounding is cheap, fast, and unit-testable without
+  stubbing a judge. Co-mention in a company's own SEC filing is strong,
+  first-party evidence that a real economic link exists; combined with
+  the LLM's proposed edge *type*, it is a large honest improvement over
+  Discovery-lite. Filings grounding is best-effort — a universe ticker
+  with no ingested filings (`data.vectors.has_ticker` is False) falls
+  back to news-only, rather than forcing a slow full ingest inline.
+- **Deferred (POSTPONED §Phase 2+):** a single batched LLM adjudication
+  over the retrieved evidence (confirming the edge *direction/type*, not
+  just co-occurrence), and auto-ingesting every universe ticker's filings
+  before grounding. Triggers logged in POSTPONED.
+
+### 13.3 Graph store: extend `state.db` (SQLite), not Pinecone / Notion / Supabase
+
+- **Decision:** the persistent halo graph lives in two new `state.db`
+  tables — `graph_nodes` (ticker, name, thesis_slug, first/last seen) and
+  `graph_edges` (from, to, type, note, confidence, grounded, evidence
+  JSON, thesis_slug, as_of). DDL is added to the `state.py` idempotent
+  migration and the schema version is bumped; CRUD + traversal live in a
+  new `data/graph.py`. One-hop and two-hop neighbour queries use SQLite
+  recursive CTEs — no graph library, no new dependency.
+- **Why:** a halo graph is structured, related, versioned, traversed data
+  of a few hundred nodes for one user. SQLite already is the single
+  source of truth for all structured state (§11), is transactional,
+  handles recursive traversal, and is backed up with the rest of
+  `data_cache/`. Storing the graph there adds zero dependencies and stays
+  on-spec.
+- **Alternatives considered:** (1) **Pinecone** — a vector store; great
+  for embedding similarity, wrong for storing/traversing an edge list;
+  it stays embeddings-only (filings + reports). (2) **Notion** — the
+  human view/edit surface and the eventual home of the bidirectional
+  sync, but rate-limited and API-fragile (§Notion lessons in POSTPONED);
+  a presentation layer, not a query engine. Discovery will *mirror* the
+  graph into Notion later, not query it there. (3) **Postgres on Supabase
+  free tier** — the natural relational fit, but it introduces a managed
+  cloud service, violating the local-first / single-droplet rule
+  (CLAUDE.md §2) for no benefit at single-user scale. Reserved as a
+  documented "if-needed" upgrade — self-hosted on the droplet, never
+  Supabase — only if the graph ever outgrows SQLite.
+
+### 13.4 Output is an `adhoc_`-prefixed thesis (stays out of the heartbeat until promoted)
+
+- **Decision:** Discovery persists its grounded `Thesis` to disk as
+  `theses/adhoc_{slug}.json`, reusing the ad-hoc conventions and the
+  `data.theses` lifecycle (§12.9). The graph rows are tagged with the
+  same slug.
+- **Why:** a freshly discovered thesis is a *proposal* for the user to
+  review, not a standing commitment. The `adhoc_` prefix keeps it off the
+  always-on CIO heartbeat sweep (which only reads curated slugs) until
+  the user promotes it — identical to how `/analyze` output is treated. A
+  `discovery_` prefix would be read as curated and wrongly enter the
+  heartbeat.
+
+### 13.5 The LLM proposes tickers directly; grounding reuses ticker → name
+
+- **Decision:** the proposal LLM emits real ticker symbols directly, so
+  no name → ticker lookup is needed (none exists in the repo, and none is
+  built). Grounding does need the *reverse* — each ticker's company name,
+  to match co-mentions in filing/news text — and reuses the existing
+  yfinance-cache-backed `agents.news._company_name_for` (§6.7). A proposed
+  symbol that yfinance can't resolve to a name is treated as low-signal:
+  it stays in the universe (the LLM asserted it) but its edges can only be
+  grounded via news co-mention, never filings.
+- **Why:** reuse over rebuild. A deterministic name → ticker resolver is
+  the separate POSTPONED item that Phase 1 flagged; Discovery doesn't
+  require it because the LLM already works in tickers.
+
+### 13.5b Discovery is a library module, not a drill-in graph node
+
+- **Decision:** `agents/discovery.py` exposes a public
+  `async def discover(...)` (mirroring `agents.adhoc_thesis`), not a node
+  wired into `build_graph()`. It runs *before* the per-ticker drill-in to
+  produce the thesis the drill-in then consumes.
+- **Why:** the LangGraph drill-in state machine (§1) is per-ticker
+  (`load_thesis → workers → risk → mc → synthesis`); Discovery produces a
+  whole thesis from a topic and doesn't fit that `FinaqState` flow — same
+  reason `adhoc_thesis` and the CIO planner are library modules. Its
+  single proposal LLM call therefore isn't captured in `node_runs`, the
+  accepted trade-off already documented for those two (POSTPONED §CIO).
+
+### 13.6 Scope of this increment
+
+- **Shipped:** the Discovery agent (`agents/discovery.py`), the graph
+  store (`data/graph.py` + `state.db` tables), the proposal prompt, a
+  `python -m scripts.run_discovery "<topic>"` CLI, and unit tests.
+- **Deferred to a follow-up (POSTPONED §Phase 2+):** the Streamlit
+  graph-visualisation page (kept out to keep this PR reviewable and avoid
+  colliding with in-flight Mission Control UI work), per-edge LLM
+  adjudication, filings auto-ingest for the whole universe, persistent
+  re-discovery / graph diffing over time, and the Notion graph mirror +
+  bidirectional sync.
+
+---
+
 ## How to update this doc
 
 When a new architectural decision is made (in any step):

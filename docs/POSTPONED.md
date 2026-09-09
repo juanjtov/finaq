@@ -128,12 +128,25 @@ gate.
 
 | Item | Trigger / phase | Notes |
 |---|---|---|
-| **Full Discovery agent + halo graph builder** | Phase 2 | Step 10's `/analyze` is the Discovery-lite stand-in; persistent halo graph is the Phase 2 piece. |
-| **Bidirectional Notion sync** (your edits → re-fetched as inputs) | Phase 2 | Phase 1 is one-way (read notes, write reports/alerts) only. |
+| **Persistent halo-graph monitoring / re-discovery** | Phase 2 | The Discovery agent + graph store shipped 2026-09-09 (ARCHITECTURE §13; deferred follow-ups in §2 below). Still deferred: a scheduled re-run that diffs a thesis's halo graph over time (new/dropped edges, confidence drift) and feeds the changes to the CIO — turning one-shot discovery into ongoing monitoring. |
+| **Bidirectional Notion sync** (your edits → re-fetched as inputs) | Phase 2 | Phase 1 is one-way (read notes, write reports/alerts) only. Now also covers mirroring the discovered halo graph into Notion as the human view/edit surface (ARCHITECTURE §13.3). |
 | **Synthesis cycle-based re-trigger** (planner-style "ask for more" loop) | Phase 2+ | When `state.gaps` contains the same item across many runs, OR a single drill-in materially needs an upstream re-query (e.g. user said "expand on point 3 in the report"). Tradeoffs are documented in ARCHITECTURE §6.18 — breaks DAG topology, blows the <5min target, risks unbounded cost. We built the `gaps: list[str]` observability path instead so we have data on whether the loop would have fired. Phase 2 trigger: ≥30% of runs surface a `gaps` entry that maps cleanly to a known upstream re-query (e.g. "no segment-level capex split" → re-run filings with different subquery). |
 | **Pattern detection** (cross-thesis multiplicity scoring) | Phase 3 | The `VRT/CEG/ANET/PWR` overlap is currently data only — automated weighting comes in Phase 3. |
 | **Threshold learning** | Phase 3 | Material thresholds are hand-set in JSON until then. The mechanism would observe which alerts you drilled in vs ignored. |
 | **Backtesting** | Phase 3 | Replay historical filings/news through the system to validate alert quality. |
+
+### Discovery agent enhancements (§13 shipped 2026-09-09)
+
+The propose-then-verify Discovery agent (`agents/discovery.py`) + the persistent
+halo-graph store (`data/graph.py`, `state.db` schema v8) shipped. These are the
+deferred follow-ups, each with a trigger.
+
+| Item | Trigger | Effort |
+|---|---|---|
+| **Per-edge LLM adjudication over retrieved evidence** — replace the co-mention heuristic with one batched LLM call that reads the retrieved filing/news snippets and confirms each edge's *direction + type*, not just co-occurrence. | Grounding visibly keeps a co-mentioned-but-unrelated pair, OR prunes a real relationship that filings/news phrase indirectly. | ~2-3h: one extra cheap-tier call (`MODEL_JUDGE`) per run over the already-retrieved evidence; stub in unit tests like the proposal seam. |
+| **Filings auto-ingest for the whole universe before grounding** — today filings grounding is best-effort (skipped for un-ingested tickers), so a fresh topic grounds almost entirely on news. Ingest each proposed ticker's 10-K/10-Q first, then ground. | Discovery routinely returns very few grounded edges because its universe tickers aren't ingested (observed 2026-09-09: 3/15 grounded on a fresh AI-power topic, all news-only). | ~1h + ingest cost/time (5-10 min/ticker first time); gate behind a `--ingest` flag so cost stays opt-in. |
+| **Streamlit halo-graph visualisation page** — render `graph_nodes`/`graph_edges` for a discovered thesis as an interactive node-link diagram, confidence + citations on hover. | Deliberately kept out of the shipping PR to stay reviewable and avoid colliding with in-flight Mission Control UI work; build once that work has merged. | ~4-6h: a `ui/pages/` page reading `data.graph`; reuse the sage/parchment palette. |
+| **Notion halo-graph mirror + bidirectional sync** — mirror the discovered graph into a Notion "Relationships" DB as the human view/edit surface, then re-read edits as inputs. Folds into the Phase 2 bidirectional-Notion item above. | The user wants to eyeball / hand-edit a discovered graph outside the dashboard. | Depends on the bidirectional-Notion decision; pin `notion-client` first (see §Notion lessons). |
 
 ### CIO meta-layer enhancements (within Step 11 already shipped)
 
