@@ -48,10 +48,10 @@ AGENT_CARDS = [
     {
         "name": "News",
         "model_env": "MODEL_NEWS",
-        "role": "90-day Tavily search → 5-7 catalysts (bull) + 5-7 concerns (bear) + sentiment + URL + published date.",
+        "role": "90-day Finnhub company news → 5-7 catalysts (bull) + 5-7 concerns (bear) + sentiment + URL + published date.",
         "inputs": "ticker · company_name (yfinance) · thesis",
         "outputs": "summary · catalysts · concerns · evidence",
-        "external_calls": "Tavily search API",
+        "external_calls": "Finnhub company-news API + publisher pages for article bodies",
     },
     {
         "name": "Risk",
@@ -107,9 +107,9 @@ DATA_SOURCES = [
         "freshness": "Updated by scripts/ingest_universe.py and the drill-time auto-ingest",
     },
     {
-        "name": "Tavily",
-        "module": "data/tavily.py",
-        "role": "News search API for catalyst extraction. 90-day window.",
+        "name": "Finnhub",
+        "module": "data/finnhub.py",
+        "role": "Company-news feed for catalyst extraction. 90-day window sampled in log-spaced slices; free tier, no monthly cap.",
         "freshness": "Real-time on each /news call",
     },
     {
@@ -141,7 +141,7 @@ TEST_TIERS = [
     },
     {
         "tier": "Tier 3 — integration",
-        "scope": "Real graph runs against real APIs (yfinance, EDGAR, Tavily, OpenRouter, Treasury). Catches plumbing bugs.",
+        "scope": "Real graph runs against real APIs (yfinance, EDGAR, Finnhub, OpenRouter, Treasury). Catches plumbing bugs.",
         "command": "pytest -m integration",
         "cost": "~$0.50 per full graph run",
     },

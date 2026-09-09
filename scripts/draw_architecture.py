@@ -104,7 +104,7 @@ def main() -> None:
     ext = [
         ("SEC EDGAR", "10-K / 10-Q / 6-K / 20-F"),
         ("yfinance", "Prices, statements (24h TTL)"),
-        ("Tavily", "News search (90d window)"),
+        ("Finnhub", "Company news (90d window)"),
         ("Notion", "Theses notes ⇄ reports/alerts"),
         ("Telegram", "Alerts + slash commands"),
         ("LangSmith", "LLM trace observability"),
@@ -179,7 +179,7 @@ def main() -> None:
     # External ingestion sources → notebooks
     add_arrow(ax, (1.55, 8.12), (1.9, 5.30), curve=0.05)        # EDGAR → nb_ingest
     add_arrow(ax, (4.15, 8.12), (3.6, 5.30), curve=-0.05)       # yfinance → nb_ingest
-    add_arrow(ax, (6.75, 8.12), (1.9, 5.30), curve=-0.18)       # Tavily → nb_cio
+    add_arrow(ax, (6.75, 8.12), (1.9, 5.30), curve=-0.18)       # Finnhub → nb_cio
     add_arrow(ax, (12.0, 8.12), (5.0, 3.50), curve=-0.20)       # Telegram ↔ bot
 
     # Pipelines → notebooks

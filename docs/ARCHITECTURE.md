@@ -122,7 +122,7 @@ FINAQ, why it was chosen, and any later revisions.
 - **Why:** The OpenAI SDK already handles transient API errors with
   exponential backoff. Stacking `tenacity` on top would cause
   retry-on-retry behaviour. Tenacity is reserved for non-SDK calls
-  (yfinance, EDGAR, Tavily, Notion, Telegram).
+  (yfinance, EDGAR, Finnhub, Notion, Telegram).
 
 ---
 
@@ -272,21 +272,52 @@ FINAQ, why it was chosen, and any later revisions.
   1536 dimensions (good signal/storage tradeoff), broadly competitive
   on retrieval benchmarks.
 
-### 3.11 Tavily for news search (over web-scraping or other APIs)
+### 3.11 Finnhub company news (revised from Tavily)
 
-- **Decision:** `data/tavily.py` wraps `TavilyClient.search()` with
-  `topic="news"`, `search_depth="advanced"`, default 90-day window,
-  default max-results 15. Tenacity-retried; returns empty list on
-  persistent failure.
-- **Why Tavily over alternatives:** SerpAPI charges per query at higher
-  rates; Google Custom Search needs a billing account + cse_id config
-  + lacks a clean date filter; raw web-scraping is brittle and
-  rate-limited per-domain. Tavily is purpose-built for LLM use cases
-  (returns clean snippets + scores + dates), has a generous free tier
-  (1000 queries/mo), and the API is one HTTP call.
-- **Why no caching:** News is time-sensitive — a 24h-cached result
-  could miss the catalyst that drives the alert. At ~$0.005/call and
-  one call per drill-in, the cost is negligible.
+- **Decision:** `data/finnhub.py` wraps Finnhub's `/company-news`
+  endpoint with plain `httpx` (no SDK). `search_news(ticker, company_name,
+  days=90, max_results=15, as_of=None, with_body=True)` keeps the Tavily
+  signature so the News agent and CIO planner did not change shape.
+  Finnhub returns every article tagged with the symbol, newest first,
+  capped at ~250 per call, with no relevance ranking and a loose tag
+  (only ~1 in 4 NVDA-tagged items name NVIDIA). The wrapper therefore:
+  fetches the window as log-spaced slices (0-3, 3-7, 7-14, 14-30, 30-60,
+  60-90 days back; one parallel call each) so a mega-cap's sample spans
+  the quarter instead of one afternoon; keeps only articles whose
+  headline or summary contains the ticker (case-sensitive) or the first
+  distinctive company-name token; de-duplicates headlines; gives each
+  slice an equal share of `max_results`, newest first, backfilling from
+  leftovers; and, for the drill-in, follows Finnhub's redirect to the
+  publisher page and pulls the first 1,500 chars of body paragraphs
+  (`httpx` + `beautifulsoup4`, 10 s timeout, soft-fail to the summary).
+  On success the citation URL becomes the publisher URL, and the News
+  agent's evidence `source` is the publisher (Yahoo, Benzinga, ...)
+  rather than a fixed provider label. The CIO planner passes
+  `with_body=False` because it only reads headlines.
+- **Why Finnhub:** free tier has no monthly cap (60 calls/min), takes
+  explicit `from`/`to` dates so backtest `as_of` windows still work
+  (one year of history on the free tier), and is ticker-native so the
+  query no longer depends on the company-name lookup. Sources are
+  aggregators — Yahoo Finance (which syndicates Reuters, Bloomberg,
+  Barron's, Motley Fool), Benzinga, SeekingAlpha, CNBC — so paywalled
+  outlets arrive as headline + summary via those mirrors. Alternatives
+  rejected: Brave dropped its free tier in Feb 2026; DuckDuckGo news
+  has no date range and scrapes; yfinance's news field has no date
+  filter and a shallow window.
+- **Why 90 days, not 60:** for a busy ticker the reach is set by the
+  250-item slice cap, not the window, so 90 costs nothing; for a thin
+  ticker (COUR: 27 relevant articles in 90 days vs ~18 in 60) the extra
+  month is where the earnings-cycle context lives.
+- **Why no production caching:** unchanged — news is time-sensitive and
+  the calls are free. Backtest windows are cached under
+  `data_cache/news_backtest/` (was `tavily_backtest/`).
+- **Revised because (2026-09-08):** the original choice was Tavily
+  (`topic="news"`, `search_depth="advanced"`, 1,000 free credits/month)
+  for its relevance-ranked snippets. The CIO heartbeat exhausted the
+  free quota twice (eager fetching in June, then the lazy-fetch fix
+  slowed but did not stop it) and the News agent went blind for the
+  rest of each month. Tavily is not kept as a fallback; re-adding it is
+  logged in POSTPONED §2.
 
 ### 3.10 Freshness markers throughout the pipeline
 
@@ -497,13 +528,14 @@ Curated theses were 3–4 months unedited with no signal anywhere.
 - **Revised because:** Juan flagged that a CEO-resignation-with-stock-drop
   is exactly the kind of catalyst a News agent must surface. Verified
   with a regression test (`test_event_attributed_price_move_is_kept`)
-  that mocks Tavily with a CEO-resignation article + a bare price-move
+  that mocks the news search with a CEO-resignation article + a bare price-move
   article and asserts the agent keeps the first and skips the second.
 
-### 6.6 News agent: 90-day Tavily window + 1 LLM extraction call
+### 6.6 News agent: 90-day news window + 1 LLM extraction call
 
-- **Decision:** News agent calls Tavily once for `{ticker} {company_name}`
-  (last 90 days, top 15 by score), passes the article list to one LLM
+- **Decision:** News agent calls `data.finnhub.search_news` once (last 90
+  days, 15 articles sampled across the window — see §3.11; originally
+  Tavily's top 15 by score), passes the article list to one LLM
   call that extracts 3-7 catalysts (bull/neutral) and 3-7 concerns
   (bear/neutral). Each item carries `sentiment`, `url`, and `as_of`
   (from `published_date`).
@@ -522,7 +554,8 @@ Curated theses were 3–4 months unedited with no signal anywhere.
 ### 6.7 Company-name resolution via yfinance cache
 
 - **Decision:** News agent calls `data.yfin.get_financials(ticker)` to
-  pull `info.longName` for the Tavily query string. Falls back to the
+  pull `info.longName` for the news relevance filter (originally the
+  Tavily query string). Falls back to the
   ticker symbol if yfinance fails.
 - **Why use yfinance:** Already cached (24h TTL) — typically free
   because Fundamentals just populated it. Maintaining a separate
@@ -885,7 +918,7 @@ Curated theses were 3–4 months unedited with no signal anywhere.
 ### 7.6c URL canonicalisation in News faithfulness check
 
 - **Decision:** `_canonicalise_url()` strips query string + fragment +
-  trailing slash before comparing News-agent URLs against Tavily's
+  trailing slash before comparing News-agent URLs against the news feed's
   returned articles.
 - **Original implementation:** raw string equality.
 - **Revised because:** the LLM legitimately strips tracking parameters
@@ -986,7 +1019,7 @@ Curated theses were 3–4 months unedited with no signal anywhere.
 - **Decision:** Three test categories:
   - default: pure unit, fast, runs in CI.
   - `-m integration`: hits real EDGAR / yfinance / OpenRouter /
-    Pinecone / Tavily / Notion / Telegram. Requires `.env`.
+    Pinecone / Finnhub / Notion / Telegram. Requires `.env`.
   - `-m eval`: opt-in RAG quality eval (Tier 2 + Tier 3). Costs
     money per run.
 - **Why three tiers, not two:** Eval costs vary enormously (Tier 1 is
@@ -1369,11 +1402,12 @@ before any LLM call:
   (auto-ingest) once per ticker *before* the planner decides, instead of
   inside `_drill_one` after the decision it was meant to inform; and
   `evaluate_gates` stands down when a filing landed since the pair's
-  last action. Tavily news is fetched lazily — only past the gate,
-  memoised per ticker, `search_depth="basic"`, 14-day / 8-headline
-  window — and queries the company name rather than the thesis name
+  last action. News is fetched lazily — only past the gate,
+  memoised per ticker, headlines only, 14-day / 8-headline
+  window — and resolves the company name rather than the thesis name
   (every ticker in the `wen` thesis used to search for "Wendy's").
-  Eager fetching had burned the monthly Tavily quota in ~4 days.
+  Eager fetching had burned the monthly Tavily quota in ~4 days; the
+  provider is Finnhub since 2026-09-08 (§3.11), which has no quota.
 - **Revised because (2026-09-07):** the first heartbeat after the
   2026-09-06 fix auto-ingested every stale curated ticker — 43 of 46,
   30 of them never ingested before — and was still running 3.5h later

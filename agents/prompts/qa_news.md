@@ -28,7 +28,7 @@ STRICT JSON, NO MARKDOWN FENCES, NO PROSE BEFORE OR AFTER:
   "answer": "<direct answer with citations>",
   "citations": [
     {
-      "source": "tavily",
+      "source": "<publisher, e.g. Yahoo / Benzinga>",
       "url": "<news URL>",
       "as_of": "<published_date YYYY-MM-DD>",
       "excerpt": "<exact title or summary fragment cited>"

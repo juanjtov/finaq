@@ -1,8 +1,8 @@
-"""Step 5c integration tests — real Tavily search + real LLM extraction.
+"""Step 5c integration tests — real Finnhub search + real LLM extraction.
 
 Run via:  pytest -m integration tests/test_news_integration.py
 
-Costs ~$0.005 (Tavily) + ~$0.02 (LLM) ≈ $0.025 per ticker run.
+Costs ~$0.02 (LLM) per ticker run; Finnhub is free.
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ THESES_DIR = Path(__file__).parents[1] / "theses"
 def _require_keys():
     if not os.environ.get("OPENROUTER_API_KEY", "").startswith("sk-or-v1-"):
         pytest.skip("OPENROUTER_API_KEY not set")
-    if not os.environ.get("TAVILY_API_KEY", "").startswith("tvly-"):
-        pytest.skip("TAVILY_API_KEY not set")
+    if not os.environ.get("FINNHUB_API_KEY", "").strip():
+        pytest.skip("FINNHUB_API_KEY not set")
 
 
 @pytest.mark.asyncio
@@ -37,7 +37,7 @@ async def test_news_real_run_on_nvda_ai_cake():
     out = NewsOutput.model_validate(result["news"])
 
     if "STALE NEWS" in out.summary:
-        pytest.skip("Tavily returned no fresh NVDA news today; skipping")
+        pytest.skip("Finnhub returned no fresh NVDA news today; skipping")
 
     # Sanity-check the output shape
     assert out.summary, "summary is empty"
@@ -53,7 +53,7 @@ async def test_news_real_run_on_nvda_ai_cake():
     # Evidence must carry as_of (ISO date) for downstream Risk + Synthesis
     assert out.evidence, "no evidence emitted"
     for ev in out.evidence:
-        assert ev.source == "tavily", ev.source
+        assert ev.source.strip(), "evidence source (publisher) is empty"
         # as_of optional but if present must be ISO-ish
         if ev.as_of:
             assert len(ev.as_of) >= 10, f"bad as_of format: {ev.as_of!r}"

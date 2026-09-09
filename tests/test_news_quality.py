@@ -2,7 +2,7 @@
 
 Three test categories:
   - Golden-set recall (news agent surfaces expected events for known tickers)
-  - Faithfulness (catalyst URLs trace back to Tavily; summaries supported by article text)
+  - Faithfulness (catalyst URLs trace back to Finnhub; summaries supported by article text)
   - CEO-resignation regression: ensures the prompt-update kept event-attributed
     price moves rather than skipping them as "stock-price-only"
 
@@ -39,8 +39,8 @@ THESES_DIR = Path(__file__).parents[1] / "theses"
 def _require_keys():
     if not os.environ.get("OPENROUTER_API_KEY", "").startswith("sk-or-v1-"):
         pytest.skip("OPENROUTER_API_KEY not set")
-    if not os.environ.get("TAVILY_API_KEY", "").startswith("tvly-"):
-        pytest.skip("TAVILY_API_KEY not set")
+    if not os.environ.get("FINNHUB_API_KEY", "").strip():
+        pytest.skip("FINNHUB_API_KEY not set")
 
 
 # --- Golden-set recall ------------------------------------------------------
@@ -56,7 +56,7 @@ async def test_news_golden_recall_for_query(gq: NewsGoldenQuery):
     result = await run(state)
     out = NewsOutput.model_validate(result["news"])
 
-    # Skip cleanly if Tavily had no fresh news today
+    # Skip cleanly if Finnhub had no fresh news today
     if "STALE NEWS" in out.summary:
         pytest.skip(f"No fresh {gq.ticker} news today; cannot evaluate")
 
@@ -137,15 +137,15 @@ async def test_news_golden_set_summary_recorded():
         ), f"news golden-set recall below 60%: {recall:.2%} ({pass_count}/{evaluated})"
 
 
-# --- Faithfulness: catalyst URLs and summaries trace back to Tavily ---------
+# --- Faithfulness: catalyst URLs and summaries trace back to Finnhub --------
 
 
 @pytest.mark.asyncio
-async def test_news_items_url_grounded_in_tavily_results():
-    """Every catalyst/concern URL must be in the Tavily-returned article list.
+async def test_news_items_url_grounded_in_finnhub_results():
+    """Every catalyst/concern URL must be in the Finnhub-returned article list.
     A fabricated URL is a hard failure (the LLM hallucinated a citation)."""
     from agents.news import _company_name_for
-    from data.tavily import search_news
+    from data.finnhub import search_news
 
     thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
     company = _company_name_for("NVDA")
@@ -187,7 +187,7 @@ async def test_event_attributed_price_move_is_kept(monkeypatch):
     price moves. We feed a fixture article and assert the LLM surfaces it."""
     from agents import news as news_mod
 
-    # Mock Tavily to return ONLY a CEO-resignation story so the agent's
+    # Mock the news search to return ONLY a CEO-resignation story so the agent's
     # output must include it (or be empty and fail the assertion).
     fake_articles = [
         {

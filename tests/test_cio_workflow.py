@@ -4,7 +4,7 @@ applies the drill budget, and executes drills.
 Stubs out:
   - `planner.decide`            — canned CIODecisions per call
   - `_drill_one`                — returns a fake run_id without invoking the graph
-  - `_fetch_news`               — empty list (Tavily not exercised)
+  - `_fetch_news`               — empty list (Finnhub not exercised)
   - `_curated_candidates`       — fixed list of pairs
 
 This lets us assert the cycle's contract end-to-end:
@@ -69,7 +69,7 @@ def fake_thesis_dir(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def stub_news(monkeypatch):
-    """Never hit Tavily or EDGAR from this suite. Autouse because the
+    """Never hit Finnhub or EDGAR from this suite. Autouse because the
     orchestrator now runs the freshness check for every candidate
     ticker before deciding."""
     monkeypatch.setattr(cio_mod, "_fetch_news", lambda t: [])
@@ -664,14 +664,14 @@ async def test_freshness_check_runs_before_decide_once_per_ticker(
 async def test_news_is_fetched_lazily_and_once_per_ticker(
     isolated_db, fake_thesis_dir, monkeypatch,
 ):
-    """Tavily must fire only when the planner asks (via `news_fetcher`),
+    """The news search must fire only when the planner asks (via `news_fetcher`),
     and at most once per ticker per cycle — 57 eager calls twice a day
     burned the monthly quota in four days."""
     fetched: list[str] = []
     monkeypatch.setattr(cio_mod, "_fetch_news", lambda t: fetched.append(t) or [])
 
     def _decide(*, ticker, thesis, news_fetcher=None, **kw):
-        # AAA takes the LLM path and asks twice (still one Tavily call);
+        # AAA takes the LLM path and asks twice (still one news call);
         # BBB is a gate shortcut and never asks.
         if ticker.upper() == "AAA":
             assert news_fetcher() == []

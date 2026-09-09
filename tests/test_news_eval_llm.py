@@ -29,8 +29,8 @@ THESES_DIR = Path(__file__).parents[1] / "theses"
 def _require_keys():
     if not os.environ.get("OPENROUTER_API_KEY", "").startswith("sk-or-v1-"):
         pytest.skip("OPENROUTER_API_KEY not set")
-    if not os.environ.get("TAVILY_API_KEY", "").startswith("tvly-"):
-        pytest.skip("TAVILY_API_KEY not set")
+    if not os.environ.get("FINNHUB_API_KEY", "").strip():
+        pytest.skip("FINNHUB_API_KEY not set")
     judge = os.environ.get("MODEL_JUDGE", "")
     if not judge or judge == "test-stub-model":
         pytest.skip("MODEL_JUDGE not set in .env (see .env.example)")

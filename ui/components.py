@@ -195,7 +195,7 @@ def evidence_list(evidence: Iterable[dict], heading: str | None = None) -> None:
     with clickable URLs / accession numbers. Used inside per-agent expanders.
 
     Three rendering shapes based on what the evidence carries:
-      - URL-bearing (news / Tavily): source · date — [link](url)
+      - URL-bearing (news / Finnhub): source · date — [link](url)
       - Accession-bearing (filings / EDGAR): source · item · date — `accession` — _excerpt_
       - Neither URL nor accession (Fundamentals KPIs): the `note` field is
         the human-readable label (e.g. "fcf_yield") and `excerpt` is the

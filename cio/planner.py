@@ -6,7 +6,7 @@ Responsibilities:
      check already says "dismiss" / "skip the LLM".
   2. **Evidence bundle** — pulls the inputs the persona prompt expects:
      thesis JSON, RAG over past reports, recent EDGAR filings on disk,
-     recent Tavily news, user notes.
+     recent Finnhub news, user notes.
   3. **LLM decide** — calls `MODEL_CIO` with the persona prompt + bundle,
      parses + Pydantic-validates the response, returns a `CIODecision`.
   4. **Plan** — orchestrates a list of pairs, applies the drill-budget cap
@@ -53,7 +53,7 @@ _SYSTEM_PROMPT = _PROMPT_PATH.read_text()
 
 _RAG_K = 4  # Past-report sections per (ticker, thesis) for the prompt.
 NEWS_LOOKBACK_DAYS = 14  # what the persona prompt promises ("last 14 days")
-MAX_NEWS_HEADLINES = 8  # truncate to keep prompt small; also the Tavily max_results.
+MAX_NEWS_HEADLINES = 8  # truncate to keep prompt small; also the Finnhub max_results.
 
 # Watchlist-signal matching constants. The matcher is intentionally simple
 # (significant-word overlap, ≥2 shared keywords for news; ≥1 for filings)
@@ -245,7 +245,7 @@ def evaluate_gates(
 
 
 def _summarise_news(news_items: list[dict] | None) -> list[dict]:
-    """Reduce a Tavily result list to the few fields the LLM needs.
+    """Reduce a Finnhub result list to the few fields the LLM needs.
 
     Keeps `title`, `url`, `published_date`, optional `sentiment`. Drops
     full bodies — we just need headlines for the cadence judgement.
@@ -615,7 +615,7 @@ def decide(
     News: pass `news_items` when you already have them, or `news_fetcher`
     (a zero-arg callable) to have them pulled only if the gates let the
     LLM run. The orchestrator uses the fetcher so a gate-shortcut pair
-    costs zero Tavily credits — fetching eagerly for every pair burned
+    costs zero news calls — fetching eagerly for every pair burned
     the monthly quota in four days.
 
     `system_prompt` defaults to the persona file. Tests pass a stub.

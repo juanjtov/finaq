@@ -13,11 +13,6 @@ production path (`as_of=None`) is unchanged.
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
-from unittest.mock import patch
-
-import pytest
-
 
 # --- yfinance ---------------------------------------------------------------
 
@@ -285,151 +280,6 @@ def test_finaq_state_accepts_as_of_date_field():
     assert state2.get("as_of_date") is None
 
 
-# --- Tavily news as_of (Step B2) -------------------------------------------
-
-
-def test_tavily_search_news_passes_start_end_dates_to_client(tmp_path, monkeypatch):
-    """Backtest mode (`as_of=...`) calls Tavily with start_date + end_date,
-    not the production `days` parameter."""
-    from data import tavily
-
-    monkeypatch.setenv("TAVILY_API_KEY", "tvly-fake-test-key")
-    monkeypatch.setattr(tavily, "BACKTEST_CACHE_DIR", tmp_path)
-
-    captured: dict = {}
-
-    class _FakeClient:
-        def __init__(self, api_key):
-            pass
-
-        def search(self, **kwargs):
-            captured.update(kwargs)
-            return {
-                "results": [
-                    {
-                        "title": "Pre as-of headline",
-                        "url": "https://example.com/a",
-                        "content": "...",
-                        "score": 0.9,
-                        "published_date": "2025-08-15T10:00:00Z",
-                    }
-                ]
-            }
-
-    monkeypatch.setattr("tavily.TavilyClient", _FakeClient)
-
-    out = tavily.search_news("INTC", "Intel Corporation", days=90, as_of="2025-09-05")
-
-    # Backtest path: `start_date` / `end_date` substituted for `days`.
-    assert "start_date" in captured
-    assert "end_date" in captured
-    assert "days" not in captured
-    assert captured["end_date"] == "2025-09-05"
-    assert captured["start_date"] == "2025-06-07"  # 2025-09-05 minus 90 days
-    assert len(out) == 1
-
-
-def test_tavily_search_news_filters_post_as_of_articles(tmp_path, monkeypatch):
-    """Defence in depth: even if Tavily returns an article dated AFTER as_of,
-    the wrapper drops it."""
-    from data import tavily
-
-    monkeypatch.setenv("TAVILY_API_KEY", "tvly-fake-test-key")
-    monkeypatch.setattr(tavily, "BACKTEST_CACHE_DIR", tmp_path)
-
-    class _FakeClient:
-        def __init__(self, api_key):
-            pass
-
-        def search(self, **kwargs):
-            return {
-                "results": [
-                    {  # before as_of — kept
-                        "title": "Aug headline",
-                        "url": "https://example.com/aug",
-                        "content": "x",
-                        "score": 0.9,
-                        "published_date": "2025-08-15T10:00:00Z",
-                    },
-                    {  # after as_of — dropped
-                        "title": "Nov headline",
-                        "url": "https://example.com/nov",
-                        "content": "y",
-                        "score": 0.85,
-                        "published_date": "2025-11-22T14:00:00Z",
-                    },
-                    {  # missing date — dropped (conservative posture)
-                        "title": "Undated headline",
-                        "url": "https://example.com/u",
-                        "content": "z",
-                        "score": 0.8,
-                    },
-                ]
-            }
-
-    monkeypatch.setattr("tavily.TavilyClient", _FakeClient)
-
-    out = tavily.search_news("INTC", "Intel", days=90, as_of="2025-09-05")
-    assert len(out) == 1
-    assert out[0]["title"] == "Aug headline"
-
-
-def test_tavily_search_news_caches_backtest_results(tmp_path, monkeypatch):
-    """First call hits the API + writes a cache file; second call reads
-    from cache without hitting the API."""
-    from data import tavily
-
-    monkeypatch.setenv("TAVILY_API_KEY", "tvly-fake-test-key")
-    monkeypatch.setattr(tavily, "BACKTEST_CACHE_DIR", tmp_path)
-
-    api_calls = {"n": 0}
-
-    class _FakeClient:
-        def __init__(self, api_key):
-            pass
-
-        def search(self, **kwargs):
-            api_calls["n"] += 1
-            return {"results": []}
-
-    monkeypatch.setattr("tavily.TavilyClient", _FakeClient)
-
-    tavily.search_news("INTC", "Intel", as_of="2025-09-05")
-    assert api_calls["n"] == 1
-    assert (tmp_path / "INTC__as_of_2025-09-05.json").exists()
-
-    # Second call — must hit the cache, not the API.
-    tavily.search_news("INTC", "Intel", as_of="2025-09-05")
-    assert api_calls["n"] == 1, "second call should hit cache, not Tavily"
-
-
-def test_tavily_search_news_production_path_unchanged(monkeypatch):
-    """`as_of=None` preserves the existing production behaviour: passes
-    `days` (not `start_date`/`end_date`), no caching, no filtering."""
-    from data import tavily
-
-    monkeypatch.setenv("TAVILY_API_KEY", "tvly-fake-test-key")
-    captured: dict = {}
-
-    class _FakeClient:
-        def __init__(self, api_key):
-            pass
-
-        def search(self, **kwargs):
-            captured.update(kwargs)
-            return {"results": [
-                {"title": "x", "url": "u", "content": "c", "score": 0.5,
-                 "published_date": "2026-04-01T00:00:00Z"},
-            ]}
-
-    monkeypatch.setattr("tavily.TavilyClient", _FakeClient)
-
-    tavily.search_news("INTC", "Intel")
-    assert captured.get("days") == 90
-    assert "start_date" not in captured
-    assert "end_date" not in captured
-
-
 # --- Agent plumbing — fundamentals, filings, news, risk, synthesis ---------
 
 
@@ -471,11 +321,11 @@ def test_agents_thread_as_of_to_data_layer(monkeypatch):
     # --- News
     from agents import news as nw
 
-    def _stub_tavily(ticker, company_name=None, *, days=None, max_results=None, as_of=None):
+    def _stub_news(ticker, company_name=None, *, days=None, max_results=None, as_of=None):
         captured["news"] = {"ticker": ticker, "as_of": as_of}
         return []
 
-    monkeypatch.setattr(nw, "search_news", _stub_tavily)
+    monkeypatch.setattr(nw, "search_news", _stub_news)
     monkeypatch.setattr(nw, "get_financials", _stub_get_fin)
 
     asyncio.run(nw.run({"ticker": "INTC", "thesis": {}, "as_of_date": "2025-09-05"}))
