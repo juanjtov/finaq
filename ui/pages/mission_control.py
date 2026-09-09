@@ -369,15 +369,6 @@ _NODE_ORDER = (
     "load_thesis", "fundamentals", "filings", "news",
     "risk", "monte_carlo", "synthesis",
 )
-_DOT = {"completed": "🟢", "failed": "🔴"}
-
-
-def _agent_dots(status_map: dict[str, str]) -> str:
-    """Seven-dot status string in graph order: 🟢 completed, 🔴 failed,
-    ⚪ didn't run / unknown."""
-    return "".join(_DOT.get(status_map.get(n, ""), "⚪") for n in _NODE_ORDER)
-
-
 def _within_days(iso: str, days: int) -> bool:
     try:
         ts = datetime.fromisoformat(str(iso))
@@ -400,8 +391,59 @@ _MC_CSS = """
 .mc-spark { display: flex; align-items: flex-end; gap: 3px; height: 26px; margin-top: 7px; }
 .mc-spark i { flex: 1; background: #E0D5C2; border-radius: 2px 2px 0 0; min-height: 2px; }
 .mc-spark i.today { background: #2D4F3A; }
+
+/* Runs table — bespoke HTML rows so the dots, pills and stripe match the
+   mockup; the "Open" control per row is a real Streamlit button beside it. */
+.mcrow { display: grid;
+  grid-template-columns: 104px minmax(90px, 1.2fr) 66px 112px 100px 58px 74px;
+  align-items: center; gap: 8px; border-left: 3px solid transparent; padding: 0 4px 0 9px;
+  border-bottom: 1px solid #EDE5D5; min-height: 44px; font-size: 13px; overflow: hidden; }
+.mcrow > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcrow.fail { border-left-color: #A33D2E; background: #F6E3DD; }
+.mcrow.deg  { border-left-color: #9A6B1F; }
+.mchead { border-bottom: 1px solid #E0D5C2; min-height: 34px; border-left-color: transparent; }
+.mchead span { font: 600 10.5px sans-serif; letter-spacing: 0.07em; text-transform: uppercase; color: #6B6152; }
+.mcrow .mono { font-family: var(--mc-mono, ui-monospace, "SF Mono", Menlo, monospace); font-variant-numeric: tabular-nums; color: #1A1611; }
+.mcrow .tk { font-weight: 600; color: #1A1611; }
+.mcrow .muted { color: #6B6152; font-size: 12px; }
+.mcrow .dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 3px; }
+.mcrow .dot.ok { background: #2D4F3A; }
+.mcrow .dot.fail { background: #A33D2E; }
+.mcrow .dot.none { background: #FFFFFF; border: 1.5px solid #E0D5C2; }
+.mcrow .tpill { font: 500 10.5px var(--mc-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  color: #6B6152; border: 1px solid #E0D5C2; border-radius: 4px; padding: 1px 6px; }
+.mcrow .spill { font: 600 10px sans-serif; letter-spacing: 0.04em; text-transform: uppercase;
+  border-radius: 4px; padding: 2px 8px; }
+.mcrow .spill.ok { background: #E4EAE2; color: #2D4F3A; }
+.mcrow .spill.deg { background: #F5EBD2; color: #9A6B1F; border: 1px solid #DCC791; }
+.mcrow .spill.fail { background: #A33D2E; color: #FFFFFF; }
 </style>
 """
+
+_RUN_COLS = [11, 1.6]  # [styled row cell, Open button] — keeps buttons aligned.
+
+
+def _dots_html(status_map: dict[str, str]) -> str:
+    """Colored status dots in graph order (sage ok / brick failed / hollow
+    didn't-run) — the mockup's AGENTS strip."""
+    cls = {"completed": "ok", "failed": "fail"}
+    return "".join(
+        f'<span class="dot {cls.get(status_map.get(n, ""), "none")}"></span>'
+        for n in _NODE_ORDER
+    )
+
+
+def _status_bits(r: dict) -> tuple[str, str, str]:
+    """(pill text, pill css class, row css class) for a run's three-way
+    status. Mirrors _run_status_label without the emoji."""
+    status = str(r.get("status") or "")
+    if status == "failed":
+        return "failed", "fail", "fail"
+    if status == "completed":
+        if int(r.get("failed_nodes") or 0) > 0 or int(r.get("n_errors") or 0) > 0:
+            return "degraded", "deg", "deg"
+        return "completed", "ok", ""
+    return (status or "?"), "ok", ""
 
 
 def _render_runs_table(runs_all: list[dict]) -> None:
@@ -453,47 +495,47 @@ def _render_runs_table(runs_all: list[dict]) -> None:
 
     statuses = state_db.node_status_by_run([r.get("run_id") for r in filtered])
     st.caption(
-        "Agents column, left→right: load · fundamentals · filings · news · "
-        "risk · monte_carlo · synthesis  (🟢 ok · 🔴 failed · ⚪ didn't run). "
-        "Select a row to open the Run Inspector."
+        "AGENTS strip, left→right: load · fundamentals · filings · news · "
+        "risk · monte_carlo · synthesis  (● ok · ● failed · ○ didn't run). "
+        "Hit **Open** to drill into a run."
     )
-    rows = []
+
+    # Header row (aligned to the same column split as each data row).
+    head = st.columns(_RUN_COLS, vertical_alignment="center")
+    head[0].markdown(
+        '<div class="mcrow mchead"><span>Started</span><span>Run</span>'
+        "<span>Trigger</span><span>Agents</span><span>Status</span>"
+        "<span>Duration</span><span>Cost</span></div>",
+        unsafe_allow_html=True,
+    )
+    head[1].markdown("&nbsp;", unsafe_allow_html=True)
+
     for r in filtered:
         rid = str(r.get("run_id") or "")
-        rows.append(
-            {
-                "started": str(r.get("started_at") or "")[:19].replace("T", " "),
-                "ticker": str(r.get("ticker") or "?"),
-                "thesis": str(r.get("thesis") or "?"),
-                "trigger": "🤖 CIO" if rid in cio_run_ids else "🖱️ manual",
-                "agents": _agent_dots(statuses.get(rid, {})),
-                "status": _run_status_label(r),
-                "duration_s": (
-                    f"{r['duration_s']:.1f}" if r.get("duration_s") else "—"
-                ),
-                "calls": int(r.get("n_calls") or 0),
-                "tokens": (
-                    f"{_fmt_tokens(int(r.get('tokens_in') or 0))} / "
-                    f"{_fmt_tokens(int(r.get('tokens_out') or 0))}"
-                ),
-                "cost": f"${float(r.get('cost_usd') or 0.0):.4f}",
-                "confidence": str(r.get("confidence") or "—"),
-                "errors": int(r.get("n_errors") or 0),
-            }
+        text, spill, rowcls = _status_bits(r)
+        # MM-DD HH:MM (drop the year) — matches the mockup and saves width.
+        started = str(r.get("started_at") or "")[5:16].replace("T", " ")
+        thesis = str(r.get("thesis") or "?")
+        dur = f"{r['duration_s']:.0f}s" if r.get("duration_s") else "—"
+        cost = f"${float(r.get('cost_usd') or 0.0):.4f}"
+        trig = "🤖 cio" if rid in cio_run_ids else "🖱 manual"
+        row_html = (
+            f'<div class="mcrow {rowcls}">'
+            f'<span class="mono">{started}</span>'
+            f'<span><span class="tk">{r.get("ticker") or "?"}</span>'
+            f'<span class="muted"> · {thesis}</span></span>'
+            f'<span><span class="tpill">{trig}</span></span>'
+            f'<span>{_dots_html(statuses.get(rid, {}))}</span>'
+            f'<span><span class="spill {spill}">{text}</span></span>'
+            f'<span class="mono">{dur}</span>'
+            f'<span class="mono">{cost}</span>'
+            f"</div>"
         )
-    event = st.dataframe(
-        pd.DataFrame(rows),
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key="drill_runs_table",
-    )
-    selected = getattr(getattr(event, "selection", None), "rows", None) or []
-    if selected:
-        chosen = filtered[selected[0]]
-        st.session_state["inspect_run_id"] = chosen.get("run_id")
-        st.switch_page("pages/run_inspector.py")
+        cols = st.columns(_RUN_COLS, vertical_alignment="center")
+        cols[0].markdown(row_html, unsafe_allow_html=True)
+        if cols[1].button("Open →", key=f"open_{rid}", use_container_width=True):
+            st.session_state["inspect_run_id"] = rid
+            st.switch_page("pages/run_inspector.py")
 
 
 def render_state_db_panel() -> None:

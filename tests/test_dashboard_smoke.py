@@ -699,25 +699,18 @@ def test_mission_control_runs_table_shows_cost_and_failed_agents(
     at.run()
     assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
 
-    # Find the runs table among the page's dataframes: it has a 'cost' col.
-    runs_df = None
-    for el in at.dataframe:
-        try:
-            if "cost" in list(el.value.columns):
-                runs_df = el.value
-                break
-        except Exception:
-            continue
-    assert runs_df is not None, "runs table with a 'cost' column not rendered"
-    row = runs_df.iloc[0]
-    assert "failed" in row["status"]
-    # Per-agent status dots: filings failed → a red dot somewhere in the strip.
-    assert "🔴" in row["agents"]
-    assert row["cost"] == "$0.0600"
-    assert row["errors"] == 1
-    # Spend-today KPI card (custom HTML, not st.metric).
+    # The runs table is now bespoke HTML rows (st.markdown) with a per-row
+    # Open button — not an st.dataframe. Assert on the rendered markup.
     blob = " ".join(m.value for m in at.markdown)
-    assert "Spend today" in blob
+    assert "Spend today" in blob            # KPI card
+    assert "mcrow" in blob                  # a styled run row rendered
+    assert "$0.0600" in blob                # this run's cost
+    assert 'spill fail' in blob             # failed-status pill
+    assert 'dot fail' in blob               # filings failed → a brick dot
+    # Per-row Open button opens the inspector.
+    assert any((b.label or "").startswith("Open") for b in at.button), (
+        f"no per-row Open button; buttons: {[b.label for b in at.button]}"
+    )
 
 
 def test_mission_control_degraded_status_label():
