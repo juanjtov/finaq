@@ -243,27 +243,25 @@ def _render_agent_cards(nodes: list[dict]) -> None:
         return
     order = {n: i for i, n in enumerate(NODE_ORDER)}
     ordered = sorted(nodes, key=lambda n: order.get(str(n.get("node")), len(NODE_ORDER)))
+    # Compact, newline-free HTML: Streamlit's markdown renderer treats any
+    # indented line as a code block, so cards must be a single flat string.
     cards = []
     for n in ordered:
         failed = n.get("status") == "failed"
         err = str(n.get("error") or "")
         err_html = f'<div class="ri-err">{md_safe(err[:240])}</div>' if (failed and err) else ""
         cards.append(
-            f"""
-            <div class="ri-card{' failed' if failed else ''}">
-              <div class="top">
-                <span class="nm">{md_safe(str(n.get('node') or '?'))}</span>
-                <span class="pill {'bad' if failed else 'ok'}">{md_safe(str(n.get('status') or '?'))}</span>
-              </div>
-              <div class="ri-kv">
-                <span class="k">duration</span><span class="v">{float(n.get('duration_s') or 0.0):.1f}s</span>
-                <span class="k">llm calls</span><span class="v">{int(n.get('n_calls') or 0)}</span>
-                <span class="k">tokens</span><span class="v">{int(n.get('tokens_in') or 0):,} / {int(n.get('tokens_out') or 0):,}</span>
-                <span class="k">cost</span><span class="v">${float(n.get('cost_usd') or 0.0):.4f}</span>
-              </div>
-              {err_html}
-            </div>
-            """
+            f'<div class="ri-card{" failed" if failed else ""}">'
+            f'<div class="top">'
+            f'<span class="nm">{md_safe(str(n.get("node") or "?"))}</span>'
+            f'<span class="pill {"bad" if failed else "ok"}">{md_safe(str(n.get("status") or "?"))}</span>'
+            f"</div>"
+            f'<div class="ri-kv">'
+            f'<span class="k">duration</span><span class="v">{float(n.get("duration_s") or 0.0):.1f}s</span>'
+            f'<span class="k">llm calls</span><span class="v">{int(n.get("n_calls") or 0)}</span>'
+            f'<span class="k">tokens</span><span class="v">{int(n.get("tokens_in") or 0):,} / {int(n.get("tokens_out") or 0):,}</span>'
+            f'<span class="k">cost</span><span class="v">${float(n.get("cost_usd") or 0.0):.4f}</span>'
+            f"</div>{err_html}</div>"
         )
     st.markdown(
         f'<div class="ri-cards">{"".join(cards)}</div>', unsafe_allow_html=True
