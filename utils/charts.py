@@ -292,6 +292,10 @@ def backtest_price_path(
 
 
 _MC_HISTOGRAM_SEED = 42  # mirrors utils.monte_carlo.simulate's default seed
+_MC_RECONSTRUCT_SIZE = 8000
+# 90th-percentile z-score of the standard normal: ln(P90)-ln(P10) spans the
+# 10th–90th log-quantile interval = 2·z90·σ_log for a lognormal.
+_Z90 = 1.2815515594108338
 
 
 def resolve_mc_samples(mc: dict) -> list[float]:
@@ -300,9 +304,18 @@ def resolve_mc_samples(mc: dict) -> list[float]:
     Saved demo files store percentiles + metadata but not the raw 10k-sample
     array (size optimisation). When a caller needs to redraw the histogram —
     Streamlit dashboard rerun, Telegram bot photo upload, future PDF re-export
-    — we regenerate a visually-similar normal distribution from the
-    P10/P50/P90 spread using a fixed RNG seed. Same cached state → same
-    chart bars across surfaces, no jitter.
+    — we reconstruct a visually-similar distribution from the P10/P50/P90
+    spread using a fixed RNG seed. Same cached state → same chart bars across
+    surfaces, no jitter.
+
+    Fair value per share is bounded at 0 (limited liability) and right-skewed,
+    so the reconstruction is a **lognormal** fit to the percentiles, not a
+    symmetric normal. The earlier normal fit put its left tail below $0 and
+    drew impossible negative "fair values" in the histogram even though
+    `monte_carlo.simulate` clips its own samples to ≥ 0 — the reconstruction,
+    not the model, was the source of the negatives. Lognormal is positive by
+    construction and matches the true (clipped, right-skewed) shape. See
+    ARCHITECTURE §6.15.
 
     Returns an empty list when neither raw samples nor DCF percentiles are
     present (e.g. MC was skipped because shares_outstanding was missing —
@@ -312,13 +325,30 @@ def resolve_mc_samples(mc: dict) -> list[float]:
     if samples is not None and len(samples) > 0:
         return list(samples)
     dcf = mc.get("dcf") or {}
-    if dcf:
-        lo = dcf.get("p10") or 0
-        hi = dcf.get("p90") or 0
-        mid = dcf.get("p50") or (lo + hi) / 2
-        # Std derived from P10–P90 spread assuming roughly normal: 2.563σ
-        # covers the 80% interval, so spread / 2.6 ≈ σ.
-        std = max((hi - lo) / 2.6, 1.0)
-        rng = np.random.default_rng(_MC_HISTOGRAM_SEED)
-        return list(rng.normal(loc=mid, scale=std, size=8000))
-    return []
+    if not dcf:
+        return []
+
+    p10 = dcf.get("p10")
+    p50 = dcf.get("p50")
+    p90 = dcf.get("p90")
+    if not p50 or p50 <= 0:
+        return []
+
+    rng = np.random.default_rng(_MC_HISTOGRAM_SEED)
+
+    # Healthy name: all three percentiles positive → lognormal fit. Median of a
+    # lognormal is exp(μ), and (ln P90 − ln P10) = 2·z90·σ, so we can recover
+    # both parameters from the percentiles alone.
+    if p10 and p90 and p10 > 0 and p90 > p10:
+        log_mean = float(np.log(p50))
+        log_std = max((np.log(p90) - np.log(p10)) / (2 * _Z90), 1e-6)
+        return list(rng.lognormal(log_mean, log_std, size=_MC_RECONSTRUCT_SIZE))
+
+    # Distressed name: P10 sits at/below 0, i.e. ≥10% of the mass is a wipeout.
+    # A lognormal can't represent that point mass, so fall back to a normal but
+    # clip at 0 — the wipeout mass stays honest and nothing goes negative.
+    lo = p10 or 0
+    hi = p90 or 0
+    std = max((hi - lo) / 2.6, 1.0)
+    draws = rng.normal(loc=p50, scale=std, size=_MC_RECONSTRUCT_SIZE)
+    return list(np.maximum(draws, 0.0))

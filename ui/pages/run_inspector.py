@@ -62,6 +62,33 @@ NODE_ORDER = (
     "risk", "monte_carlo", "synthesis",
 )
 
+_RI_CSS = """
+<style>
+.ri-stats { display: grid; grid-template-columns: repeat(5, 1fr); border: 1px solid #E0D5C2;
+  border-radius: 10px; background: #FFFFFF; overflow: hidden; margin: 2px 0 6px; }
+.ri-stats .cell { padding: 12px 16px; border-right: 1px solid #EDE5D5; }
+.ri-stats .cell:last-child { border-right: none; }
+.ri-stats .lbl { font-size: 10.5px; letter-spacing: 0.07em; text-transform: uppercase; color: #6B6152; }
+.ri-stats .val { font: 500 19px var(--ri-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  color: #1A1611; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.ri-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 4px 0 6px; }
+.ri-card { background: #FFFFFF; border: 1px solid #E0D5C2; border-radius: 10px; padding: 13px 15px; }
+.ri-card.failed { border-color: #DBB3A8; background: #F6E3DD; }
+.ri-card .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ri-card .nm { font: 600 13px var(--ri-mono, ui-monospace, "SF Mono", Menlo, monospace); color: #1A1611; }
+.ri-card .pill { font: 600 10px sans-serif; letter-spacing: 0.04em; text-transform: uppercase;
+  border-radius: 4px; padding: 1.5px 7px; white-space: nowrap; }
+.ri-card .pill.ok { background: #E4EAE2; color: #2D4F3A; }
+.ri-card .pill.bad { background: #A33D2E; color: #FFFFFF; }
+.ri-kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 12px; margin-top: 9px; }
+.ri-kv .k { color: #6B6152; }
+.ri-kv .v { font-family: var(--ri-mono, ui-monospace, "SF Mono", Menlo, monospace); text-align: right; color: #1A1611; }
+.ri-err { margin-top: 9px; padding: 7px 9px; border-radius: 6px; background: #FFFFFF;
+  border: 1px solid #DBB3A8; font: 400 11px var(--ri-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  color: #A33D2E; line-height: 1.45; word-break: break-word; }
+</style>
+"""
+
 
 # --- Run discovery --------------------------------------------------------
 
@@ -171,9 +198,7 @@ def _render_run_header(
             </div>
             <div style="color:{INK}; opacity:0.7; font-size:0.85rem;
                 margin-top:0.3rem;">
-                run_id <code>{run_id}</code> · started {started} UTC ·
-                total cost <b>${total_cost:.4f}</b> · {total_tokens:,} tokens ·
-                {total_calls} LLM calls
+                run_id <code>{run_id}</code> · started {started} UTC
             </div>
             <div style="color:{INK}; opacity:0.8; font-size:0.85rem;
                 margin-top:0.3rem;">{_trigger_line(run_id)}</div>
@@ -181,6 +206,67 @@ def _render_run_header(
         </div>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def _render_stat_grid(
+    status: str, duration_s: float, total_cost: float, total_calls: int, total_tokens: int
+) -> None:
+    """Five headline numbers as a bordered grid — the mockup's at-a-glance
+    strip. Status colored brick when the run didn't complete cleanly."""
+    status_color = SAGE if status == "completed" else FAIL
+    st.markdown(
+        f"""
+        <div class="ri-stats">
+          <div class="cell"><div class="lbl">Status</div>
+            <div class="val" style="color:{status_color}">{status.upper()}</div></div>
+          <div class="cell"><div class="lbl">Duration</div>
+            <div class="val">{duration_s:.1f}s</div></div>
+          <div class="cell"><div class="lbl">Cost</div>
+            <div class="val">${total_cost:.4f}</div></div>
+          <div class="cell"><div class="lbl">LLM calls</div>
+            <div class="val">{total_calls}</div></div>
+          <div class="cell"><div class="lbl">Tokens</div>
+            <div class="val">{total_tokens:,}</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_agent_cards(nodes: list[dict]) -> None:
+    """Per-agent detail as a grid of cards (mockup style) — replaces the
+    plain node table. Each card: status pill, duration, calls, tokens,
+    cost, and the error text inline for a failed agent."""
+    if not nodes:
+        st.caption("No node_runs recorded for this run.")
+        return
+    order = {n: i for i, n in enumerate(NODE_ORDER)}
+    ordered = sorted(nodes, key=lambda n: order.get(str(n.get("node")), len(NODE_ORDER)))
+    cards = []
+    for n in ordered:
+        failed = n.get("status") == "failed"
+        err = str(n.get("error") or "")
+        err_html = f'<div class="ri-err">{md_safe(err[:240])}</div>' if (failed and err) else ""
+        cards.append(
+            f"""
+            <div class="ri-card{' failed' if failed else ''}">
+              <div class="top">
+                <span class="nm">{md_safe(str(n.get('node') or '?'))}</span>
+                <span class="pill {'bad' if failed else 'ok'}">{md_safe(str(n.get('status') or '?'))}</span>
+              </div>
+              <div class="ri-kv">
+                <span class="k">duration</span><span class="v">{float(n.get('duration_s') or 0.0):.1f}s</span>
+                <span class="k">llm calls</span><span class="v">{int(n.get('n_calls') or 0)}</span>
+                <span class="k">tokens</span><span class="v">{int(n.get('tokens_in') or 0):,} / {int(n.get('tokens_out') or 0):,}</span>
+                <span class="k">cost</span><span class="v">${float(n.get('cost_usd') or 0.0):.4f}</span>
+              </div>
+              {err_html}
+            </div>
+            """
+        )
+    st.markdown(
+        f'<div class="ri-cards">{"".join(cards)}</div>', unsafe_allow_html=True
     )
 
 
@@ -294,27 +380,6 @@ def _render_llm_calls(calls: list[dict]) -> None:
             st.code(str(c.get("response_excerpt") or "(not captured)"), language="text")
 
 
-def _render_node_table(nodes: list[dict]) -> None:
-    """Per-node timeline. Streamlit's `st.dataframe` gives us sortable
-    columns + horizontal scroll for free."""
-    if not nodes:
-        st.caption("No node_runs recorded for this run.")
-        return
-    rows = []
-    for n in nodes:
-        rows.append({
-            "node": n.get("node") or "?",
-            "status": n.get("status") or "?",
-            "duration_s": round(n.get("duration_s") or 0.0, 2),
-            "n_calls": n.get("n_calls") or 0,
-            "tokens_in": n.get("tokens_in") or 0,
-            "tokens_out": n.get("tokens_out") or 0,
-            "cost_usd": round(n.get("cost_usd") or 0.0, 4),
-            "error": (n.get("error") or "")[:100],
-        })
-    st.dataframe(rows, use_container_width=True, hide_index=True)
-
-
 def _render_errors(errors: list[dict]) -> None:
     if not errors:
         st.caption("No errors logged for this run.")
@@ -364,6 +429,7 @@ def main() -> None:
             "tokens + cost, error log, agent payloads, LangSmith deep-link."
         ),
     )
+    st.markdown(_RI_CSS, unsafe_allow_html=True)
 
     runs = _list_runs()
     if not runs:
@@ -431,6 +497,11 @@ def main() -> None:
     _render_run_header(
         run, total_cost=total_cost, total_tokens=total_tokens, total_calls=total_calls
     )
+    _render_stat_grid(
+        str(run.get("status") or "?"),
+        float(run.get("duration_s") or 0.0),
+        total_cost, total_calls, total_tokens,
+    )
     _render_failure_banner(nodes, errors)
 
     # LangSmith deep-link as a sidebar button — visible at the same time
@@ -449,7 +520,7 @@ def main() -> None:
     # something looks wrong (which node failed, which was slow, what cost).
     st.markdown("### Agent timeline")
     _render_timeline(nodes)
-    _render_node_table(nodes)
+    _render_agent_cards(nodes)
 
     section_divider()
 

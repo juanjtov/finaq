@@ -363,6 +363,139 @@ def _fmt_tokens(n: int) -> str:
     return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
 
 
+# Graph topology order — the runs table renders one status dot per agent in
+# this order so a glance shows WHERE a run broke, not just that it did.
+_NODE_ORDER = (
+    "load_thesis", "fundamentals", "filings", "news",
+    "risk", "monte_carlo", "synthesis",
+)
+_DOT = {"completed": "🟢", "failed": "🔴"}
+
+
+def _agent_dots(status_map: dict[str, str]) -> str:
+    """Seven-dot status string in graph order: 🟢 completed, 🔴 failed,
+    ⚪ didn't run / unknown."""
+    return "".join(_DOT.get(status_map.get(n, ""), "⚪") for n in _NODE_ORDER)
+
+
+def _within_days(iso: str, days: int) -> bool:
+    try:
+        ts = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - ts).days < days
+
+
+_MC_CSS = """
+<style>
+.mc-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 4px 0 6px; }
+.mc-kpi { background: #FFFFFF; border: 1px solid #E0D5C2; border-radius: 10px; padding: 14px 16px; }
+.mc-kpi.alarm { border-color: #DBB3A8; background: #F6E3DD; }
+.mc-kpi .lbl { font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; color: #6B6152; }
+.mc-kpi .val { font: 600 25px/1.1 var(--mc-mono, ui-monospace, "SF Mono", Menlo, monospace); color: #1A1611; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.mc-kpi.alarm .val { color: #A33D2E; }
+.mc-kpi .hint { font-size: 12px; color: #6B6152; margin-top: 2px; }
+.mc-spark { display: flex; align-items: flex-end; gap: 3px; height: 26px; margin-top: 7px; }
+.mc-spark i { flex: 1; background: #E0D5C2; border-radius: 2px 2px 0 0; min-height: 2px; }
+.mc-spark i.today { background: #2D4F3A; }
+</style>
+"""
+
+
+def _render_runs_table(runs_all: list[dict]) -> None:
+    """Filter chips + per-agent status dots + row-select → Run Inspector.
+    Standalone so an early return here never skips the CIO panels that
+    render after it on the page."""
+    from data import state as state_db
+
+    st.markdown("#### Recent drill-in runs")
+    if not runs_all:
+        st.caption("No runs recorded.")
+        return
+
+    # Classify manual vs CIO-triggered from the CIO action log (one query):
+    # any run_id a drill/reuse decision points at was CIO-ordered.
+    cio_run_ids = set()
+    for a in state_db.recent_cio_actions(limit=500):
+        for key in ("drill_run_id", "reuse_run_id"):
+            if a.get(key):
+                cio_run_ids.add(a[key])
+
+    choice = st.pills(
+        "Filter",
+        ["All", "Failed", "Degraded", "Completed", "Manual", "CIO-triggered"],
+        default="All",
+        label_visibility="collapsed",
+        key="mc_run_filter",
+    ) or "All"
+
+    def _keep(r: dict) -> bool:
+        label = _run_status_label(r)
+        rid = r.get("run_id")
+        if choice == "Failed":
+            return "failed" in label
+        if choice == "Degraded":
+            return "degraded" in label
+        if choice == "Completed":
+            return "completed" in label
+        if choice == "Manual":
+            return rid not in cio_run_ids
+        if choice == "CIO-triggered":
+            return rid in cio_run_ids
+        return True
+
+    filtered = [r for r in runs_all if _keep(r)][:25]
+    if not filtered:
+        st.caption(f"No runs match “{choice}”.")
+        return
+
+    statuses = state_db.node_status_by_run([r.get("run_id") for r in filtered])
+    st.caption(
+        "Agents column, left→right: load · fundamentals · filings · news · "
+        "risk · monte_carlo · synthesis  (🟢 ok · 🔴 failed · ⚪ didn't run). "
+        "Select a row to open the Run Inspector."
+    )
+    rows = []
+    for r in filtered:
+        rid = str(r.get("run_id") or "")
+        rows.append(
+            {
+                "started": str(r.get("started_at") or "")[:19].replace("T", " "),
+                "ticker": str(r.get("ticker") or "?"),
+                "thesis": str(r.get("thesis") or "?"),
+                "trigger": "🤖 CIO" if rid in cio_run_ids else "🖱️ manual",
+                "agents": _agent_dots(statuses.get(rid, {})),
+                "status": _run_status_label(r),
+                "duration_s": (
+                    f"{r['duration_s']:.1f}" if r.get("duration_s") else "—"
+                ),
+                "calls": int(r.get("n_calls") or 0),
+                "tokens": (
+                    f"{_fmt_tokens(int(r.get('tokens_in') or 0))} / "
+                    f"{_fmt_tokens(int(r.get('tokens_out') or 0))}"
+                ),
+                "cost": f"${float(r.get('cost_usd') or 0.0):.4f}",
+                "confidence": str(r.get("confidence") or "—"),
+                "errors": int(r.get("n_errors") or 0),
+            }
+        )
+    event = st.dataframe(
+        pd.DataFrame(rows),
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="drill_runs_table",
+    )
+    selected = getattr(getattr(event, "selection", None), "rows", None) or []
+    if selected:
+        chosen = filtered[selected[0]]
+        st.session_state["inspect_run_id"] = chosen.get("run_id")
+        st.switch_page("pages/run_inspector.py")
+
+
 def render_state_db_panel() -> None:
     """Step 5z observability — reads from data/state.py SQLite telemetry."""
     st.markdown("### Drill-in runs")
@@ -385,39 +518,68 @@ def render_state_db_panel() -> None:
         )
         return
 
+    st.markdown(_MC_CSS, unsafe_allow_html=True)
+
     summary = state_db.health_summary()
     spend = state_db.cost_today()
-    cols = st.columns(5)
-    with cols[0]:
-        cols[0].metric("Total graph runs", summary["total_runs"])
-    with cols[1]:
-        cols[1].metric(
-            "Last run",
-            (summary["last_run_at"] or "—")[:19].replace("T", " "),
+    # One fetch drives the KPIs, the filter counts, and the table below.
+    runs_all = state_db.recent_runs(limit=100)
+    last7 = [r for r in runs_all if _within_days(r.get("started_at") or "", 7)]
+    labels7 = [_run_status_label(r) for r in last7]
+    n_completed = sum(1 for x in labels7 if "completed" in x)
+    n_degraded = sum(1 for x in labels7 if "degraded" in x)
+    n_failed = sum(1 for x in labels7 if "failed" in x)
+
+    # Spend sparkline — last 7 days of node_runs cost, today's bar in sage.
+    cost7 = state_db.daily_cost(days=7)
+    costs = [float(c.get("cost_usd") or 0.0) for c in cost7]
+    cmax = max(costs, default=0.0) or 1.0
+    today_iso = datetime.now(UTC).date().isoformat()
+    spark = "".join(
+        f'<i class="{"today" if (c.get("date") == today_iso) else ""}" '
+        f'style="height:{max(2, round(float(c.get("cost_usd") or 0.0) / cmax * 24))}px"></i>'
+        for c in cost7
+    ) or '<i style="height:2px"></i>'
+
+    last_run = (summary["last_run_at"] or "—")[:16].replace("T", " ")
+    last_is_fail = bool(last7) and "failed" in labels7[0]
+    rate = summary["failure_rate_7d"]
+    rate_str = f"{rate:.0%}" if rate is not None else "—"
+
+    st.markdown(
+        f"""
+        <div class="mc-kpis">
+          <div class="mc-kpi">
+            <div class="lbl">Spend today</div>
+            <div class="val">${spend['cost_usd']:.2f}</div>
+            <div class="mc-spark">{spark}</div>
+            <div class="hint">last 7 days · node_runs.cost_usd</div>
+          </div>
+          <div class="mc-kpi">
+            <div class="lbl">Runs · 7d</div>
+            <div class="val">{len(last7)}</div>
+            <div class="hint">🟢 {n_completed} completed · ⚠️ {n_degraded} degraded · 🔴 {n_failed} failed</div>
+          </div>
+          <div class="mc-kpi{' alarm' if last_is_fail else ''}">
+            <div class="lbl">Last run</div>
+            <div class="val">{'FAILED' if last_is_fail else 'OK'}</div>
+            <div class="hint">{last_run} UTC · {summary['total_runs']} total</div>
+          </div>
+          <div class="mc-kpi">
+            <div class="lbl">Failure rate · 7d</div>
+            <div class="val">{rate_str}</div>
+            <div class="hint">graph_runs marked failed / total</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    proj = os.environ.get("LANGSMITH_PROJECT", "")
+    if proj and os.environ.get("LANGSMITH_TRACING", "").lower() == "true":
+        st.link_button(
+            "🔗 Open LangSmith",
+            f"https://smith.langchain.com/o/-/projects/p/{proj}",
         )
-    with cols[2]:
-        rate = summary["failure_rate_7d"]
-        cols[2].metric(
-            "Failure rate (7d)",
-            f"{rate:.0%}" if rate is not None else "—",
-        )
-    with cols[3]:
-        cols[3].metric(
-            "Spend today",
-            f"${spend['cost_usd']:.2f}",
-            help="Summed from node_runs.cost_usd for today's UTC date.",
-        )
-    with cols[4]:
-        # Quick LangSmith deep-link if the user has it configured.
-        proj = os.environ.get("LANGSMITH_PROJECT", "")
-        if proj and os.environ.get("LANGSMITH_TRACING", "").lower() == "true":
-            cols[4].link_button(
-                "🔗 LangSmith",
-                f"https://smith.langchain.com/o/-/projects/p/{proj}",
-                use_container_width=True,
-            )
-        else:
-            cols[4].caption("LangSmith disabled")
 
     section_divider()
 
@@ -442,48 +604,10 @@ def render_state_db_panel() -> None:
 
     section_divider()
 
-    # Recent runs table — row selection opens the Run Inspector.
-    st.markdown("#### Recent drill-in runs")
-    runs = state_db.recent_runs(limit=25)
-    if runs:
-        rows = []
-        for r in runs:
-            failed_names = str(r.get("failed_node_names") or "").replace(",", ", ")
-            rows.append(
-                {
-                    "started": str(r.get("started_at") or "")[:19].replace("T", " "),
-                    "ticker": str(r.get("ticker") or "?"),
-                    "thesis": str(r.get("thesis") or "?"),
-                    "status": _run_status_label(r),
-                    "failed agents": failed_names or "—",
-                    "duration_s": (
-                        f"{r['duration_s']:.1f}" if r.get("duration_s") else "—"
-                    ),
-                    "calls": int(r.get("n_calls") or 0),
-                    "tokens": (
-                        f"{_fmt_tokens(int(r.get('tokens_in') or 0))} / "
-                        f"{_fmt_tokens(int(r.get('tokens_out') or 0))}"
-                    ),
-                    "cost": f"${float(r.get('cost_usd') or 0.0):.4f}",
-                    "confidence": str(r.get("confidence") or "—"),
-                    "errors": int(r.get("n_errors") or 0),
-                }
-            )
-        event = st.dataframe(
-            pd.DataFrame(rows),
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="drill_runs_table",
-        )
-        selected = getattr(getattr(event, "selection", None), "rows", None) or []
-        if selected:
-            chosen = runs[selected[0]]
-            st.session_state["inspect_run_id"] = chosen.get("run_id")
-            st.switch_page("pages/run_inspector.py")
-    else:
-        st.caption("No runs recorded.")
+    # Recent runs table — filter chips + agent status dots + row-select.
+    # In its own helper so an empty-runs / empty-filter early return skips
+    # only the table, not the CIO panels rendered afterwards.
+    _render_runs_table(runs_all)
 
     section_divider()
 

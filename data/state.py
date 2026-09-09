@@ -709,6 +709,33 @@ def node_runs_for_run(run_id: str, *, db_path: Path | None = None) -> list[dict]
     return [dict(r) for r in rows]
 
 
+def node_status_by_run(
+    run_ids: list[str], *, db_path: Path | None = None
+) -> dict[str, dict[str, str]]:
+    """`{run_id: {node: status}}` for many runs in ONE query. Mission
+    Control renders per-run agent status dots from this instead of a query
+    per row. If a node ran more than once (retry), the latest status wins.
+    Empty when the DB is missing or `run_ids` is empty."""
+    ids = [r for r in run_ids if r]
+    if not ids or not Path(db_path or DB_PATH).exists():
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT run_id, node, status
+              FROM node_runs
+             WHERE run_id IN ({placeholders})
+             ORDER BY started_at
+            """,
+            ids,
+        ).fetchall()
+    out: dict[str, dict[str, str]] = {}
+    for r in rows:
+        out.setdefault(r["run_id"], {})[r["node"]] = r["status"]
+    return out
+
+
 def errors_for_run(run_id: str, *, db_path: Path | None = None) -> list[dict]:
     """Error events scoped to a single run_id, ordered by timestamp."""
     if not Path(db_path or DB_PATH).exists():
