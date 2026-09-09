@@ -653,6 +653,29 @@ Curated theses were 3–4 months unedited with no signal anywhere.
   ERP and Construction gets 3.5%. Documentation of rationale is required
   by the schema.
 
+### 6.15 Histogram sample reconstruction is lognormal, not normal
+
+- **Decision:** `utils.charts.resolve_mc_samples` reconstructs the histogram's
+  sample cloud from the saved P10/P50/P90 as a **lognormal** fit (median =
+  `exp(μ)`, `σ = (ln P90 − ln P10) / (2·z90)`), falling back to a normal
+  **clipped at 0** only when P10 ≤ 0 (a distressed name with ≥10% wipeout mass).
+- **Original approach:** a symmetric `normal(loc=P50, scale=(P90−P10)/2.6)`.
+- **Revised because:** saved runs store percentiles only (not the raw 10k
+  samples), so every histogram is *reconstructed*. `simulate` clips its own
+  fair-value samples to ≥ 0 (limited liability — a share can't be worth less
+  than nothing), but the normal reconstruction ignored that floor and spilled
+  its left tail below \$0, drawing impossible negative "fair values" on screen
+  whenever P50 was modest relative to the spread. The bug was in the display
+  reconstruction, not the model. Lognormal is positive by construction and
+  matches the true clipped, right-skewed shape; it reproduces the target
+  percentiles to within ~5%.
+- **Not addressed here (model-level, deferred):** `simulate`'s own clip-to-zero
+  still piles a probability spike at exactly \$0 for distressed draws, driven
+  by a negative terminal value when year-N owner earnings go negative and by
+  independent margin/capex draws that allow incoherent combinations. Flooring
+  terminal owner earnings at a normalized non-negative level would remove the
+  spike at the source. See `docs/POSTPONED.md`.
+
 ### 6.16 Sensitivity diagnostic (Tier 1d)
 
 - **Decision:** `utils.monte_carlo.compute_sensitivity()` reports per-parameter

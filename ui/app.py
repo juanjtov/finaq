@@ -268,7 +268,9 @@ def render_sidebar() -> dict:
     if default_thesis not in slugs:
         default_thesis = slugs[0]
     if "_thesis_pick" in st.session_state:
-        st.session_state["sidebar_thesis"] = st.session_state.pop("_thesis_pick")
+        pick = st.session_state.pop("_thesis_pick")
+        if pick in slugs:
+            st.session_state["sidebar_thesis"] = pick
     if "sidebar_thesis" not in st.session_state:
         st.session_state["sidebar_thesis"] = default_thesis
 

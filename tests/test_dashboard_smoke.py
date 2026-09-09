@@ -318,15 +318,11 @@ def test_mission_control_renders_with_populated_state_db():
     )
     at.run()
     assert not at.exception
-    # Should now show a metric for total runs (>=1)
-    metrics = at.metric
-    total_runs = next(
-        (m for m in metrics if "Total" in (m.label or "")),
-        None,
-    )
-    assert total_runs is not None
-    # value is a string formatted by st.metric
-    assert int(total_runs.value) >= 1
+    # KPI cards are custom HTML (spend sparkline, 7d run breakdown) rather
+    # than st.metric — assert the rendered markdown carries them.
+    blob = " ".join(m.value for m in at.markdown)
+    assert "Spend today" in blob
+    assert "Runs · 7d" in blob
 
 
 # --- Direct Agent page selectors ------------------------------------------
@@ -715,11 +711,13 @@ def test_mission_control_runs_table_shows_cost_and_failed_agents(
     assert runs_df is not None, "runs table with a 'cost' column not rendered"
     row = runs_df.iloc[0]
     assert "failed" in row["status"]
-    assert "filings" in row["failed agents"]
+    # Per-agent status dots: filings failed → a red dot somewhere in the strip.
+    assert "🔴" in row["agents"]
     assert row["cost"] == "$0.0600"
     assert row["errors"] == 1
-    # Spend-today metric present.
-    assert any("Spend today" in (m.label or "") for m in at.metric)
+    # Spend-today KPI card (custom HTML, not st.metric).
+    blob = " ".join(m.value for m in at.markdown)
+    assert "Spend today" in blob
 
 
 def test_mission_control_degraded_status_label():
