@@ -62,6 +62,11 @@ NEWS_DAYS = 90
 NEWS_MAX_RESULTS = 10
 FILINGS_K = 5
 
+# Hard cap on universe size. The prompt asks for 6-8; this is the guarantee
+# regardless of what the model returns. Whether a larger universe yields better
+# discovery is an open question — tracked as an eval-suite item in POSTPONED.
+MAX_UNIVERSE = 8
+
 # A plausible US ticker: leading letter, then up to 6 of letter/digit/./-.
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,6}$")
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -317,6 +322,29 @@ def _ground_edge(
     return min(confidence, 1.0), evidence
 
 
+# --- Filings auto-ingest (opt-in) -----------------------------------------
+
+
+async def _ensure_ingested(tickers: list[str]) -> None:
+    """Ingest each ticker's filings that aren't already in the manifest, so
+    filings-grounding has a corpus to check. Sequential + best-effort (EDGAR is
+    rate-limited); a ticker whose ingest fails just stays news-only.
+
+    `ingest_ticker` is imported lazily to keep `agents/` decoupled from
+    `scripts/` (and to avoid pulling the ingest deps unless the flag is used)."""
+    from scripts.ingest_universe import ingest_ticker
+
+    for t in tickers:
+        try:
+            if vectors.has_ticker(t):
+                continue
+            logger.info(f"[discovery] auto-ingesting filings for {t}")
+            n = await ingest_ticker(t)
+            logger.info(f"[discovery] {t}: ingested {n} chunks")
+        except Exception as e:  # noqa: BLE001 — best-effort; ticker stays news-only
+            logger.warning(f"[discovery] auto-ingest failed for {t}: {e}")
+
+
 # --- Ticker hygiene -------------------------------------------------------
 
 
@@ -356,13 +384,17 @@ async def discover(
     topic: str | None = None,
     ticker: str | None = None,
     force_refresh: bool = False,
+    ingest: bool = False,
     db_path: Path | None = None,
 ) -> DiscoveryResult:
     """Discover a grounded halo-graph thesis from a TOPIC or a seed TICKER.
 
     Exactly one of `topic` / `ticker` must be provided. Caches per input on
     disk (`theses/adhoc_{slug}.json`); pass `force_refresh=True` to rebuild.
-    `db_path` overrides the graph store location (tests).
+    The universe is capped at `MAX_UNIVERSE`. `ingest=True` first downloads +
+    embeds SEC filings for any universe ticker not yet in the manifest, so
+    filings-grounding has a corpus to check (opt-in — a first ingest is minutes
+    + embedding cost per ticker). `db_path` overrides the graph store (tests).
 
     `DiscoveryResult.error` is set (thesis None, nothing written) on invalid
     args, LLM failure, unparseable/vague proposal, or a grounded thesis that
@@ -429,6 +461,24 @@ async def discover(
     anchors = [a for a in anchors_clean if a in universe_set] or universe[:1]
     if seed and seed in universe_set:
         anchors = [seed] + [a for a in anchors if a != seed]
+
+    # Cap the universe (anchors kept first so they always survive the cut).
+    if len(universe) > MAX_UNIVERSE:
+        capped = anchors + [t for t in universe if t not in anchors]
+        universe = capped[:MAX_UNIVERSE]
+        universe_set = set(universe)
+        # A model that emitted >MAX_UNIVERSE anchors would otherwise leave some
+        # anchors outside the capped universe → a spurious schema-validation
+        # failure. Re-filter so `anchor_tickers ⊆ universe` always holds.
+        anchors = [a for a in anchors if a in universe_set] or universe[:1]
+
+    # Optionally ingest filings for the (capped) universe so grounding can use
+    # first-party SEC evidence instead of falling back to news co-mention alone.
+    if ingest:
+        try:
+            await _ensure_ingested(universe)
+        except Exception as e:  # noqa: BLE001 — opt-in best-effort, never fatal
+            logger.warning(f"[discovery] auto-ingest step failed: {e}")
 
     # (B) Ground each proposed edge against filings + news.
     name_map = await asyncio.to_thread(_name_map, universe)

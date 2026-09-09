@@ -1576,7 +1576,7 @@ data, and edges are frequently plausible-but-wrong. Discovery replaces
 
 - **Decision:** Discovery is a two-stage pipeline. **(A) Propose** — one
   LLM call (model resolved via `MODEL_DISCOVERY`) proposes a candidate
-  `Thesis`: name, summary, anchors, a 6–15 ticker universe, and a
+  `Thesis`: name, summary, anchors, a universe capped at 8 tickers, and a
   *generous* set (8–15) of candidate relationships, each `note` phrased
   as a concrete checkable claim. **(B) Verify** — for every proposed
   edge, the system independently gathers evidence from the two
@@ -1591,6 +1591,11 @@ data, and edges are frequently plausible-but-wrong. Discovery replaces
   cite a primary source. The prompt tells the model it is the propose
   half, so it proposes freely — a wrong edge is cheap (pruned), a missing
   edge is a lost lead.
+- **Universe cap:** the emitted universe is hard-capped at 8 (`MAX_UNIVERSE`
+  in `agents/discovery.py`), anchors kept first so they always survive the
+  cut. It keeps drill-in budget on the strongest picks; whether a wider
+  universe discovers better winners is an open question, tracked as an
+  eval-suite item in POSTPONED.
 - **Alternatives considered:** (1) a commercial supply-chain graph API
   (Bloomberg SPLC, FactSet) — richest edges but paid + licensed, against
   the local-first / free-tier stance (CLAUDE.md §2); rejected. (2) LLM
@@ -1616,11 +1621,14 @@ data, and edges are frequently plausible-but-wrong. Discovery replaces
   the LLM's proposed edge *type*, it is a large honest improvement over
   Discovery-lite. Filings grounding is best-effort — a universe ticker
   with no ingested filings (`data.vectors.has_ticker` is False) falls
-  back to news-only, rather than forcing a slow full ingest inline.
+  back to news-only. `discover(ingest=True)` (CLI `--ingest`) first
+  ingests any un-ingested universe ticker's filings via
+  `scripts.ingest_universe.ingest_ticker` so grounding has a first-party
+  corpus; it is opt-in because a first ingest is minutes + embedding cost
+  per ticker.
 - **Deferred (POSTPONED §Phase 2+):** a single batched LLM adjudication
-  over the retrieved evidence (confirming the edge *direction/type*, not
-  just co-occurrence), and auto-ingesting every universe ticker's filings
-  before grounding. Triggers logged in POSTPONED.
+  over the retrieved evidence, confirming each edge's *direction/type*
+  rather than just co-occurrence. Trigger logged in POSTPONED.
 
 ### 13.3 Graph store: extend `state.db` (SQLite), not Pinecone / Notion / Supabase
 
@@ -1693,14 +1701,16 @@ data, and edges are frequently plausible-but-wrong. Discovery replaces
 ### 13.6 Scope of this increment
 
 - **Shipped:** the Discovery agent (`agents/discovery.py`), the graph
-  store (`data/graph.py` + `state.db` tables), the proposal prompt, a
-  `python -m scripts.run_discovery "<topic>"` CLI, and unit tests.
+  store (`data/graph.py` + `state.db` tables), the proposal prompt, the
+  8-ticker universe cap (`MAX_UNIVERSE`), opt-in filings auto-ingest
+  (`discover(ingest=True)` / `--ingest`), the
+  `python -m scripts.run_discovery` CLI, and unit tests.
 - **Deferred to a follow-up (POSTPONED §Phase 2+):** the Streamlit
-  graph-visualisation page (kept out to keep this PR reviewable and avoid
+  graph-visualisation page (kept out to keep the PR reviewable and avoid
   colliding with in-flight Mission Control UI work), per-edge LLM
-  adjudication, filings auto-ingest for the whole universe, persistent
-  re-discovery / graph diffing over time, and the Notion graph mirror +
-  bidirectional sync.
+  adjudication, persistent re-discovery / graph diffing over time, the
+  Notion graph mirror + bidirectional sync, and an eval suite on whether a
+  wider universe (beyond the 8-cap) discovers better winners.
 
 ---
 
