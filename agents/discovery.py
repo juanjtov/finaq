@@ -467,11 +467,18 @@ async def discover(
         capped = anchors + [t for t in universe if t not in anchors]
         universe = capped[:MAX_UNIVERSE]
         universe_set = set(universe)
+        # A model that emitted >MAX_UNIVERSE anchors would otherwise leave some
+        # anchors outside the capped universe → a spurious schema-validation
+        # failure. Re-filter so `anchor_tickers ⊆ universe` always holds.
+        anchors = [a for a in anchors if a in universe_set] or universe[:1]
 
     # Optionally ingest filings for the (capped) universe so grounding can use
     # first-party SEC evidence instead of falling back to news co-mention alone.
     if ingest:
-        await _ensure_ingested(universe)
+        try:
+            await _ensure_ingested(universe)
+        except Exception as e:  # noqa: BLE001 — opt-in best-effort, never fatal
+            logger.warning(f"[discovery] auto-ingest step failed: {e}")
 
     # (B) Ground each proposed edge against filings + news.
     name_map = await asyncio.to_thread(_name_map, universe)

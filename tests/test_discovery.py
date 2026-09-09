@@ -330,3 +330,28 @@ async def test_autoingest_ingests_missing_when_enabled(stub, monkeypatch):
     res = await disc.discover(topic="ai power", db_path=stub / "state.db", ingest=True)
     assert res.error is None
     assert set(ingested) == {"NVDA", "CEG", "FAKE"}  # missing ones ingested, VRT skipped
+
+
+async def test_cap_keeps_anchors_subset_when_llm_over_anchors(stub, monkeypatch):
+    # Even if the model emits more anchors than the cap, `anchors ⊆ universe`
+    # must still hold — the cap must not manufacture a schema-validation failure.
+    def _many_anchors(*, topic, ticker):
+        uni = [f"T{i}" for i in range(1, 13)]  # T1..T12, all valid symbols
+        return (
+            {
+                "name": "Many anchors",
+                "summary": "s",
+                "anchor_tickers": uni,  # 12 anchors, more than MAX_UNIVERSE
+                "universe": uni,
+                "relationships": [],
+                "valuation": _VALUATION,
+                "material_thresholds": [],
+            },
+            "raw",
+        )
+
+    monkeypatch.setattr(disc, "_propose", _many_anchors)
+    res = await disc.discover(topic="many", db_path=stub / "state.db")
+    assert res.error is None  # no spurious validation failure
+    assert len(res.thesis.universe) == 8
+    assert set(res.thesis.anchor_tickers) <= set(res.thesis.universe)
