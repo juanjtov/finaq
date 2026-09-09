@@ -1,6 +1,6 @@
 """Tier 3 News evaluation — RAGAS framework metrics on the news synthesis.
 
-Treats the News agent's `summary` as the answer, the Tavily-returned articles
+Treats the News agent's `summary` as the answer, the Finnhub-returned articles
 as the contexts, and a meta-question as the user query. RAGAS computes:
 
   - faithfulness        : every claim in the summary grounded in the contexts
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from agents.news import _company_name_for, run
-from data.tavily import search_news
+from data.finnhub import search_news
 from utils.rag_eval import write_eval_run
 from utils.schemas import NewsOutput
 
@@ -33,8 +33,8 @@ THESES_DIR = Path(__file__).parents[1] / "theses"
 def _require_keys():
     if not os.environ.get("OPENROUTER_API_KEY", "").startswith("sk-or-v1-"):
         pytest.skip("OPENROUTER_API_KEY not set")
-    if not os.environ.get("TAVILY_API_KEY", "").startswith("tvly-"):
-        pytest.skip("TAVILY_API_KEY not set")
+    if not os.environ.get("FINNHUB_API_KEY", "").strip():
+        pytest.skip("FINNHUB_API_KEY not set")
     judge = os.environ.get("MODEL_JUDGE", "")
     if not judge or judge == "test-stub-model":
         pytest.skip("MODEL_JUDGE not set in .env")
@@ -47,13 +47,13 @@ async def test_ragas_evaluation_on_news_summary():
 
     thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
 
-    # Re-fetch the same Tavily articles the agent used as RAGAS contexts.
+    # Re-fetch the same Finnhub articles the agent used as RAGAS contexts.
     company = _company_name_for("NVDA")
     articles = search_news("NVDA", company, days=90, max_results=15)
     if not articles:
-        pytest.skip("Tavily returned no NVDA news today")
+        pytest.skip("Finnhub returned no NVDA news today")
 
-    # Convert Tavily articles to the RAGAS context shape.
+    # Convert Finnhub articles to the RAGAS context shape.
     contexts = [{"text": (a.get("content") or a.get("title") or "")[:1500]} for a in articles]
 
     state = {"ticker": "NVDA", "thesis": thesis}

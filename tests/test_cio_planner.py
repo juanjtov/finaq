@@ -613,7 +613,7 @@ def test_decide_fetches_news_lazily_only_past_the_gate(
     isolated_db, stub_external, monkeypatch,
 ):
     """`news_fetcher` must NOT be called when the gate shortcuts (the
-    Tavily-quota fix) and must be called exactly once otherwise, with its
+    news-quota fix) and must be called exactly once otherwise, with its
     result flowing into the evidence bundle."""
     calls = {"n": 0}
 

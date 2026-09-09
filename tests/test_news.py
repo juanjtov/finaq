@@ -1,6 +1,6 @@
 """Step 5c unit tests — News agent prompt assembly + failure paths.
 
-Pure-logic, no network. Real Tavily + real LLM live in test_news_integration.py.
+Pure-logic, no network. Real Finnhub + real LLM live in test_news_integration.py.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from agents.news import (
+    EXCERPT_CHARS,
     NEWS_DAYS,
     _build_user_prompt,
     _company_name_for,
@@ -28,7 +29,7 @@ def _fake_article(idx: int, title: str = "Sample article", **overrides) -> dict:
         "title": title,
         "url": f"https://example.com/article/{idx}",
         "content": "Some article body text.",
-        "score": 0.85,
+        "source": "Yahoo",
         "published_date": "2026-04-15",
         **overrides,
     }
@@ -51,10 +52,17 @@ def test_format_article_handles_missing_published_date():
     assert "unknown" in out
 
 
-def test_format_article_handles_missing_score():
-    art = _fake_article(1, score=None)
-    out = _format_article(1, art)
-    assert "n/a" in out
+def test_format_article_keeps_summary_plus_fetched_body():
+    """data/finnhub.py appends up to 1,500 chars of article body to the summary;
+    the prompt cap must leave room for it or the body fetch is wasted."""
+    assert EXCERPT_CHARS >= 1500 + 300
+    art = _fake_article(1, content="s" * 300 + " " + "b" * 1500)
+    assert ("b" * 1500) in _format_article(1, art)
+
+
+def test_format_article_renders_source_or_unknown():
+    assert "source=Benzinga" in _format_article(1, _fake_article(1, source="Benzinga"))
+    assert "source=unknown" in _format_article(1, _fake_article(1, source=None))
 
 
 # --- Prompt assembly --------------------------------------------------------
@@ -110,7 +118,9 @@ def test_company_name_falls_back_to_ticker_when_yfinance_fails(monkeypatch):
 def test_company_name_uses_long_name_when_present(monkeypatch):
     from agents import news as n
 
-    monkeypatch.setattr(n, "get_financials", lambda _, **kw: {"info": {"longName": "NVIDIA Corporation"}})
+    monkeypatch.setattr(
+        n, "get_financials", lambda _, **kw: {"info": {"longName": "NVIDIA Corporation"}}
+    )
     assert _company_name_for("NVDA") == "NVIDIA Corporation"
 
 
@@ -125,8 +135,8 @@ def test_company_name_falls_back_to_short_name(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_returns_stale_news_message_when_tavily_empty(monkeypatch):
-    """Tavily returned no articles — output is schema-valid with a clear staleness flag."""
+async def test_run_returns_stale_news_message_when_finnhub_empty(monkeypatch):
+    """Finnhub returned no articles — output is schema-valid with a clear staleness flag."""
     from agents import news as n
 
     monkeypatch.setattr(n, "_company_name_for", lambda t, **kw: "Stub Co.")
@@ -141,7 +151,7 @@ async def test_run_returns_stale_news_message_when_tavily_empty(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_falls_back_when_llm_fails(monkeypatch):
-    """LLM raises but Tavily succeeded — output must still be schema-valid."""
+    """LLM raises but Finnhub succeeded — output must still be schema-valid."""
     from agents import news as n
 
     monkeypatch.setattr(n, "_company_name_for", lambda t, **kw: "Stub Co.")
@@ -156,8 +166,8 @@ async def test_run_falls_back_when_llm_fails(monkeypatch):
     result = await run(state)
     out = NewsOutput.model_validate(result["news"])
     assert any("llm" in e for e in out.errors)
-    # Tavily error should NOT be in the list — only LLM
-    assert not any("tavily" in e for e in out.errors)
+    # Finnhub error should NOT be in the list — only LLM
+    assert not any("finnhub" in e for e in out.errors)
 
 
 @pytest.mark.asyncio
@@ -189,7 +199,7 @@ async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
         ],
         "evidence": [
             {
-                "source": "tavily",
+                "source": "finnhub",
                 "url": "https://example.com/c",
                 "excerpt": "key phrase",
                 "as_of": "2026-04-20",
@@ -210,5 +220,5 @@ async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
 
 
 def test_news_default_window_is_90_days_per_spec():
-    """CLAUDE.md §9.3: 'Tavily search ... over the past 90 days'."""
+    """CLAUDE.md §9.3: 'Finnhub company news ... over the past 90 days'."""
     assert NEWS_DAYS == 90

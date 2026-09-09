@@ -316,7 +316,7 @@ def serialise_judge_report(report: JudgeReport) -> dict:
 @dataclass(frozen=True)
 class NewsFaithfulnessResult:
     items_total: int
-    items_grounded_url: int  # URL (normalised) exists in returned Tavily articles
+    items_grounded_url: int  # URL (normalised) exists in returned news articles
     url_grounding_rate: float
     fabricated_urls: tuple[str, ...]
 
@@ -340,10 +340,10 @@ def _canonicalise_url(url: str) -> str:
 
 
 def check_news_faithfulness(
-    items: list[dict], tavily_articles: list[dict]
+    items: list[dict], articles: list[dict]
 ) -> NewsFaithfulnessResult:
     """For News agent output, check that every catalyst/concern's URL came
-    from Tavily.
+    from the retrieved article list.
 
     Note: we deliberately do NOT check summary grounding here. News summaries
     are paraphrased on purpose (the Filings prompt requires verbatim quotes;
@@ -351,7 +351,7 @@ def check_news_faithfulness(
     Tier 1's job is to catch hard fabrication — a URL the LLM made up — not
     to second-guess legitimate paraphrasing.
     """
-    article_url_set = {_canonicalise_url(a.get("url", "")) for a in tavily_articles}
+    article_url_set = {_canonicalise_url(a.get("url", "")) for a in articles}
 
     fabricated_urls: list[str] = []
     items_grounded_url = 0

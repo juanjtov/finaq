@@ -19,7 +19,7 @@ Each entry point:
      cycle) and auto-ingests only `auto_ingest` tickers (heartbeat →
      anchors; on-demand → the requested ticker); then calls
      `planner.decide(...)` with the probe result as `edgar_freshness` and
-     a lazy news fetcher (Tavily fires only if the gates let the LLM run,
+     a lazy news fetcher (Finnhub fires only if the gates let the LLM run,
      memoised per ticker); records a `cio_actions` row. A stale ticker the
      planner picks for a drill is ingested right before that drill.
   4. Applies the drill-budget cap (post-LLM).
@@ -41,7 +41,7 @@ Constraints we enforce here (not in the planner):
 Tests stub:
   - `planner.decide`            — returns canned CIODecisions
   - `_drill_one`                — to avoid running the real graph
-  - `_fetch_news`               — to avoid Tavily calls
+  - `_fetch_news`               — to avoid Finnhub calls
   - `cio_notify.send_summary`   — to avoid Telegram / Notion
 """
 
@@ -141,27 +141,27 @@ def _anchor_tickers() -> set[str]:
 
 def _fetch_news(ticker: str) -> list[dict]:
     """Best-effort recent-news pull for a single ticker. Soft-fail: any
-    Tavily error returns an empty list. Caller treats `[]` as "no news,
+    Finnhub error returns an empty list. Caller treats `[]` as "no news,
     no signal" — the persona prompt understands this.
 
     Queries `"{ticker} {company name}"` with the name resolved from the
     yfinance cache (same helper the News agent uses). It used to pass the
     *thesis* name, so every ticker in the `wen` thesis searched for
-    "Wendy's". Basic search depth (1 Tavily credit, not 2) and the
-    planner's 14-day / 8-headline window — the planner only reads titles.
+    "Wendy's". No article bodies (`with_body=False`) and the planner's
+    14-day / 8-headline window — the planner only reads titles.
 
-    Lazy imports so a missing TAVILY_API_KEY at start-time doesn't block
+    Lazy imports so a missing FINNHUB_API_KEY at start-time doesn't block
     test imports."""
     try:
         from agents.news import _company_name_for
-        from data.tavily import search_news
+        from data.finnhub import search_news
 
         return search_news(
             ticker,
             _company_name_for(ticker),
             days=cio_planner.NEWS_LOOKBACK_DAYS,
             max_results=cio_planner.MAX_NEWS_HEADLINES,
-            search_depth="basic",
+            with_body=False,
         )
     except Exception as e:
         logger.warning(f"[cio.cio] _fetch_news({ticker}) failed: {e}")
@@ -435,7 +435,7 @@ async def _run_cycle(
     cycle_model: str | None = None
 
     # Per-cycle, per-ticker memos. A ticker in two theses (cross-thesis
-    # multiplicity) gets one EDGAR probe and at most one Tavily call per
+    # multiplicity) gets one EDGAR probe and at most one news fetch per
     # cycle, not one per pair.
     freshness: dict[str, FreshnessReport | None] = {}
     ingested: set[str] = set()

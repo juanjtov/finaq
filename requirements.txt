@@ -15,7 +15,6 @@ matplotlib
 reportlab
 pydantic
 python-dotenv
-tavily-python
 tenacity
 httpx
 rank-bm25

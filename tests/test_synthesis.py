@@ -130,7 +130,7 @@ def _full_state() -> dict:
             ],
             "evidence": [
                 {
-                    "source": "tavily",
+                    "source": "finnhub",
                     "url": "https://example.com/msft",
                     "as_of": "2026-04-15",
                     "excerpt": "MSFT raised guidance",

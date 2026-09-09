@@ -334,7 +334,7 @@ def main() -> None:
             help=(
                 "fundamentals: KPIs + projections · "
                 "filings: SEC RAG · "
-                "news: 90d Tavily · "
+                "news: 90d Finnhub · "
                 "risk: cross-modal synthesis · "
                 "synthesis: explain the report"
             ),

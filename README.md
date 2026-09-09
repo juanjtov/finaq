@@ -44,7 +44,7 @@ Multi-agent drill-in over SEC filings, fundamentals, and news — orchestrated w
 git clone https://github.com/juanjtov/finaq.git && cd finaq
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt        # or: uv pip install -r requirements.txt
-cp .env.example .env && $EDITOR .env   # add OPENROUTER_API_KEY, TAVILY_API_KEY, SEC_EDGAR_USER_AGENT
+cp .env.example .env && $EDITOR .env   # add OPENROUTER_API_KEY, FINNHUB_API_KEY, PINECONE_API_KEY, SEC_EDGAR_USER_AGENT
 python scripts/ingest_universe.py      # one-time, ~10 min for 11-ticker AI cake universe
 streamlit run ui/app.py                # http://localhost:8501
 ```
@@ -103,7 +103,7 @@ Every node is wrapped by `_safe_node` — exceptions become `state.errors` entri
 - **`load_thesis`** — validates and resolves the thesis JSON; parameterises every downstream prompt with anchor tickers, universe, halo relationships, and material thresholds.
 - **`fundamentals`** — yfinance 5-year financials with field-name aliasing (so `"Total Revenue"` and `"Operating Revenue"` both resolve to canonical `revenue`); LLM thesis-aware projections (mean+std for both DCF and Multiple inputs); evidence with `as_of` dates; conservative fallback projections if the LLM fails.
 - **`filings`** — three thesis-aware RAG subqueries (`risk_factors`, `mdna_trajectory`, `segment_performance`) over 10-K + 10-Q; verbatim quote enforcement with `[STALE EVIDENCE]` flag for filings older than 18 months; retrieval audit stashed for live eval.
-- **`news`** — Tavily search over the last 90 days (top 15 by score); LLM extraction of bull/bear catalysts and concerns; freshness via `published_date`; stale-news fallback when nothing comes back.
+- **`news`** — Finnhub company news over the last 90 days (articles that name the company, 15 sampled across log-spaced slices, bodies fetched from the publisher); LLM extraction of bull/bear catalysts and concerns; freshness via `published_date`; stale-news fallback when nothing comes back.
 - **`risk`** — synthesis-only, no external calls. Detects four risk types in priority order: convergent signals (≥2 agents agree), threshold breaches (your thesis's `material_thresholds` firing), divergent signals, and implicit gaps. The LLM picks a categorical level (`LOW`..`CRITICAL`); the numeric `score_0_to_10` is a **deterministic lookup** — sidestepping the known LLM weakness on numeric scales.
 - **`monte_carlo`** — runs in parallel with risk, not after. Hybrid Owner-Earnings DCF + secondary Multiple model, 10,000 simulations, lognormal exit multiples, truncated-normal operational params, shared parameter draws so the two models are directly comparable, and a `convergence_ratio` flag when DCF and Multiple disagree.
 - **`synthesis`** — final 9-section markdown report. Translates Monte Carlo distributions into plain language (banned-words list enforces no jargon: no "P10", no "DCF", no "FCF yield" in the **What this means** section). Confidence calibrated from agent convergence + MC `convergence_ratio` + risk level. Action recommendations are **sized and conditional** on thesis material thresholds, never "hold" or "monitor".
@@ -112,7 +112,7 @@ The CIO meta-layer (replaces the Phase 0 Triage stub):
 
 - **`cio.planner`** — gates (cooldown, recent-dismissal velocity, drill budget) + persona-driven LLM decide per `(ticker, thesis)` pair → `CIODecision` (action: `drill | reuse | dismiss`, rationale, confidence, optional `reuse_run_id`). Gates can short-circuit to `dismiss` without touching the LLM (e.g. ≥3 dismissals in 7 days = yo-yo guard).
 - **`cio.rag`** — RAG over a separate `synthesis_reports` Pinecone index populated by `scripts/index_existing_reports.py` (each section of every prior drill-in is a chunk). Lets the planner cite specific past sections in its rationale.
-- **`cio.cio`** — orchestrator: builds candidate list (curated theses for heartbeat; ticker-resolved for on-demand), pulls news (Tavily, soft-fail), calls `planner.decide` per pair, applies the drill-budget cap (default 3 — over-budget drills demote to reuse when a recent run exists, else dismiss), executes drills via `agents.invoke_with_telemetry`, persists every decision to `cio_actions`.
+- **`cio.cio`** — orchestrator: builds candidate list (curated theses for heartbeat; ticker-resolved for on-demand), pulls news (Finnhub, soft-fail), calls `planner.decide` per pair, applies the drill-budget cap (default 3 — over-budget drills demote to reuse when a recent run exists, else dismiss), executes drills via `agents.invoke_with_telemetry`, persists every decision to `cio_actions`.
 - **`cio.notify`** — composes an HTML exec summary, sends to Telegram via the Bot API REST `sendMessage` endpoint (the long-poll bot doesn't have a "push" hook), mirrors the cycle to the Notion Alerts DB. Both targets soft-fail.
 - **`cio.dispatcher`** — CLI wrapping the cycles. Mode `auto` is the cron path: freshness check on `last_successful_cio_run_at` picks `heartbeat` (recent) vs `catchup` (>8h old). Combined with `RunAtLoad=true` in the launchd plist, this catches missed slots (lid-closed Mac) without stacking N missed cycles.
 
@@ -257,7 +257,7 @@ agents/        one file per agent — fundamentals, filings, news, risk, synthes
   prompts/     system prompts for each agent (.md), including qa_* per-agent variants
 cio/           CIO meta-layer — planner, rag, cio (orchestrator), notify, dispatcher, memory
   prompts/     CIO persona prompt
-data/          edgar.py, yfin.py, vectors.py, tavily.py, treasury.py, state.py, telegram.py, notion.py, theses.py
+data/          edgar.py, yfin.py, vectors.py, finnhub.py, treasury.py, state.py, telegram.py, notion.py, theses.py
 theses/        hand-written thesis JSONs — ai_cake, nvda_halo, construction, general (+ adhoc_*, archive/)
 ui/            Streamlit app + 7 pages (mission_control, new_thesis, direct_agent, methodology, architecture, run_inspector, theses_admin)
 utils/         schemas, monte_carlo, charts, pdf_export, models, openrouter, rag_eval, rag_ragas, live_eval
@@ -279,7 +279,7 @@ langgraph.json LangGraph Studio config — `langgraph dev` to debug
 
 ```bash
 pytest                 # default — fast, no external calls, no LLM cost
-pytest -m integration  # real-API tests (yfinance, EDGAR, Tavily, OpenRouter)
+pytest -m integration  # real-API tests (yfinance, EDGAR, Finnhub, OpenRouter)
 pytest -m eval         # LLM-judge + RAGAS — ~$0.025 per Tier 2 run, ~$1.00 per Tier 3 run
 ```
 

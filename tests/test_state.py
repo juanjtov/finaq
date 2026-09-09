@@ -1024,7 +1024,7 @@ def test_recent_runs_rolls_up_cost_tokens_and_failed_names(tmp_path: Path):
     )
     st.record_node_run(
         run_id, "news", now, now, 93.0, "failed",
-        error="tavily 429", db_path=db,
+        error="finnhub 429", db_path=db,
     )
     st.record_error("filings", "chroma timeout", run_id=run_id, db_path=db)
     st.finish_graph_run(run_id, "failed", duration_s=214.0, db_path=db)

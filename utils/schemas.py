@@ -108,7 +108,7 @@ class Evidence(BaseModel):
     Downstream agents (Risk, Synthesis) use it to weight stale evidence less.
     """
 
-    source: str  # "yfinance" | "edgar" | "tavily" | "pinecone" | ...
+    source: str  # "yfinance" | "edgar" | news publisher (Yahoo, Benzinga, ...) | "pinecone" | ...
     accession: str | None = None
     item: str | None = None
     url: str | None = None

@@ -225,7 +225,7 @@ def test_parse_llm_response_recovers_from_unterminated_string():
     truncated = (
         '{"answer": "Construction-sector hyperscaler exposure is limited.",\n'
         ' "citations": [\n'
-        '  {"source": "tavily", "url": "https://example.com/very-long-url-that-was-cut-off-mid'
+        '  {"source": "finnhub", "url": "https://example.com/very-long-url-that-was-cut-off-mid'
         # No closing quote, no closing bracket — JSON is broken
     )
     out = _parse_llm_response(truncated)

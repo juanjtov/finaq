@@ -1,7 +1,8 @@
-"""News agent — LLM-driven thesis-aware news triage via Tavily.
+"""News agent — LLM-driven thesis-aware news triage over Finnhub company news.
 
 Pipeline per drill-in:
-  1. Pull last-90-day news from Tavily for "{ticker} {company_name}".
+  1. Pull the last 90 days of Finnhub company news for the ticker (data/finnhub.py
+     keeps only articles that name the company and samples the window).
   2. Send the article list + thesis to the LLM.
   3. LLM extracts 3-7 catalysts (bull/neutral) and 3-7 concerns (bear/neutral),
      each tagged with sentiment, URL, and `as_of` (published_date).
@@ -21,7 +22,7 @@ import time
 from datetime import date
 from pathlib import Path
 
-from data.tavily import search_news
+from data.finnhub import search_news
 from data.yfin import get_financials
 from utils import logger
 from utils.models import MODEL_NEWS
@@ -35,6 +36,7 @@ SYSTEM_PROMPT = (PROMPTS_DIR / "news.md").read_text()
 LLM_MAX_TOKENS = 2500
 NEWS_DAYS = 90
 NEWS_MAX_RESULTS = 15
+EXCERPT_CHARS = 2000  # summary + fetched body (data/finnhub.py BODY_MAX_CHARS) fit in full
 
 
 # --- Prompt assembly ---------------------------------------------------------
@@ -44,11 +46,10 @@ def _format_article(idx: int, article: dict) -> str:
     title = article.get("title", "")
     url = article.get("url", "")
     pub = article.get("published_date") or "unknown"
-    score = article.get("score")
-    score_str = f"{score:.2f}" if isinstance(score, (int, float)) else "n/a"
-    content = (article.get("content") or "")[:600]
+    source = article.get("source") or "unknown"
+    content = (article.get("content") or "")[:EXCERPT_CHARS]
     return (
-        f"\n[article {idx}] published_date={pub} tavily_score={score_str}\n"
+        f"\n[article {idx}] published_date={pub} source={source}\n"
         f"  title: {title}\n"
         f"  url:   {url}\n"
         f"  excerpt: {content}"
@@ -68,7 +69,7 @@ def _build_user_prompt(ticker: str, company_name: str, thesis: dict, articles: l
         "MATERIAL THRESHOLDS THE TRIAGE SYSTEM IS WATCHING:",
         json.dumps(thesis.get("material_thresholds", []), indent=2),
         "",
-        f"RECENT NEWS ARTICLES (last {NEWS_DAYS} days, top {len(articles)} by Tavily score):",
+        f"RECENT NEWS ARTICLES (last {NEWS_DAYS} days, {len(articles)} sampled newest-first):",
     ]
     if not articles:
         parts.append("(no articles retrieved)")
@@ -140,17 +141,20 @@ async def run(state: FinaqState) -> dict:
     as_of_date = state.get("as_of_date")  # backtest mode if non-None
     errors: list[str] = []
 
-    # Step 1 — resolve company name (cached yfinance call) + Tavily search
+    # Step 1 — resolve company name (cached yfinance call) + Finnhub search
     company_name = await asyncio.to_thread(_company_name_for, ticker, as_of=as_of_date)
     try:
         articles = await asyncio.to_thread(
-            search_news, ticker, company_name,
-            days=NEWS_DAYS, max_results=NEWS_MAX_RESULTS,
+            search_news,
+            ticker,
+            company_name,
+            days=NEWS_DAYS,
+            max_results=NEWS_MAX_RESULTS,
             as_of=as_of_date,
         )
     except Exception as e:
-        logger.error(f"[news] Tavily search failed for {ticker}: {e}")
-        errors.append(f"tavily: {e}")
+        logger.error(f"[news] Finnhub search failed for {ticker}: {e}")
+        errors.append(f"finnhub: {e}")
         articles = []
 
     # Step 2 — LLM extraction
@@ -165,7 +169,11 @@ async def run(state: FinaqState) -> dict:
     else:
         try:
             llm_out = await asyncio.to_thread(
-                _call_llm, ticker, company_name, thesis, articles,
+                _call_llm,
+                ticker,
+                company_name,
+                thesis,
+                articles,
                 as_of_date=as_of_date,
             )
             out = NewsOutput.model_validate(llm_out)

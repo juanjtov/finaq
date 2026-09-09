@@ -160,7 +160,7 @@ def _stub_full_state() -> dict:
             ],
             "evidence": [
                 {
-                    "source": "tavily",
+                    "source": "finnhub",
                     "url": "https://example.com/msft-capex",
                     "as_of": "2026-04-15",
                 }

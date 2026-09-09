@@ -88,7 +88,7 @@ Hard rule: **never hardcode model strings inside agent files**. Model strings li
 
 Python 3.11+. **`requirements.txt` is the dependency manifest** — every new top-level import must be added there in the same change. `pyproject.toml` is kept *only* for tool config (ruff / black / pytest), not for deps. Install via `pip install -r requirements.txt` (or `uv pip install -r requirements.txt` if `uv` is available).
 
-Required packages (Phase 0): `langgraph`, `langchain-openai`, `openai` (for the OpenAI-compatible OpenRouter client), `pinecone`, `beautifulsoup4`, `tiktoken`, `yfinance`, `sec-edgar-downloader`, `streamlit`, `numpy`, `pandas`, `reportlab`, `pydantic`, `python-dotenv`, `tavily-python`, `tenacity`, `httpx`, `matplotlib`.
+Required packages (Phase 0): `langgraph`, `langchain-openai`, `openai` (for the OpenAI-compatible OpenRouter client), `pinecone`, `beautifulsoup4`, `tiktoken`, `yfinance`, `sec-edgar-downloader`, `streamlit`, `numpy`, `pandas`, `reportlab`, `pydantic`, `python-dotenv`, `tenacity`, `httpx`, `matplotlib`.
 
 Phase 1 additions: `notion-client`, `python-telegram-bot`.
 
@@ -96,7 +96,7 @@ Phase 1 additions: `notion-client`, `python-telegram-bot`.
 ```
 # API keys
 OPENROUTER_API_KEY=sk-or-v1-...
-TAVILY_API_KEY=tvly-...
+FINNHUB_API_KEY=...
 PINECONE_API_KEY=pcsk_...
 SEC_EDGAR_USER_AGENT="FINAQ/0.1 juan@example.com"
 
@@ -247,7 +247,7 @@ RAG over the ticker's namespace in the Pinecone filings index. Three subqueries 
 
 ### 9.3 News (`agents/news.py`)
 
-Tavily search for `{ticker} {company_name}` over the past 90 days. Top 15 results summarized into 5-7 catalysts and concerns, each tagged `bull|bear|neutral` and linked back to the source URL. Output:
+Finnhub company news (`data/finnhub.py`) over the past 90 days: the window is fetched as log-spaced slices, only articles that name the ticker or company are kept, 15 are sampled newest-first with an equal share per slice, and their bodies are fetched from the publisher. Chosen 2026-09-08 after Tavily's free quota ran out; see ARCHITECTURE §3.11. Results summarized into 5-7 catalysts and concerns, each tagged `bull|bear|neutral` and linked back to the source URL. Output:
 
 ```python
 {"news": {"summary": str, "catalysts": list[dict], "concerns": list[dict], "evidence": list[dict]}}
@@ -462,7 +462,7 @@ Built on top of a working Phase 0:
 | Notion memory of record | `data/notion.py` — read thesis notes, write reports, write/update alerts. One-way: read notes, write reports/alerts. |
 | Bidirectional Telegram bot | `data/telegram.py` + `agents/router.py`. Slash commands (`/drill`, `/analyze`, `/scan`, `/note`, `/thesis`, `/help`) plus an LLM-backed natural-language fallback (model resolved via `MODEL_ROUTER`) for free-text requests. |
 | Ad-hoc industry analysis | `agents/adhoc_thesis.py` synthesizes a `Thesis` from a free-text topic on demand and runs the existing drill-in graph against the top 1–3 anchor tickers. Discovery-lite. |
-| Continuous Triage | `agents/triage.py` (LLM-backed; model resolved via `MODEL_TRIAGE`) + `scripts/run_triage.py` + `launchd` plist. Polls EDGAR + Tavily across all theses and pushes alerts to Telegram + Notion. |
+| Continuous Triage | `agents/triage.py` (LLM-backed; model resolved via `MODEL_TRIAGE`) + `scripts/run_triage.py` + `launchd` plist. Polls EDGAR + Finnhub across all theses and pushes alerts to Telegram + Notion. |
 | Public reachability | Decided at Step 12: Cloudflare Tunnel (free, laptop-awake) vs. DigitalOcean droplet (`$6/mo`, always-on) vs. inline-only Telegram (no dashboard link). |
 
 ### 15.3 Out of scope (deferred to Phase 2+)
@@ -502,14 +502,14 @@ Do not build these in Phase 0 or Phase 1, even if they seem easy:
 ### 16.4 Logging and errors
 
 - **Logging:** stdlib `logging` configured in `utils/__init__.py`. Each agent logs its model, token count, and elapsed time. No `print()` outside `ui/`.
-- **Error handling:** wrap every external call (yfinance, Tavily, OpenRouter, EDGAR, Notion, Telegram) in `tenacity` retry with `wait_exponential` and 3 attempts. If all fail, return a partial state with an `errors` field — never crash the whole graph.
+- **Error handling:** wrap every external call (yfinance, Finnhub, OpenRouter, EDGAR, Notion, Telegram) in `tenacity` retry with `wait_exponential` and 3 attempts. If all fail, return a partial state with an `errors` field — never crash the whole graph.
 
 ### 16.5 Testing rigor (component-level gate)
 
 A step is not done until its test plan passes end to end:
 
 - Each step in the build plan has a **Test plan** with multiple named checks: happy path, edge cases, failure paths, and a manual verification pass where applicable.
-- `pytest` runs unit-style tests on every commit. Tests against external services (OpenRouter, EDGAR, yfinance, Tavily, Notion, Telegram) are gated behind `pytest -m integration` and required to pass before a step's gate.
+- `pytest` runs unit-style tests on every commit. Tests against external services (OpenRouter, EDGAR, yfinance, Finnhub, Notion, Telegram) are gated behind `pytest -m integration` and required to pass before a step's gate.
 - Failures are root-caused and fixed; never `xfail` or skip a failing test to advance.
 - Post the full test output in chat after every step and wait for the user's explicit "proceed" before starting the next.
 
