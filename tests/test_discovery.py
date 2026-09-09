@@ -263,3 +263,70 @@ async def test_ticker_mode_forces_seed_into_universe(stub, monkeypatch):
     assert res.error is None
     assert "NVDA" in res.thesis.universe
     assert res.thesis.anchor_tickers[0] == "NVDA"
+
+
+async def test_universe_capped_at_eight(stub, monkeypatch):
+    def _big(*, topic, ticker):
+        return (
+            {
+                "name": "Big",
+                "summary": "s",
+                "anchor_tickers": ["NVDA", "VRT"],
+                "universe": [
+                    "NVDA",
+                    "VRT",
+                    "CEG",
+                    "ETN",
+                    "PWR",
+                    "GEV",
+                    "VST",
+                    "TLN",
+                    "SMCI",
+                    "DELL",
+                    "AMD",
+                    "MSFT",
+                ],
+                "relationships": [],
+                "valuation": _VALUATION,
+                "material_thresholds": [],
+            },
+            "raw",
+        )
+
+    monkeypatch.setattr(disc, "_propose", _big)
+    res = await disc.discover(topic="big", db_path=stub / "state.db")
+    assert res.error is None
+    assert disc.MAX_UNIVERSE == 8
+    assert len(res.thesis.universe) == 8 and res.n_universe == 8
+    # Anchors are kept first, so they always survive the cut.
+    assert "NVDA" in res.thesis.universe and "VRT" in res.thesis.universe
+    assert set(res.thesis.anchor_tickers) <= set(res.thesis.universe)
+
+
+async def test_autoingest_off_by_default(stub, monkeypatch):
+    ingested: list[str] = []
+
+    async def _fake_ingest(t, **kwargs):
+        ingested.append(t)
+        return 0
+
+    monkeypatch.setattr("scripts.ingest_universe.ingest_ticker", _fake_ingest)
+    monkeypatch.setattr(disc.vectors, "has_ticker", lambda t: False)
+    res = await disc.discover(topic="ai power", db_path=stub / "state.db")  # ingest defaults False
+    assert res.error is None
+    assert ingested == []  # never auto-ingests unless explicitly asked
+
+
+async def test_autoingest_ingests_missing_when_enabled(stub, monkeypatch):
+    ingested: list[str] = []
+
+    async def _fake_ingest(t, **kwargs):
+        ingested.append(t)
+        return 3
+
+    monkeypatch.setattr("scripts.ingest_universe.ingest_ticker", _fake_ingest)
+    # VRT is already in the manifest; the rest are missing.
+    monkeypatch.setattr(disc.vectors, "has_ticker", lambda t: t == "VRT")
+    res = await disc.discover(topic="ai power", db_path=stub / "state.db", ingest=True)
+    assert res.error is None
+    assert set(ingested) == {"NVDA", "CEG", "FAKE"}  # missing ones ingested, VRT skipped

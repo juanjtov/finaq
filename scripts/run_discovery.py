@@ -32,9 +32,17 @@ async def _main() -> int:
         action="store_true",
         help="Rebuild even if a thesis for this input is already cached on disk.",
     )
+    parser.add_argument(
+        "--ingest",
+        action="store_true",
+        help="Download + embed SEC filings for un-ingested universe tickers before "
+        "grounding (slower + embedding cost, but far stronger first-party evidence).",
+    )
     args = parser.parse_args()
 
-    result = await discover(topic=args.topic, ticker=args.ticker, force_refresh=args.force)
+    result = await discover(
+        topic=args.topic, ticker=args.ticker, force_refresh=args.force, ingest=args.ingest
+    )
     if result.error or result.thesis is None:
         print(f"discovery failed: {result.error}", file=sys.stderr)
         return 1

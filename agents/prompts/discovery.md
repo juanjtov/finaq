@@ -48,8 +48,9 @@ SEC filings and news of the two companies before it is kept. So:
 
 1. **All tickers UPPERCASED.** Real, currently-tradeable US stock symbols only.
 2. **anchor_tickers ⊆ universe.** Every anchor must also appear in `universe`.
-3. **Universe size: 6–15 tickers.** Enough to span the halo; not so many that
-   drill-in budget is wasted on weak picks.
+3. **Universe size: 6–8 tickers.** Enough to span the halo; kept tight so
+   drill-in budget isn't wasted on weak picks. (Hard-capped at 8 — anything
+   beyond is dropped, so put the strongest picks first.)
 4. **Anchor count: 1–3.** The most representative / pure-play names — the
    center(s) of the halo.
 5. **Relationship endpoints MUST be in `universe`.** Never reference a ticker
@@ -73,7 +74,7 @@ SEC filings and news of the two companies before it is kept. So:
 
 ## Topic mode vs Ticker mode
 
-- **TOPIC mode** (e.g. "AI datacenter power"): pick 6–15 representative public
+- **TOPIC mode** (e.g. "AI datacenter power"): pick 6–8 representative public
   companies spanning the value chain, with the 1–3 most pure-play names as
   anchors. Build the relationship web across the whole universe.
 - **TICKER mode** (e.g. "NVDA"): the input ticker MUST be the first anchor and
@@ -99,7 +100,7 @@ User input: "AI datacenter power"
   "name": "AI datacenter power (discovery)",
   "summary": "Public companies positioned to win as AI datacenter electricity demand outpaces grid supply. The structural bet is that the power and cooling layer is the binding constraint on AI buildout, so utilities with hyperscaler PPAs, grid-equipment makers, and thermal-management suppliers capture durable, capex-backed demand ahead of the compute layer.",
   "anchor_tickers": ["VRT", "CEG"],
-  "universe": ["VRT", "CEG", "GEV", "ETN", "PWR", "NVDA", "SMCI", "DELL", "TLN", "VST"],
+  "universe": ["VRT", "CEG", "GEV", "ETN", "PWR", "NVDA", "SMCI", "VST"],
   "relationships": [
     {"from": "NVDA", "to": "VRT", "type": "customer", "note": "NVDA reference rack designs specify Vertiv liquid-cooling for GB200 NVL72"},
     {"from": "SMCI", "to": "VRT", "type": "customer", "note": "SMCI direct-liquid-cooled racks integrate Vertiv CDUs"},
