@@ -138,14 +138,15 @@ gate.
 ### Discovery agent enhancements (§13 shipped 2026-09-09)
 
 The propose-then-verify Discovery agent (`agents/discovery.py`) + the persistent
-halo-graph store (`data/graph.py`, `state.db` schema v8) shipped. These are the
-deferred follow-ups, each with a trigger.
+halo-graph store (`data/graph.py`, `state.db` schema v8) shipped, and the
+Streamlit halo-graph visualisation page (`ui/pages/halo_graph.py`, ARCHITECTURE
+§13.7) shipped 2026-09-09 once the Mission Control UI work had merged. These are
+the remaining deferred follow-ups, each with a trigger.
 
 | Item | Trigger | Effort |
 |---|---|---|
 | **Per-edge LLM adjudication over retrieved evidence** — replace the co-mention heuristic with one batched LLM call that reads the retrieved filing/news snippets and confirms each edge's *direction + type*, not just co-occurrence. | Grounding visibly keeps a co-mentioned-but-unrelated pair, OR prunes a real relationship that filings/news phrase indirectly. | ~2-3h: one extra cheap-tier call (`MODEL_JUDGE`) per run over the already-retrieved evidence; stub in unit tests like the proposal seam. |
 | **Universe-size eval suite** — does a wider universe (beyond the 8-ticker cap, `MAX_UNIVERSE`) discover better winners, or just add noise? Run Discovery on a fixed set of topics at several caps (e.g. 8 / 12 / 15) and score each resulting universe — grounded-edge rate, plus drill-in outcome quality (Monte-Carlo margin-of-safety spread + risk) on the extra tickers — to decide whether the cap should move. | Juan wants the 8-cap justified with data, OR a discovered thesis is visibly missing an obvious player a wider cap would have caught. | ~1 day: a `scripts/eval_universe_size.py` + a fixed topic set; reuse the drill-in graph for outcome scoring. Now unblocked by opt-in filings auto-ingest (shipped 2026-09-09) so wider universes actually ground. |
-| **Streamlit halo-graph visualisation page** — render `graph_nodes`/`graph_edges` for a discovered thesis as an interactive node-link diagram, confidence + citations on hover. | Deliberately kept out of the shipping PR to stay reviewable and avoid colliding with in-flight Mission Control UI work; build once that work has merged. | ~4-6h: a `ui/pages/` page reading `data.graph`; reuse the sage/parchment palette. |
 | **Notion halo-graph mirror + bidirectional sync** — mirror the discovered graph into a Notion "Relationships" DB as the human view/edit surface, then re-read edits as inputs. Folds into the Phase 2 bidirectional-Notion item above. | The user wants to eyeball / hand-edit a discovered graph outside the dashboard. | Depends on the bidirectional-Notion decision; pin `notion-client` first (see §Notion lessons). |
 
 ### CIO meta-layer enhancements (within Step 11 already shipped)
