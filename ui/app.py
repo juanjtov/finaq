@@ -257,16 +257,23 @@ def render_sidebar() -> dict:
         st.sidebar.error("No theses found. Add JSON files to /theses/.")
         return {"ticker": "", "thesis_slug": ""}
 
-    # Read query params first — Telegram links land here.
+    # Read query params first — Telegram links land here. After that, the
+    # last selection this browser tab made (`_persist_*`). Streamlit drops
+    # widget-keyed state (`sidebar_thesis`, `sidebar_ticker`) whenever the
+    # user visits a page that doesn't render the widget, so without the
+    # mirror a trip to Mission Control and back reset the sidebar to the
+    # first thesis and hid the in-flight drill-in's running panel.
     params = st.query_params
-    default_thesis = params.get("thesis") or slugs[0]
+    default_thesis = params.get("thesis") or st.session_state.get("_persist_thesis") or slugs[0]
+    if default_thesis not in slugs:
+        default_thesis = slugs[0]
+    if "_thesis_pick" in st.session_state:
+        st.session_state["sidebar_thesis"] = st.session_state.pop("_thesis_pick")
+    if "sidebar_thesis" not in st.session_state:
+        st.session_state["sidebar_thesis"] = default_thesis
 
-    thesis_slug = st.sidebar.selectbox(
-        "Thesis",
-        slugs,
-        index=slugs.index(default_thesis) if default_thesis in slugs else 0,
-        key="sidebar_thesis",
-    )
+    thesis_slug = st.sidebar.selectbox("Thesis", slugs, key="sidebar_thesis")
+    st.session_state["_persist_thesis"] = thesis_slug
 
     # Resolve the active thesis once so we can default + render universe.
     thesis = load_thesis(thesis_slug)
@@ -278,7 +285,11 @@ def render_sidebar() -> dict:
     # correct pattern is to write `session_state[key]` BEFORE the widget
     # is created (which Streamlit treats as initialization), then call
     # the widget WITHOUT a `value=` parameter.
-    seed_ticker = (params.get("ticker") or (anchors[0] if anchors else "")).upper()
+    seed_ticker = (
+        params.get("ticker")
+        or st.session_state.get("_persist_ticker")
+        or (anchors[0] if anchors else "")
+    ).upper()
     if "sidebar_ticker" not in st.session_state:
         st.session_state["sidebar_ticker"] = seed_ticker
 
@@ -294,6 +305,7 @@ def render_sidebar() -> dict:
         st.session_state["sidebar_ticker"] = st.session_state.pop("_chip_pick")
 
     ticker = st.sidebar.text_input("Ticker", key="sidebar_ticker").upper()
+    st.session_state["_persist_ticker"] = ticker
 
     # Universe chips — anchors highlighted, click to select.
     if universe:
@@ -952,8 +964,30 @@ def render_report(state: dict) -> None:
     render_pdf_download(state)
 
 
+def _render_inflight_banner(ticker: str, thesis_slug: str) -> None:
+    """List background drill-ins that are NOT the current sidebar selection,
+    with a one-click jump to each. Runs live in the server process, so a run
+    started from another tab (or before a page change) shows up here."""
+    from ui._runner import active_runs
+
+    others = [
+        (t, s, secs) for t, s, secs in active_runs() if (t, s) != (ticker.upper(), thesis_slug)
+    ]
+    if not others:
+        return
+    for t, s, secs in others:
+        col_msg, col_btn = st.columns([4, 1])
+        col_msg.info(f"🏃 Drill-in running in the background: **{t} × {s}** · {int(secs)}s")
+        if col_btn.button("Show", key=f"show_inflight_{t}_{s}"):
+            st.session_state["_thesis_pick"] = s
+            st.session_state["_chip_pick"] = t
+            st.rerun()
+
+
 def main() -> None:
     sel = render_sidebar()
+    if sel.get("thesis_slug"):
+        _render_inflight_banner(sel.get("ticker") or "", sel["thesis_slug"])
 
     # Route the user's action
     if sel.get("run_scan"):

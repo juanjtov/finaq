@@ -83,6 +83,16 @@ def is_running(ticker: str, thesis_slug: str) -> bool:
     return rec is not None and rec["thread"] is not None and rec["thread"].is_alive()
 
 
+def active_runs() -> list[tuple[str, str, float]]:
+    """Every drill-in currently in flight as (ticker, thesis_slug, elapsed_s)."""
+    now = time.time()
+    return [
+        (t, s, now - rec["started_at"])
+        for (t, s), rec in list(_active_runs.items())
+        if rec["thread"] is not None and rec["thread"].is_alive()
+    ]
+
+
 def get_run_status(ticker: str, thesis_slug: str) -> dict | None:
     """Return the full record for the most recent run of this ticker × thesis,
     or None if no run has been kicked off this session."""
