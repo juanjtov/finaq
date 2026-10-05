@@ -21,7 +21,7 @@ Multi-agent drill-in over SEC filings, fundamentals, and news — orchestrated w
 
 **The approach.** A LangGraph drill-in. Three workers — Fundamentals, Filings, News — fan out in parallel. A Risk node synthesises cross-modally, looking for convergent signals (≥2 agents agree), threshold breaches against your thesis, and divergent evidence. A 10,000-sample Monte Carlo runs in parallel with Risk. A Synthesis node produces a 9-section markdown report with a plain-English "What this means" section, a sized action recommendation, and a forward-looking watchlist. Every claim carries an `Evidence` with `source`, `accession`, `url`, and an `as_of` date.
 
-**Why it converts.** Locally runnable on a laptop — no cloud, no daemon, no telemetry. One env var per agent (`MODEL_FUNDAMENTALS`, `MODEL_FILINGS`, …) — swap Claude / GPT / Gemini / Llama in seconds without code changes. ~$0.05–0.15 per drill-in in API costs at default models. Apache 2.0.
+**Why it's practical.** Locally runnable on a laptop — no cloud, no daemon, no telemetry. One env var per agent (`MODEL_FUNDAMENTALS`, `MODEL_FILINGS`, …) — swap Claude / GPT / Gemini / Llama in seconds without code changes. ~$0.05–0.15 per drill-in in API costs at default models. Apache 2.0.
 
 ---
 
@@ -134,7 +134,7 @@ The hybrid wins both ways: semantic search catches paraphrase, BM25 catches disc
 
 ## Evaluation: three named tiers
 
-This is the section that earns trust with the technical reader. Most LLM apps ship with no eval. FINAQ has 9,829 lines of test code across 13+ suites organised into three explicit tiers:
+Most LLM apps ship with no eval. FINAQ has 20,000+ lines of test code across 59 test files, organised into three explicit tiers:
 
 **Tier 1 — Deterministic.** Substring faithfulness on the first 60 alphanumeric characters of every quote against retrieved chunks (`utils/rag_eval.py`). Citation-accession existence check. Recall@K on 8 hand-curated golden queries (`tests/eval/golden_queries.py`) including "Hopper architecture data-center demand", "AI Diffusion export control rule impact", "Mellanox networking technology integration", "supply constraints Blackwell ramp". Always-on, zero LLM cost. Bar: ≥75% recall@K. Persists to `data_cache/eval/runs/{timestamp}__golden_recall_at_k.json`.
 
@@ -197,7 +197,6 @@ The synthesis report has a fixed 9-section structure, every section anchored to 
 
 Plus: PDF export with the brand palette (sage `#2D4F3A` / parchment `#F4ECDC`), Monte Carlo histogram embedded, section structure matching the markdown.
 
-> **TODO** screenshots and a 10-second GIF of a real drill-in will land at `docs/screenshots/dashboard.png` and `docs/screenshots/run.gif`. A sample anonymised PDF will land at `docs/examples/sample_report.pdf`. PRs welcome.
 
 ---
 
@@ -242,7 +241,7 @@ See [`docs/POSTPONED.md`](./docs/POSTPONED.md) for the full deferred list with e
 A README readers can trust is one that admits gaps:
 
 - **Filing scope.** 10-K + 10-Q (domestic) and 20-F + 6-K (foreign-issuer) supported. No 8-K (current reports) yet. Only the primary document of each submission is parsed, so a typical 10-K runs a few hundred chunks; a 6,000-chunk safety cap per filing remains for anything malformed. The Filings agent's three subqueries fall back to no-item-filter retrieval when the primary item codes don't match (10-K's 1A/7 vs 20-F's 3.D/5).
-- **Sector multiples.** `data/sector_multiples.json` is hand-curated from Damodaran NYU Stern and refreshed quarterly (next refresh due 2026-07-28). No live feed yet.
+- **Sector multiples.** `data/sector_multiples.json` is hand-curated from Damodaran NYU Stern and refreshed quarterly. No live feed yet.
 - **Cross-encoder re-ranking** is intentionally excluded — adds latency and cost beyond what RRF already buys you.
 - **Risk does not feed back into Monte Carlo.** Phase 0 simplification — Risk and MC are independent, both feeding Synthesis side-by-side. Future work could let MC tail-risk calibrate risk thresholds.
 - **Single-user, no auth, no multi-tenancy.** Built for one investor. Multi-tenant deployments would require auth, isolation, and rate-limit layers that don't exist.
@@ -261,7 +260,7 @@ data/          edgar.py, yfin.py, vectors.py, finnhub.py, treasury.py, state.py,
 theses/        hand-written thesis JSONs — ai_cake, nvda_halo, construction, general (+ adhoc_*, archive/)
 ui/            Streamlit app + 7 pages (mission_control, new_thesis, direct_agent, methodology, architecture, run_inspector, theses_admin)
 utils/         schemas, monte_carlo, charts, pdf_export, models, openrouter, rag_eval, rag_ragas, live_eval
-tests/         12k+ lines — Tier 1 (deterministic), Tier 2 (LLM-judge), Tier 3 (RAGAS), CIO workflow + RAG eval
+tests/         20k+ lines — Tier 1 (deterministic), Tier 2 (LLM-judge), Tier 3 (RAGAS), CIO workflow + RAG eval
   eval/        golden query datasets — golden_queries.py, news_golden_queries.py, cio_reports_golden_queries.py
 docs/          ARCHITECTURE.md (decisions), FINANCE_ASSUMPTIONS.md (math), POSTPONED.md (deferred)
   diagrams/    finaq_platform_v3.png (hero), graph.mmd, finaq_components.svg
