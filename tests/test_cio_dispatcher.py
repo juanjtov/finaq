@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -192,9 +193,8 @@ def test_main_propagates_cycle_failure_as_exit_1(
 
 def test_run_sweeps_stale_rows_before_the_cycle(isolated_db, stub_cycles, stub_notify):
     """A graph run left `running` by a killed process (here: too old for the
-    window) is closed as failed before the cycle starts."""
-    import sqlite3
-
+    window, with no node row to vouch for a live pid) is closed as failed
+    before the cycle starts."""
     stale = state_db.start_graph_run("AAA", "t")
     with sqlite3.connect(isolated_db) as conn:
         conn.execute(
@@ -210,8 +210,8 @@ def test_run_attaches_the_notify_span_to_the_latest_cycle(isolated_db, stub_cycl
     """The stubbed plan carries no cio_run_id, so the dispatcher falls back to
     the most recent cycle row; without any cycle no span is written."""
     assert cio_dispatcher.main(["--mode", "heartbeat"]) == 0
-    with_no_cycle = state_db.recent_cio_runs()
-    assert with_no_cycle == []
+    with sqlite3.connect(isolated_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 0
 
     rid = state_db.start_cio_run("heartbeat")
     state_db.finish_cio_run(rid, "completed")

@@ -1280,13 +1280,25 @@ Curated theses were 3–4 months unedited with no signal anywhere.
   `run_id=cio_run_id`; 982 rows were `''` / NULL before). `graph_runs.source`
   says who started a run (dashboard | cio | telegram | backtest | cli).
   `_connect` sets `journal_mode=WAL` + `busy_timeout=5000` so the 1 s reader
-  and the three writer processes share the file, and `sweep_stale_runs`
-  closes `running` rows whose pid is gone or that outlived a 30-minute
-  window (four such graph_runs existed when this shipped).
+  and the three writer processes share the file. `sweep_stale_runs` closes
+  `running` rows whose process is gone: node rows and CIO cycles carry a
+  `pid` (so do `cio_runs`, added after review showed 4 of 320 real cycles
+  and 2 of 163 drill-ins ran longer than the plan's 30-minute window), a
+  graph run follows the pids of its nodes, and children follow a swept
+  parent; the 30-minute window applies only to rows that have no pid to
+  ask, and a 24-hour hard cap catches a reused pid. Four stale graph_runs
+  and one cycle existed when this shipped. `init_db` remembers the files it
+  has migrated in this process, so the sweeper the Live tab runs each second
+  does not re-run the schema script or re-stamp `meta` on every poll.
   `live_snapshot()` / `run_snapshot()` build the single state document the
-  Live tab and replay render. Measured on a copy of the real DB: one
-  drill-in adds ≈ 0.45 MB (≈ 400 KB of prompt text). LangSmith stays
-  optional; the local store is now enough on its own for replay.
+  Live tab and replay render; both are pure reads (a pre-v9 file reads as
+  empty until the first write migrates it) and the Live tab calls the
+  sweeper itself before polling. Measured on a copy of the real DB: one
+  drill-in adds ≈ 0.45 MB (≈ 400 KB of prompt text). With WAL on, a backup
+  of `data_cache/` must copy `state.db-wal` along with `state.db` or use
+  `sqlite3 state.db ".backup out.db"`; a bare copy of the main file is a
+  consistent snapshot of the last checkpoint only. LangSmith stays optional;
+  the local store is now enough on its own for replay.
 - **Why not Postgres / DataDog / Sentry**: single-user single-box. Adding
   hosted observability requires either an SaaS account or a daemon — both
   multiply maintenance. SQLite + LangSmith covers the operational and

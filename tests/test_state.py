@@ -6,8 +6,8 @@ data_cache/state.db (and so they're isolated from each other).
 
 from __future__ import annotations
 
+import asyncio
 import os
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -1333,7 +1333,15 @@ def test_migrating_a_copy_of_the_real_state_db_keeps_every_row(tmp_path: Path):
     if source is None:
         pytest.skip("no data_cache/state.db here — set FINAQ_MIGRATION_FIXTURE_DB to point at one")
     copy = tmp_path / "state_copy.db"
-    shutil.copyfile(source, copy)
+    # SQLite's online backup copies a consistent snapshot, WAL content included,
+    # and never writes the source (opened read-only).
+    src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    dst = sqlite3.connect(copy)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
     source_mtime = source.stat().st_mtime_ns
     before = _row_counts(copy)
     assert before, "fixture DB has no tables"
@@ -1743,21 +1751,39 @@ def test_sweep_stale_runs_closes_dead_process_rows_and_keeps_live_ones(tmp_path:
     assert all(v == 0 for v in st.sweep_stale_runs(db_path=db).values())
 
 
-def test_sweep_stale_runs_uses_the_time_window_when_no_pid_says_otherwise(tmp_path: Path):
+_SWEEP_TABLES = (
+    ("graph_runs", "run_id", "started_at"),
+    ("node_runs", "id", "started_at"),
+    ("cio_runs", "run_id", "started_at"),
+    ("spans", "id", "started_at"),
+    ("llm_calls", "id", "ts"),
+)
+
+
+def _backdate_everything(db: Path, iso: str) -> None:
+    with sqlite3.connect(db) as conn:
+        for table, _, col in _SWEEP_TABLES:
+            conn.execute(f"UPDATE {table} SET {col} = ?", (iso,))
+
+
+def test_sweep_trusts_a_live_pid_and_uses_the_window_only_without_one(tmp_path: Path):
+    """Real drill-ins and heartbeats exceed 30 minutes, so age alone never
+    closes a row whose process is alive. Strip the pids (pre-v9 rows) and the
+    window decides, children following their parents."""
     db = tmp_path / "t.db"
     run = st.start_graph_run("AAA", "t", db_path=db)
-    node = st.start_node_run(run, "news", db_path=db)  # alive pid, but far too old
-    cycle = st.start_cio_run("heartbeat", db_path=db)
-    span_id = st.start_span("cio_run", cycle, "decide", db_path=db)
-    call = st.start_llm_call(run_id=None, node="cio.planner", model="m", db_path=db)
-    old = _hours_ago(2)
-    with sqlite3.connect(db) as conn:
-        conn.execute("UPDATE graph_runs SET started_at = ?", (old,))
-        conn.execute("UPDATE node_runs SET started_at = ?", (old,))
-        conn.execute("UPDATE cio_runs SET started_at = ?", (old,))
-        conn.execute("UPDATE spans SET started_at = ?", (old,))
-        conn.execute("UPDATE llm_calls SET ts = ?", (old,))
+    node = st.start_node_run(run, "fundamentals", db_path=db)  # this process → alive
+    cycle = st.start_cio_run("heartbeat", db_path=db)  # this process → alive
+    span_id = st.start_span("cio_run", cycle, "drill", label="AAA", db_path=db)
+    call = st.start_llm_call(run_id=run, node="fundamentals", model="m", db_path=db)
+    assert _one(db, "SELECT pid FROM cio_runs WHERE run_id = ?", cycle)["pid"] == os.getpid()
+    _backdate_everything(db, _hours_ago(2))
 
+    assert all(v == 0 for v in st.sweep_stale_runs(minutes=30, db_path=db).values())
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE node_runs SET pid = NULL")
+        conn.execute("UPDATE cio_runs SET pid = NULL")
     assert st.sweep_stale_runs(minutes=30, db_path=db) == {
         "node_runs": 1,
         "graph_runs": 1,
@@ -1765,38 +1791,135 @@ def test_sweep_stale_runs_uses_the_time_window_when_no_pid_says_otherwise(tmp_pa
         "spans": 1,
         "llm_calls": 1,
     }
-    assert st.get_graph_run(run, db_path=db)["status"] == "failed"
-    assert _one(db, "SELECT status FROM node_runs WHERE id = ?", node)["status"] == "failed"
-    assert st.recent_cio_runs(db_path=db)[0]["status"] == "failed"
-    assert _one(db, "SELECT status FROM spans WHERE id = ?", span_id)["status"] == "failed"
-    assert _one(db, "SELECT status FROM llm_calls WHERE id = ?", call)["status"] == "failed"
+    keys = {
+        "graph_runs": run,
+        "node_runs": node,
+        "cio_runs": cycle,
+        "spans": span_id,
+        "llm_calls": call,
+    }
+    for table, key_col, _ in _SWEEP_TABLES:
+        row = _one(db, f"SELECT status, error FROM {table} WHERE {key_col} = ?", keys[table])
+        assert (row["status"], row["error"]) == ("failed", st.STALE_ERROR), table
 
 
-def test_sweep_leaves_a_live_cio_cycle_and_its_steps_alone(tmp_path: Path):
-    """An old cycle that is still opening spans is alive; its running span and
-    the planner call attached to it stay. Only a cycle with no step inside the
-    window is swept, and then its running children go with it."""
+def test_sweep_hard_cap_closes_even_a_live_pid(tmp_path: Path):
+    """Past STALE_MAX_MINUTES a running row is closed regardless of its pid,
+    which may belong to an unrelated process by then."""
+    db = tmp_path / "t.db"
+    run = st.start_graph_run("AAA", "t", db_path=db)
+    st.start_node_run(run, "news", db_path=db)
+    st.start_cio_run("heartbeat", db_path=db)
+    _backdate_everything(db, _hours_ago(st.STALE_MAX_MINUTES / 60 + 1))
+    assert st.sweep_stale_runs(db_path=db) == {
+        "node_runs": 1,
+        "graph_runs": 1,
+        "cio_runs": 1,
+        "spans": 0,
+        "llm_calls": 0,
+    }
+
+
+def test_sweep_follows_a_dead_cycle_down_to_its_steps_and_calls(tmp_path: Path):
+    """A cycle whose process is gone is swept with its running span and the
+    planner call attached to it; a live cycle keeps both however old. A pre-v9
+    cycle (no pid) counts as alive while it keeps opening steps."""
     db = tmp_path / "t.db"
     old = _hours_ago(2)
     alive = st.start_cio_run("heartbeat", db_path=db)
-    with sqlite3.connect(db) as conn:
-        conn.execute("UPDATE cio_runs SET started_at = ? WHERE run_id = ?", (old, alive))
-    st.start_span("cio_run", alive, "decide", label="NVDA", db_path=db)  # fresh step
-    st.start_llm_call(run_id=alive, node="cio.planner", model="m", db_path=db)
-
-    assert all(v == 0 for v in st.sweep_stale_runs(minutes=30, db_path=db).values())
-
+    alive_span = st.start_span("cio_run", alive, "drill", label="NVDA", db_path=db)
+    alive_call = st.start_llm_call(run_id=alive, node="cio.planner", model="m", db_path=db)
     dead = st.start_cio_run("heartbeat", db_path=db)
     dead_span = st.start_span("cio_run", dead, "drill", label="NVDA", db_path=db)
     dead_call = st.start_llm_call(run_id=dead, node="cio.planner", model="m", db_path=db)
+    _backdate_everything(db, old)
     with sqlite3.connect(db) as conn:
-        conn.execute("UPDATE cio_runs SET started_at = ? WHERE run_id = ?", (old, dead))
-        conn.execute("UPDATE spans SET started_at = ? WHERE id = ?", (old, dead_span))
+        conn.execute("UPDATE cio_runs SET pid = ? WHERE run_id = ?", (_dead_pid(), dead))
+
     counts = st.sweep_stale_runs(minutes=30, db_path=db)
     assert counts == {"node_runs": 0, "graph_runs": 0, "cio_runs": 1, "spans": 1, "llm_calls": 1}
-    assert _one(db, "SELECT status FROM cio_runs WHERE run_id = ?", dead)["status"] == "failed"
-    assert _one(db, "SELECT status FROM cio_runs WHERE run_id = ?", alive)["status"] == "running"
+    for table, key, expected in (
+        ("cio_runs", dead, "failed"),
+        ("cio_runs", alive, "running"),
+    ):
+        assert _one(db, f"SELECT status FROM {table} WHERE run_id = ?", key)["status"] == expected
+    assert _one(db, "SELECT status FROM spans WHERE id = ?", dead_span)["status"] == "failed"
+    assert _one(db, "SELECT status FROM spans WHERE id = ?", alive_span)["status"] == "running"
     assert _one(db, "SELECT status FROM llm_calls WHERE id = ?", dead_call)["status"] == "failed"
+    assert _one(db, "SELECT status FROM llm_calls WHERE id = ?", alive_call)["status"] == "running"
+
+    legacy = st.start_cio_run("heartbeat", db_path=db)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE cio_runs SET pid = NULL, started_at = ? WHERE run_id = ?", (old, legacy)
+        )
+    st.start_span("cio_run", legacy, "decide", label="AAA", db_path=db)  # a fresh step
+    assert all(v == 0 for v in st.sweep_stale_runs(minutes=30, db_path=db).values())
+
+
+def test_sweep_closes_orphans_of_a_finished_parent_after_the_window(tmp_path: Path):
+    """A call (or span) left `running` after its parent finished — the phase-2
+    write failed — is closed once it is older than the window."""
+    db = tmp_path / "t.db"
+    run = st.start_graph_run("AAA", "t", db_path=db)
+    call = st.start_llm_call(run_id=run, node="news", model="m", db_path=db)
+    st.finish_graph_run(run, "completed", db_path=db)
+    assert st.sweep_stale_runs(minutes=30, db_path=db)["llm_calls"] == 0  # still fresh
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE llm_calls SET ts = ? WHERE id = ?", (_hours_ago(2), call))
+    assert st.sweep_stale_runs(minutes=30, db_path=db)["llm_calls"] == 1
+    assert _one(db, "SELECT status FROM llm_calls WHERE id = ?", call)["status"] == "failed"
+
+
+def test_init_db_is_cheap_after_the_first_call_in_a_process(tmp_path: Path):
+    """The Live tab's per-second sweeper goes through init_db; after the first
+    call in a process it must not write (another connection's data_version is
+    unchanged). A replaced file is migrated again."""
+    db = tmp_path / "t.db"
+    st.init_db(db)
+    probe = sqlite3.connect(db)
+    try:
+        before = probe.execute("PRAGMA data_version").fetchone()[0]
+        for _ in range(5):
+            st.init_db(db)
+            st.sweep_stale_runs(db_path=db)
+            st.live_snapshot(db_path=db)
+        assert probe.execute("PRAGMA data_version").fetchone()[0] == before
+    finally:
+        probe.close()
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(db) + suffix).unlink(missing_ok=True)
+    st.init_db(db)
+    assert V9_TABLES.issubset(_table_names(db))
+
+
+def test_live_snapshot_never_migrates_a_pre_v9_file(tmp_path: Path):
+    """Reads never migrate: a v8 file polled before any write reads as an empty
+    snapshot and stays at schema 8."""
+    db = tmp_path / "v8.db"
+    with sqlite3.connect(db) as conn:
+        conn.executescript(_V8_DDL)
+    snap = st.live_snapshot(db_path=db)
+    assert snap["runs"] == [] and snap["cio"] == [] and snap["recent"] == []
+    assert _one(db, "SELECT value FROM meta WHERE key = 'schema_version'")["value"] == "8"
+    assert not V9_TABLES & _table_names(db)
+
+
+async def test_span_records_a_cancelled_step_as_failed(tmp_path: Path):
+    """asyncio cancellation is not an Exception; the span must still close."""
+    db = tmp_path / "t.db"
+
+    async def step() -> None:
+        with st.span("cio_run", "c1", "drill", label="NVDA", db_path=db):
+            await asyncio.sleep(10)
+
+    task = asyncio.create_task(step())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    [row] = st.spans_for("cio_run", "c1", db_path=db)
+    assert (row["status"], row["error"]) == ("failed", "CancelledError")
 
 
 # --- v9 medians + run snapshot -----------------------------------------------

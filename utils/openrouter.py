@@ -131,7 +131,9 @@ def _install_telemetry_interceptor(client: Any) -> Any:
         """Phase 2 — close the row with tokens, cost, latency, the assistant
         message and status completed | failed. A lost trace row never breaks
         the call; when phase 1 failed we still land a one-shot row (schema v6
-        shape) so the run stays debuggable."""
+        shape) so the run stays debuggable. When phase 1 succeeded and THIS
+        update fails, the row stays `running` for the stale sweeper to close
+        — deliberately no one-shot fallback, which would duplicate the call."""
         import contextlib
 
         with contextlib.suppress(Exception):

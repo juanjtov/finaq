@@ -430,16 +430,18 @@ async def test_live_snapshot_shows_the_running_node_mid_run(monkeypatch, ai_cake
 async def test_parallel_workers_each_see_their_own_running_row(monkeypatch, ai_cake):
     """fundamentals / filings / news fan out together; each must find its own
     entry row in `running` while it works, and its siblings' rows already
-    opened (they all enter before any of them wakes from the sleep)."""
+    opened. A barrier holds every worker inside its node until all three have
+    entered, so the check does not depend on timing."""
     from agents import filings as filings_mod
     from agents import fundamentals as fundamentals_mod
     from agents import news as news_mod
 
     seen: dict[str, dict[str, str]] = {}
+    all_entered = asyncio.Barrier(3)
 
     def _spy(node: str):
         async def run(state):
-            await asyncio.sleep(0.05)  # let the sibling branches start
+            await all_entered.wait()
             run_id = state_db.current_run_id.get()
             seen[node] = {n["node"]: n["status"] for n in state_db.all_node_runs_for(run_id)}
             return _payload(node)

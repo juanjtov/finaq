@@ -108,7 +108,11 @@ def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
             }
             try:
                 if node_run_id is not None:
-                    # Phase 2: close the row opened at entry.
+                    # Phase 2: close the row opened at entry. If THIS write
+                    # fails (lock held > 5 s, disk full at exit) the row stays
+                    # `running` and the stale sweeper closes it later with
+                    # STALE_ERROR; the warning below carries the real cause.
+                    # Accepted: a duplicate one-shot row would be worse.
                     state_db.finish_node_run(
                         node_run_id,
                         "failed" if error_msg else "completed",

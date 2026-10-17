@@ -90,6 +90,11 @@ PROMPT_RETENTION_DAYS = _retention_days()
 # Error stamped on `running` rows that `sweep_stale_runs` closes.
 STALE_ERROR = "stale: process ended without finishing"
 
+# Hard cap for the stale sweeper: a `running` row older than this is closed
+# even when its pid is still alive (the pid may have been reused by an
+# unrelated process). Nothing in FINAQ runs a node or a cycle for a day.
+STALE_MAX_MINUTES = 24 * 60
+
 # Local-time hours of the scheduled CIO heartbeat; mirrors the
 # StartCalendarInterval in deploy/launchd/com.finaq.cio.plist. Only used to
 # compute `vitals.next_heartbeat` for the live view.
@@ -307,7 +312,11 @@ CREATE TABLE IF NOT EXISTS cio_runs (
     -- decide time (one cycle = one model). `total_cost_usd` is the sum of
     -- per-action LLM costs computed from MODEL_PRICING + response.usage.
     model_used      TEXT,
-    total_cost_usd  REAL NOT NULL DEFAULT 0.0
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    -- Schema v9 — the process running the cycle, so the stale sweeper can
+    -- tell a killed launchd job from a long heartbeat (cycles legitimately
+    -- exceed 30 minutes when they drill several tickers).
+    pid             INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS cio_actions (
@@ -400,15 +409,48 @@ def _connect(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+# Files this process has already migrated: (resolved path, inode) → SQLite's
+# schema cookie (`PRAGMA schema_version`, bumped by any CREATE / ALTER / DROP)
+# right after our migration. Every write path calls init_db, and since v9 so
+# does the stale sweeper the Live tab runs each second; without the memo each
+# call re-ran the whole CREATE/ALTER script and re-stamped meta — a write
+# transaction and a WAL fsync per idle poll. A replaced file (new inode) or
+# any DDL from elsewhere (cookie changed) is migrated again; the daily prune
+# check still runs on every call (reads only).
+_MIGRATED: dict[tuple[str, int], int] = {}
+
+
+def _migration_key(db_path: Path | None) -> tuple[str, int] | None:
+    target = Path(db_path) if db_path is not None else DB_PATH
+    try:
+        return (str(target.resolve()), target.stat().st_ino)
+    except OSError:
+        return None  # file does not exist yet → migrate
+
+
+def _schema_cookie(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA schema_version").fetchone()[0])
+
+
 def init_db(db_path: Path | None = None) -> None:
     """Create the schema if missing + apply forward-only migrations.
-    Idempotent — calling twice is a no-op.
+    Idempotent — calling twice is a no-op, and after the first call in a
+    process it is also cheap (see `_MIGRATED`).
 
     Schema v1 → v2 (Step 10c.8): adds tokens_in / tokens_out / cost_usd /
     n_calls columns to `node_runs`. Existing rows back-fill to 0 (which
     is honest — we didn't track tokens before this migration). New rows
     populate from the ContextVar accumulator.
     """
+    key = _migration_key(db_path)
+    if key is not None and key in _MIGRATED:
+        with _connect(db_path) as conn:
+            if _schema_cookie(conn) == _MIGRATED[key]:
+                try:
+                    _maybe_prune(conn)
+                except Exception as exc:
+                    logger.warning(f"[telemetry] prompt-blob prune skipped: {exc}")
+                return
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA_SQL)
         # Forward-only migrations for DBs created before SCHEMA_VERSION
@@ -452,6 +494,7 @@ def init_db(db_path: Path | None = None) -> None:
         for col_name, col_def in [
             ("model_used",     "TEXT"),
             ("total_cost_usd", "REAL NOT NULL DEFAULT 0.0"),
+            ("pid",            "INTEGER"),  # schema v9
         ]:
             if col_name not in existing_runs:
                 conn.execute(
@@ -501,6 +544,10 @@ def init_db(db_path: Path | None = None) -> None:
             _maybe_prune(conn)
         except Exception as exc:
             logger.warning(f"[telemetry] prompt-blob prune skipped: {exc}")
+        cookie = _schema_cookie(conn)
+    key = _migration_key(db_path)
+    if key is not None:
+        _MIGRATED[key] = cookie
 
 
 def _maybe_prune(conn: sqlite3.Connection) -> None:
@@ -1140,10 +1187,10 @@ def start_cio_run(
     with _connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO cio_runs (run_id, trigger, started_at, status)
-            VALUES (?, ?, ?, 'running')
+            INSERT INTO cio_runs (run_id, trigger, started_at, status, pid)
+            VALUES (?, ?, ?, 'running', ?)
             """,
-            (run_id, trigger, started_at),
+            (run_id, trigger, started_at, os.getpid()),
         )
     return run_id
 
@@ -1776,7 +1823,10 @@ def _close_span(handle: Span, status: str, *, error: str | None, db_path: Path |
     try:
         finish_span(handle.id, status, meta=handle.meta, error=error, db_path=db_path)
     except Exception as exc:
-        logger.warning(f"[telemetry] span close failed for {handle.name}: {exc}")
+        logger.warning(
+            f"[telemetry] span close failed for {handle.parent_kind}:{handle.parent_id} "
+            f"{handle.name} ({handle.label}): {exc}"
+        )
 
 
 @contextlib.contextmanager
@@ -1791,9 +1841,10 @@ def span(
 ) -> Iterator[Span]:
     """Record one step of a non-graph flow (the CIO cycle today) as a `spans`
     row: `running` on entry, `completed` or `failed` on exit; an exception
-    inside the block is recorded and re-raised. The bookkeeping itself is
-    best-effort — a telemetry failure is logged, never raised — and with
-    `parent_id=None` nothing is written, so call sites need no branch."""
+    inside the block (a cancelled task included) is recorded and re-raised.
+    The bookkeeping itself is best-effort — a telemetry failure is logged,
+    never raised — and with `parent_id=None` nothing is written, so call
+    sites need no branch."""
     handle = Span(
         id=None,
         parent_kind=parent_kind,
@@ -1811,8 +1862,8 @@ def span(
             logger.warning(f"[telemetry] span start failed for {name}: {exc}")
     try:
         yield handle
-    except Exception as exc:
-        _close_span(handle, "failed", error=str(exc), db_path=db_path)
+    except BaseException as exc:  # asyncio.CancelledError is not an Exception
+        _close_span(handle, "failed", error=str(exc) or type(exc).__name__, db_path=db_path)
         raise
     _close_span(
         handle, "failed" if handle.error else "completed", error=handle.error, db_path=db_path
@@ -1879,18 +1930,31 @@ def _mark_stale(
     return int(cur.rowcount)
 
 
-def sweep_stale_runs(minutes: int = 30, *, db_path: Path | None = None) -> dict[str, int]:
+def sweep_stale_runs(
+    minutes: int = 30,
+    *,
+    max_minutes: int = STALE_MAX_MINUTES,
+    db_path: Path | None = None,
+) -> dict[str, int]:
     """Close `running` rows left behind by a process that died: graph_runs,
     node_runs, cio_runs, spans and llm_calls become `failed` with
-    error=STALE_ERROR. A node row is stale when its pid is gone or it is older
-    than `minutes`; a graph run when it is older than the window or every pid
-    its nodes ran under is dead; a CIO cycle when it is older than the window
-    and opened no span inside it (a live cycle keeps opening spans); spans
-    and LLM calls follow the window or a parent swept in the same pass.
-    Cheap: five small scans. Called by the Live tab on each poll and by the
-    CIO dispatcher at cycle start. Returns rows closed per table."""
+    error=STALE_ERROR. Returns rows closed per table.
+
+    The pid is authoritative wherever a row has one: a node row or a CIO
+    cycle whose pid is dead is stale at once, and one whose pid is alive is
+    left alone however long it has run (real drill-ins and heartbeats do
+    exceed 30 minutes). A graph run follows the pids of its node rows. The
+    `minutes` window applies only where no pid can answer — pre-v9 rows, a
+    run with no node row yet, an LLM call with no run — and children follow
+    their parent: a span or LLM call whose parent was swept, or whose parent
+    is no longer running, goes with it. `max_minutes` is the hard cap that
+    catches a reused pid. Five small scans, no writes when nothing is stale.
+    Called by the Live tab on each poll and by the CIO dispatcher at cycle
+    start."""
     init_db(db_path)
-    cutoff = (datetime.now(UTC) - timedelta(minutes=int(minutes))).isoformat()
+    now_dt = datetime.now(UTC)
+    cutoff = (now_dt - timedelta(minutes=int(minutes))).isoformat()
+    hard_cutoff = (now_dt - timedelta(minutes=int(max_minutes))).isoformat()
     now = _now_iso()
     alive: dict[int, bool] = {}
 
@@ -1901,18 +1965,19 @@ def sweep_stale_runs(minutes: int = 30, *, db_path: Path | None = None) -> dict[
         return alive[key]
 
     with _connect(db_path) as conn:
-        stale_nodes = [
-            r["id"]
-            for r in conn.execute(
-                "SELECT id, pid, started_at FROM node_runs WHERE status = 'running'"
-            )
-            if r["started_at"] < cutoff or (r["pid"] is not None and not _alive(r["pid"]))
-        ]
+        stale_nodes: list[int] = []
+        for r in conn.execute("SELECT id, pid, started_at FROM node_runs WHERE status = 'running'"):
+            if r["started_at"] < hard_cutoff:
+                stale_nodes.append(r["id"])
+            elif r["pid"] is None:
+                if r["started_at"] < cutoff:
+                    stale_nodes.append(r["id"])
+            elif not _alive(r["pid"]):
+                stale_nodes.append(r["id"])
+
         stale_runs: list[str] = []
+        live_parents: set[str] = set()
         for r in conn.execute("SELECT run_id, started_at FROM graph_runs WHERE status = 'running'"):
-            if r["started_at"] < cutoff:
-                stale_runs.append(r["run_id"])
-                continue
             pids = [
                 p["pid"]
                 for p in conn.execute(
@@ -1920,34 +1985,57 @@ def sweep_stale_runs(minutes: int = 30, *, db_path: Path | None = None) -> dict[
                     (r["run_id"],),
                 )
             ]
-            if pids and not any(_alive(p) for p in pids):
+            if r["started_at"] < hard_cutoff:
                 stale_runs.append(r["run_id"])
-        stale_cio = [
-            r["run_id"]
-            for r in conn.execute(
-                """
-                SELECT c.run_id FROM cio_runs c
-                 WHERE c.status = 'running' AND c.started_at < ?
-                   AND NOT EXISTS (
-                       SELECT 1 FROM spans s
-                        WHERE s.parent_kind = 'cio_run' AND s.parent_id = c.run_id
-                          AND s.started_at >= ?)
-                """,
-                (cutoff, cutoff),
-            )
-        ]
+            elif pids:
+                if not any(_alive(p) for p in pids):
+                    stale_runs.append(r["run_id"])
+            elif r["started_at"] < cutoff:
+                stale_runs.append(r["run_id"])
+            if r["run_id"] not in stale_runs:
+                live_parents.add(r["run_id"])
+
+        stale_cio: list[str] = []
+        for r in conn.execute(
+            "SELECT run_id, pid, started_at FROM cio_runs WHERE status = 'running'"
+        ):
+            if r["started_at"] < hard_cutoff:
+                stale_cio.append(r["run_id"])
+            elif r["pid"] is not None:
+                if not _alive(r["pid"]):
+                    stale_cio.append(r["run_id"])
+            elif r["started_at"] < cutoff:
+                # Pre-v9 cycle without a pid: alive only if it is still
+                # opening steps.
+                recent = conn.execute(
+                    """
+                    SELECT 1 FROM spans
+                     WHERE parent_kind = 'cio_run' AND parent_id = ? AND started_at >= ?
+                     LIMIT 1
+                    """,
+                    (r["run_id"], cutoff),
+                ).fetchone()
+                if recent is None:
+                    stale_cio.append(r["run_id"])
+            if r["run_id"] not in stale_cio:
+                live_parents.add(r["run_id"])
+
         swept_parents = set(stale_runs) | set(stale_cio)
         stale_spans = [
             r["id"]
             for r in conn.execute(
                 "SELECT id, parent_id, started_at FROM spans WHERE status = 'running'"
             )
-            if r["started_at"] < cutoff or r["parent_id"] in swept_parents
+            if r["started_at"] < hard_cutoff
+            or r["parent_id"] in swept_parents
+            or (r["parent_id"] not in live_parents and r["started_at"] < cutoff)
         ]
         stale_calls = [
             r["id"]
             for r in conn.execute("SELECT id, run_id, ts FROM llm_calls WHERE status = 'running'")
-            if r["ts"] < cutoff or (r["run_id"] is not None and r["run_id"] in swept_parents)
+            if r["ts"] < hard_cutoff
+            or r["run_id"] in swept_parents
+            or (r["run_id"] not in live_parents and r["ts"] < cutoff)
         ]
         counts = {
             "node_runs": _mark_stale(conn, "node_runs", "id", stale_nodes, now),
@@ -2183,22 +2271,18 @@ def live_snapshot(
     *,
     recent_limit: int = 20,
     cio_limit: int = 5,
-    sweep: bool = True,
     db_path: Path | None = None,
 ) -> dict:
     """The single state document the Live tab renders (plan §3.3): server
     time, vitals, node medians, the running (then most recent) CIO cycles with
     their steps and actions, every ACTIVE graph run with nodes, calls and full
     messages, and the last `recent_limit` runs with per-node status. Replay
-    feeds the same renderer from `run_snapshot`. Runs `sweep_stale_runs` first
-    unless `sweep=False`. Never creates the DB file."""
+    feeds the same renderer from `run_snapshot`. A pure read: it never
+    creates or migrates the DB file (a pre-v9 file reads as empty until the
+    first write migrates it). The Live tab calls `sweep_stale_runs()` before
+    polling it; the sweeper is a writer and stays a separate call."""
     if not Path(db_path or DB_PATH).exists():
         return _empty_snapshot()
-    if sweep:
-        try:
-            sweep_stale_runs(db_path=db_path)
-        except Exception as exc:
-            logger.warning(f"[telemetry] stale sweep failed: {exc}")
     with _connect(db_path) as conn:
         try:
             vitals = _vitals(conn)
@@ -2221,7 +2305,7 @@ def live_snapshot(
             ]
             cio = [_cio_detail(conn, c) for c in cycles]
         except sqlite3.OperationalError as exc:  # pre-v9 file nothing has written to yet
-            logger.warning(f"[telemetry] live_snapshot on a pre-v9 DB: {exc}")
+            logger.warning(f"[telemetry] live_snapshot on a pre-v9 DB reads as empty: {exc}")
             return _empty_snapshot()
     recent = recent_runs(limit=recent_limit, db_path=db_path)
     statuses = node_status_by_run([r["run_id"] for r in recent], db_path=db_path)
