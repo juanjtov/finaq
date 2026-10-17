@@ -46,12 +46,13 @@ _active_runs: dict[tuple[str, str], dict[str, Any]] = {}
 # --- Public API -------------------------------------------------------------
 
 
-def kick_off_drill(ticker: str, thesis_slug: str) -> bool:
+def kick_off_drill(ticker: str, thesis_slug: str, *, source: str = "dashboard") -> bool:
     """Start a drill-in in a background daemon thread.
 
     Returns True if a new run was started, False if there's already one
     in flight for the same ticker × thesis (caller should just show the
-    running panel and let it complete).
+    running panel and let it complete). `source` lands on
+    `graph_runs.source` — the Telegram bot passes "telegram".
     """
     key = (ticker.upper(), thesis_slug)
     with _lock:
@@ -67,7 +68,7 @@ def kick_off_drill(ticker: str, thesis_slug: str) -> bool:
         _active_runs[key] = record
         thread = threading.Thread(
             target=_worker,
-            args=(ticker, thesis_slug, record),
+            args=(ticker, thesis_slug, record, source),
             daemon=True,
             name=f"finaq-drill-{ticker}-{thesis_slug}",
         )
@@ -118,7 +119,9 @@ def clear_record(ticker: str, thesis_slug: str) -> None:
 # --- Worker thread ---------------------------------------------------------
 
 
-def _worker(ticker: str, thesis_slug: str, record: dict[str, Any]) -> None:
+def _worker(
+    ticker: str, thesis_slug: str, record: dict[str, Any], source: str = "dashboard"
+) -> None:
     """Run the LangGraph drill-in inside this thread.
 
     ContextVars are NOT inherited across threads by default; that's fine —
@@ -144,7 +147,7 @@ def _worker(ticker: str, thesis_slug: str, record: dict[str, Any]) -> None:
 
         async def _run() -> dict[str, Any]:
             return await invoke_with_telemetry(
-                graph, {"ticker": ticker.upper(), "thesis": thesis}
+                graph, {"ticker": ticker.upper(), "thesis": thesis}, source=source
             )
 
         final = asyncio.run(_run())

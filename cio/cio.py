@@ -36,7 +36,11 @@ Constraints we enforce here (not in the planner):
     prefix. On-demand can target any thesis (curated or adhoc).
   - **Telemetry**: every LLM call inside `_safe_node` is captured by the
     ContextVar accumulator. The CIO planner LLM call goes through that
-    same path so the Run Inspector (Step 11.15) can show CIO calls.
+    same path so the Run Inspector (Step 11.15) can show CIO calls; since
+    schema v9 its rows carry `node='cio.planner'` and `run_id=cio_run_id`.
+    Each cycle step is a `spans` row under the cio_run (probe → gates →
+    decide → budget → drill → summary; the dispatcher adds notify) so the
+    live Mission Control view can show where a cycle is.
 
 Tests stub:
   - `planner.decide`            — returns canned CIODecisions
@@ -269,7 +273,7 @@ async def _drill_one(ticker: str, thesis: dict) -> str | None:
 
         graph = build_graph()
         final = await invoke_with_telemetry(
-            graph, {"ticker": ticker.upper(), "thesis": thesis}
+            graph, {"ticker": ticker.upper(), "thesis": thesis}, source="cio"
         )
         return final.get("run_id")
     except Exception as e:
@@ -358,11 +362,18 @@ async def _execute_plan(
                     telemetry=telemetry,
                 )
                 continue
-            report = freshness.get(d.ticker)
-            if report is not None and report.is_stale and d.ticker not in ingested:
-                ingested.add(d.ticker)
-                await _auto_ingest(d.ticker, report)
-            drill_run_id = await _drill_one(d.ticker, thesis)
+            with state_db.span(
+                "cio_run", cio_run_id, "drill", label=d.ticker, meta={"thesis": d.thesis}
+            ) as drill_span:
+                report = freshness.get(d.ticker)
+                if report is not None and report.is_stale and d.ticker not in ingested:
+                    ingested.add(d.ticker)
+                    await _auto_ingest(d.ticker, report)
+                    drill_span.meta["ingested"] = True
+                drill_run_id = await _drill_one(d.ticker, thesis)
+                drill_span.meta["drill_run_id"] = drill_run_id
+                if drill_run_id is None:
+                    drill_span.error = "drill failed — see the errors table"
             _record_decision(
                 cio_run_id=cio_run_id, trigger=trigger, decision=d,
                 drill_run_id=drill_run_id, telemetry=telemetry,
@@ -459,19 +470,42 @@ async def _run_cycle(
             # `auto_ingest` tickers. Previously this ran inside
             # `_drill_one`, i.e. after the decision it was meant to inform.
             if ticker not in freshness:
-                report = _probe_freshness(ticker)
-                freshness[ticker] = report
-                if report is not None and report.is_stale and ticker in auto_ingest:
-                    ingested.add(ticker)
-                    await _auto_ingest(ticker, report)
+                with state_db.span("cio_run", cio_run_id, "probe", label=ticker) as probe_span:
+                    report = _probe_freshness(ticker)
+                    freshness[ticker] = report
+                    probe_span.meta["stale"] = bool(report is not None and report.is_stale)
+                    if report is not None and report.is_stale and ticker in auto_ingest:
+                        ingested.add(ticker)
+                        await _auto_ingest(ticker, report)
+                        probe_span.meta["ingested"] = True
             try:
-                decision, telemetry = cio_planner.decide(
-                    ticker=ticker,
-                    thesis=thesis,
-                    news_fetcher=partial(_news_for, ticker),
-                    edgar_freshness=freshness[ticker],
-                    cooldown_hours=cooldown_hours,
-                )
+                # Gates are evaluated here (not inside decide) so the step
+                # gets its own span; decide() reuses the outcome.
+                with state_db.span("cio_run", cio_run_id, "gates", label=ticker) as gate_span:
+                    gates = cio_planner.evaluate_gates(
+                        ticker, slug, cooldown_hours=cooldown_hours,
+                        edgar_freshness=freshness[ticker],
+                    )
+                    gate_span.meta["shortcut"] = (
+                        gates.shortcut.action if gates.shortcut is not None else None
+                    )
+                    gate_span.meta["dismissals_7d"] = len(gates.dismissal_streak)
+                with state_db.span("cio_run", cio_run_id, "decide", label=ticker) as decide_span:
+                    decision, telemetry = cio_planner.decide(
+                        ticker=ticker,
+                        thesis=thesis,
+                        news_fetcher=partial(_news_for, ticker),
+                        edgar_freshness=freshness[ticker],
+                        cooldown_hours=cooldown_hours,
+                        gates=gates,
+                        cio_run_id=cio_run_id,
+                    )
+                    decide_span.meta.update(
+                        action=decision.action,
+                        source=decision.source,
+                        confidence=decision.confidence,
+                        model=telemetry.get("model_used"),
+                    )
             except Exception as e:
                 logger.error(f"[cio.cio] decide({ticker}/{slug}) failed: {e}")
                 decision = CIODecision(
@@ -485,18 +519,23 @@ async def _run_cycle(
             if cycle_model is None and telemetry.get("model_used"):
                 cycle_model = telemetry["model_used"]
 
-        capped_decisions, n_capped = cio_planner.apply_drill_budget(
-            decisions, drill_budget=drill_budget,
-        )
-        plan = Plan(
-            decisions=capped_decisions, drill_budget=drill_budget,
-            drills_capped=n_capped,
-            # Nag, don't act: a thesis nobody has confirmed in 90+ days
-            # is surfaced in the summary + Telegram, never auto-archived.
-            overdue_theses=theses_lifecycle.overdue_theses(
-                {slug for _, slug in candidates}, theses_dir=THESES_DIR,
-            ),
-        )
+        with state_db.span("cio_run", cio_run_id, "budget") as budget_span:
+            capped_decisions, n_capped = cio_planner.apply_drill_budget(
+                decisions, drill_budget=drill_budget,
+            )
+            plan = Plan(
+                decisions=capped_decisions, drill_budget=drill_budget,
+                drills_capped=n_capped,
+                # Nag, don't act: a thesis nobody has confirmed in 90+ days
+                # is surfaced in the summary + Telegram, never auto-archived.
+                overdue_theses=theses_lifecycle.overdue_theses(
+                    {slug for _, slug in candidates}, theses_dir=THESES_DIR,
+                ),
+                cio_run_id=cio_run_id,
+            )
+            budget_span.meta.update(
+                drill_budget=drill_budget, n_capped=n_capped, n_drills=plan.n_drilled,
+            )
 
         await _execute_plan(
             cio_run_id=cio_run_id, trigger=trigger, plan=plan,
@@ -505,15 +544,20 @@ async def _run_cycle(
             freshness=freshness, ingested=ingested,
         )
 
-        # Step 11.19 — aggregate per-cycle cost from the per-action
-        # telemetry we just wrote. This is the canonical $-spent-per-CIO-cycle
-        # number Mission Control surfaces; per-action rows have the breakdown.
-        total_cost_usd = float(
-            sum(t.get("cost_usd") or 0.0 for t in pair_to_telemetry.values())
-        )
+        with state_db.span("cio_run", cio_run_id, "summary") as summary_span:
+            # Step 11.19 — aggregate per-cycle cost from the per-action
+            # telemetry we just wrote. This is the canonical $-spent-per-CIO-cycle
+            # number Mission Control surfaces; per-action rows have the breakdown.
+            total_cost_usd = float(
+                sum(t.get("cost_usd") or 0.0 for t in pair_to_telemetry.values())
+            )
 
-        duration_s = time.perf_counter() - t0
-        summary = _compose_summary(plan, trigger=trigger, duration_s=duration_s)
+            duration_s = time.perf_counter() - t0
+            summary = _compose_summary(plan, trigger=trigger, duration_s=duration_s)
+            summary_span.meta.update(
+                n_drilled=plan.n_drilled, n_reused=plan.n_reused,
+                n_dismissed=plan.n_dismissed, total_cost_usd=round(total_cost_usd, 6),
+            )
         state_db.finish_cio_run(
             cio_run_id, "completed",
             duration_s=duration_s,

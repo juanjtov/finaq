@@ -20,6 +20,7 @@ This lets us assert the cycle's contract end-to-end:
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -74,6 +75,10 @@ def stub_news(monkeypatch):
     ticker before deciding."""
     monkeypatch.setattr(cio_mod, "_fetch_news", lambda t: [])
     monkeypatch.setattr(cio_mod, "_probe_freshness", lambda t: None)
+    # Schema v9: the orchestrator evaluates the gates itself (own span), so
+    # the Notion-backed notes lookup inside them must stay offline here even
+    # when a .env configures Notion.
+    monkeypatch.setattr(cio_planner.cio_memory, "thesis_notes", lambda slug: "")
 
     async def _no_ingest(ticker, report):
         pytest.fail("no test in this suite expects an auto-ingest unless it stubs one")
@@ -862,3 +867,279 @@ async def test_cycle_summary_silent_when_all_theses_reviewed(
     plan, summary = await cio_mod.run_heartbeat()
     assert plan.overdue_theses == []
     assert "overdue" not in summary.lower()
+
+
+# --- Schema v9 — cycle spans + planner attribution ---------------------------
+
+
+def _span_names(cio_run_id: str) -> list[tuple[str, str | None]]:
+    return [(s["name"], s["label"]) for s in state_db.spans_for("cio_run", cio_run_id)]
+
+
+@pytest.mark.asyncio
+async def test_cycle_writes_spans_in_step_order_with_drill_lineage(
+    isolated_db,
+    fake_thesis_dir,
+    stub_news,
+    monkeypatch,
+):
+    """probe → gates → decide per candidate, then budget, one drill span per
+    drill, summary. The drill span's meta carries the graph run id that the
+    cio_actions row also points at."""
+    canned = {
+        ("AAA", "curated_a"): CIODecision(
+            action="drill",
+            ticker="AAA",
+            thesis="curated_a",
+            rationale="drill it",
+            confidence="high",
+        ),
+    }
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
+
+    async def _fake_drill(ticker, thesis):
+        return f"fake-run-{ticker}"
+
+    monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
+    monkeypatch.setattr(
+        cio_mod,
+        "_curated_candidates",
+        lambda: [("AAA", "curated_a"), ("BBB", "curated_a")],
+    )
+
+    plan, _ = await cio_mod.run_heartbeat()
+
+    [cycle] = state_db.recent_cio_runs()
+    assert plan.cio_run_id == cycle["run_id"]
+    spans = state_db.spans_for("cio_run", cycle["run_id"])
+    assert _span_names(cycle["run_id"]) == [
+        ("probe", "AAA"),
+        ("gates", "AAA"),
+        ("decide", "AAA"),
+        ("probe", "BBB"),
+        ("gates", "BBB"),
+        ("decide", "BBB"),
+        ("budget", None),
+        ("drill", "AAA"),
+        ("summary", None),
+    ]
+    assert all(s["status"] == "completed" and s["ended_at"] for s in spans)
+    starts = [s["started_at"] for s in spans]
+    assert starts == sorted(starts)
+
+    by_name = {(s["name"], s["label"]): s for s in spans}
+    [drill_action] = [a for a in state_db.recent_cio_actions(limit=10) if a["action"] == "drill"]
+    drill = by_name[("drill", "AAA")]
+    assert drill["meta"]["drill_run_id"] == drill_action["drill_run_id"] == "fake-run-AAA"
+    assert drill["meta"]["thesis"] == "curated_a"
+    assert by_name[("decide", "AAA")]["meta"] == {
+        "action": "drill",
+        "source": "llm",
+        "confidence": "high",
+        "model": "stub-model",
+    }
+    assert by_name[("gates", "AAA")]["meta"] == {"shortcut": None, "dismissals_7d": 0}
+    assert by_name[("probe", "AAA")]["meta"] == {"stale": False}
+    assert by_name[("budget", None)]["meta"] == {"drill_budget": 3, "n_capped": 0, "n_drills": 1}
+    assert by_name[("summary", None)]["meta"]["n_drilled"] == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_cycle_ends_with_a_notify_span(
+    isolated_db,
+    fake_thesis_dir,
+    stub_news,
+    monkeypatch,
+):
+    """The full step list the plan names — probe, gates, decide, budget,
+    drill, summary, notify — in order, driven through the dispatcher."""
+    from cio import dispatcher as cio_dispatcher
+    from cio import notify as cio_notify
+
+    canned = {
+        ("AAA", "curated_a"): CIODecision(
+            action="drill",
+            ticker="AAA",
+            thesis="curated_a",
+            rationale="go",
+            confidence="high",
+        ),
+    }
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
+
+    async def _fake_drill(ticker, thesis):
+        return f"fake-run-{ticker}"
+
+    monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
+    monkeypatch.setattr(cio_mod, "_curated_candidates", lambda: [("AAA", "curated_a")])
+    monkeypatch.setattr(
+        cio_notify,
+        "notify_cycle",
+        lambda plan, **kw: {"telegram_sent": True, "notion_url": None, "telegram_chars": 10},
+    )
+
+    assert await cio_dispatcher._run("heartbeat", ticker=None, thesis=None) == 0
+
+    [cycle] = state_db.recent_cio_runs()
+    assert [name for name, _ in _span_names(cycle["run_id"])] == [
+        "probe",
+        "gates",
+        "decide",
+        "budget",
+        "drill",
+        "summary",
+        "notify",
+    ]
+    notify = state_db.spans_for("cio_run", cycle["run_id"])[-1]
+    assert notify["status"] == "completed"
+    assert notify["meta"] == {"telegram_sent": True, "notion": False}
+
+
+@pytest.mark.asyncio
+async def test_planner_llm_calls_are_attributed_to_the_cio_run(
+    isolated_db,
+    fake_thesis_dir,
+    stub_news,
+    monkeypatch,
+):
+    """No decide stub: the real planner runs against a fake LLM client behind
+    the telemetry interceptor, so its llm_calls row must carry
+    node='cio.planner' and run_id=cio_run_id (it used to land as '' / NULL)."""
+    from utils.openrouter import _install_telemetry_interceptor
+
+    decision_json = json.dumps(
+        {
+            "action": "dismiss",
+            "ticker": "AAA",
+            "thesis": "curated_a",
+            "rationale": "quiet quarter",
+            "confidence": "low",
+        }
+    )
+
+    def _create(**kwargs):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=decision_json))],
+            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=20),
+        )
+
+    fake_client = _install_telemetry_interceptor(
+        SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+    )
+    monkeypatch.setattr(cio_planner, "get_client", lambda: fake_client)
+    monkeypatch.setattr(cio_planner, "build_evidence_bundle", lambda **kw: {"stub": True})
+
+    plan, _ = await cio_mod.run_on_demand("AAA", "curated_a")
+
+    [decision] = plan.decisions
+    assert (decision.action, decision.source) == ("dismiss", "llm")
+    [cycle] = state_db.recent_cio_runs()
+    [call] = state_db.llm_calls_for_run(cycle["run_id"])
+    assert (call["node"], call["status"], call["tokens_in"], call["tokens_out"]) == (
+        "cio.planner",
+        "completed",
+        100,
+        20,
+    )
+    messages = state_db.llm_messages_for_call(call["id"])
+    assert [m["role"] for m in messages] == ["system", "user", "assistant"]
+    assert messages[-1]["text"] == decision_json
+    assert state_db.current_run_id.get() is None  # binding released after decide()
+    # The cycle snapshot links the step and the call together.
+    [cio] = state_db.live_snapshot()["cio"]
+    assert cio["run_id"] == cycle["run_id"]
+    assert [s["name"] for s in cio["steps"]] == ["probe", "gates", "decide", "budget", "summary"]
+    assert cio["steps"][2]["meta"]["source"] == "llm"
+
+
+@pytest.mark.asyncio
+async def test_failed_drill_marks_its_span_failed(
+    isolated_db,
+    fake_thesis_dir,
+    stub_news,
+    monkeypatch,
+):
+    canned = {
+        ("AAA", "curated_a"): CIODecision(
+            action="drill",
+            ticker="AAA",
+            thesis="curated_a",
+            rationale="go",
+            confidence="high",
+        ),
+    }
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
+
+    async def _broken_drill(ticker, thesis):
+        return None  # _drill_one swallows graph failures and returns None
+
+    monkeypatch.setattr(cio_mod, "_drill_one", _broken_drill)
+    monkeypatch.setattr(cio_mod, "_curated_candidates", lambda: [("AAA", "curated_a")])
+
+    await cio_mod.run_heartbeat()
+
+    [cycle] = state_db.recent_cio_runs()
+    [drill] = [s for s in state_db.spans_for("cio_run", cycle["run_id"]) if s["name"] == "drill"]
+    assert drill["status"] == "failed" and drill["error"]
+    assert drill["meta"]["drill_run_id"] is None
+    assert cycle["status"] == "completed"  # the cycle itself is fine
+
+
+@pytest.mark.asyncio
+async def test_planner_crash_marks_the_decide_span_failed_and_cycle_continues(
+    isolated_db,
+    fake_thesis_dir,
+    stub_news,
+    monkeypatch,
+):
+    def _flaky_decide(*, ticker, thesis, **kw):
+        if ticker.upper() == "AAA":
+            raise RuntimeError("synthetic planner crash")
+        return (
+            CIODecision(
+                action="dismiss",
+                ticker=ticker.upper(),
+                thesis=(thesis or {}).get("slug"),
+                rationale="ok",
+                confidence="low",
+            ),
+            cio_planner._empty_telemetry(),
+        )
+
+    monkeypatch.setattr(cio_planner, "decide", _flaky_decide)
+    monkeypatch.setattr(
+        cio_mod,
+        "_curated_candidates",
+        lambda: [("AAA", "curated_a"), ("BBB", "curated_a")],
+    )
+
+    plan, _ = await cio_mod.run_heartbeat()
+
+    assert plan.n_dismissed == 2
+    [cycle] = state_db.recent_cio_runs()
+    assert cycle["status"] == "completed"
+    spans = {(s["name"], s["label"]): s for s in state_db.spans_for("cio_run", cycle["run_id"])}
+    assert spans[("decide", "AAA")]["status"] == "failed"
+    assert "synthetic planner crash" in spans[("decide", "AAA")]["error"]
+    assert spans[("decide", "BBB")]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_span_telemetry_failure_never_breaks_the_cycle(
+    isolated_db,
+    fake_thesis_dir,
+    stub_news,
+    monkeypatch,
+):
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory({}))
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(state_db, "start_span", _boom)
+    plan, summary = await cio_mod.run_heartbeat()
+
+    assert plan.n_dismissed == 5 and "5 dismissed" in summary
+    [cycle] = state_db.recent_cio_runs()
+    assert cycle["status"] == "completed"
+    assert state_db.spans_for("cio_run", cycle["run_id"]) == []

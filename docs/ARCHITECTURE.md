@@ -1261,6 +1261,32 @@ Curated theses were 3–4 months unedited with no signal anywhere.
   bound. Local excerpts are the always-on debugging baseline; LangSmith
   remains the source of full untruncated traces with replay. The Run
   Inspector shows both.
+- **Revision (schema v9, Mission Control v2 Phase 1, 2026-10-16):** the
+  live execution view (docs/MISSION_CONTROL_PLAN.md) has to see what is
+  running *now*, so the two hot tables are written in **two phases**:
+  `_safe_node` inserts the `node_runs` row as `running` on entry
+  (`start_node_run`, with the process `pid`) and closes it in its `finally`
+  (`finish_node_run`); the OpenRouter interceptor inserts the `llm_calls`
+  row as `running` *before* the SDK call (`start_llm_call`) and closes it
+  with tokens / cost / latency / status afterwards (`finish_llm_call`).
+  Full prompts now live locally too: every message of a call is an
+  `llm_messages` row pointing at a content-addressed `prompt_blobs` row
+  (sha256), so a system prompt repeated on every run is stored once;
+  `prune_blobs` drops messages older than `PROMPT_RETENTION_DAYS` (default
+  90) once a day, while the 2,000-char excerpts on `llm_calls` stay forever
+  for the pre-v9 readers. The CIO cycle records each step (probe → gates →
+  decide → budget → drill → summary → notify) as a `spans` row, and the
+  planner's calls are attributable at last (`node='cio.planner'`,
+  `run_id=cio_run_id`; 982 rows were `''` / NULL before). `graph_runs.source`
+  says who started a run (dashboard | cio | telegram | backtest | cli).
+  `_connect` sets `journal_mode=WAL` + `busy_timeout=5000` so the 1 s reader
+  and the three writer processes share the file, and `sweep_stale_runs`
+  closes `running` rows whose pid is gone or that outlived a 30-minute
+  window (four such graph_runs existed when this shipped).
+  `live_snapshot()` / `run_snapshot()` build the single state document the
+  Live tab and replay render. Measured on a copy of the real DB: one
+  drill-in adds ≈ 0.45 MB (≈ 400 KB of prompt text). LangSmith stays
+  optional; the local store is now enough on its own for replay.
 - **Why not Postgres / DataDog / Sentry**: single-user single-box. Adding
   hosted observability requires either an SaaS account or a daemon — both
   multiply maintenance. SQLite + LangSmith covers the operational and
@@ -1270,16 +1296,22 @@ Curated theses were 3–4 months unedited with no signal anywhere.
 
   | Table | Purpose | Written by |
   |---|---|---|
-  | `graph_runs` | One row per drill-in. status (running/completed/failed), duration, confidence, error rollup. | `invoke_with_telemetry()` |
-  | `node_runs` | One row per agent-node entry/exit. status, duration, error. FK to graph_runs. | `_safe_node` wrapper |
+  | `graph_runs` | One row per drill-in. status (running/completed/failed), duration, confidence, error rollup; `source` (v9) = who started it. | `invoke_with_telemetry()` |
+  | `node_runs` | One row per agent node, written in two phases since v9: `running` on entry (with `pid`), status / duration / error / tokens on exit. FK to graph_runs. | `_safe_node` wrapper |
   | `alerts` | Phase 1 Triage alerts. severity, signal, status (pending/acked/dismissed/actioned). | Phase 1 `agents/triage.py` |
   | `triage_runs` | One row per scheduled Triage run. items_scanned, alerts_emitted, duration. | Phase 1 `scripts/run_triage.py` |
   | `errors` | Centralised error log. Backs the Mission Control "Recent errors" panel. | `_safe_node`, agents on demand |
-  | `llm_calls` | Schema v6 — one row per chat-completion call: node, model, latency, tokens, cost, truncated prompt/response excerpts. `run_id` NULL for calls outside the graph (CIO planner, ad-hoc Q&A). Backs the Run Inspector's "LLM call trace" panel. | `utils/openrouter.py` interceptor |
-  | `meta` | Schema version + future migration markers. | `init_db()` |
+  | `llm_calls` | Schema v6 — one row per chat-completion call: node, model, latency, tokens, cost, truncated prompt/response excerpts. Since v9 written in two phases (`status` running → completed/failed, `ended_at`, `error`, `attempt`); `run_id` is the graph run, or the CIO cycle for `node='cio.planner'`, NULL only for ad-hoc Q&A. Backs the Run Inspector's "LLM call trace" panel. | `utils/openrouter.py` interceptor |
+  | `prompt_blobs` | Schema v9 — content-addressed prompt text: sha256 → content, n_chars, first/last seen, seen_count. A blob survives until no `llm_messages` row references it. | `start_llm_call` / `finish_llm_call` / `record_llm_messages` |
+  | `llm_messages` | Schema v9 — the ordered messages of one call (seq, role, sha256 → prompt_blobs); seq 0 = system, 1 = user, last = the assistant response. Rows of calls older than `PROMPT_RETENTION_DAYS` are pruned daily. | same |
+  | `spans` | Schema v9 — steps of non-graph flows: parent_kind / parent_id (`cio_run` today), name, label, started/ended, status, meta_json, error. | `state.span()` context manager (`cio/cio.py`, `cio/dispatcher.py`, `data/telegram.py`) |
+  | `meta` | Schema version + migration markers (`last_prune` since v9). | `init_db()` |
 
-  Migration is idempotent (`CREATE TABLE IF NOT EXISTS`); calling
-  `init_db()` twice is a no-op and existing rows survive.
+  Migration is idempotent (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD
+  COLUMN` guarded by `PRAGMA table_info`); calling `init_db()` twice is a
+  no-op and existing rows survive. The v9 step also backfills pre-v9
+  `llm_calls` rows: `CALL FAILED` excerpts become `status='failed'` with the
+  error, and `ended_at = ts` (those rows were written after the response).
 
 ### 11.3 Run-ID propagation via `contextvars`
 
@@ -1307,6 +1339,11 @@ Curated theses were 3–4 months unedited with no signal anywhere.
 - **Implication for tests**: the autouse `_isolated_state_db` fixture in
   `tests/conftest.py` redirects `data.state.DB_PATH` to a tmp file per
   test session, so unit tests never touch the user's real telemetry DB.
+- **v9 entry writes keep the rule**: if `start_node_run` fails, the exit
+  falls back to the one-shot `record_node_run`; if `start_llm_call` fails,
+  the interceptor lands the schema-v6 one-shot row instead; `span()` logs
+  and swallows its own DB errors while still re-raising the step's own
+  exception. A pre-v9 file is migrated by the first write, never by a read.
 
 ### 11.5 Mission Control reads (only) state.db
 

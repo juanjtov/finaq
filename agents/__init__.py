@@ -2,12 +2,16 @@
 
 Each worker node runs through `_safe_node`, which catches any exception, logs
 it, and routes it into `state.errors` instead of crashing the whole graph.
-Step 5z added per-node telemetry: `_safe_node` writes a `node_runs` row on
-every entry/exit (read by the Mission Control dashboard).
+Step 5z added per-node telemetry: `_safe_node` writes a `node_runs` row per
+node (read by the Mission Control dashboard). Since schema v9 the row is
+written in two phases — `running` at entry, closed in the `finally` — so a
+live view can see which node is executing right now.
 
-Use `invoke_with_telemetry(graph, state)` (not `graph.ainvoke(state)`
-directly) when you want the run captured in `data_cache/state.db`. The
-plain `ainvoke` path still works for tests / one-offs.
+Use `invoke_with_telemetry(graph, state, source=...)` (not
+`graph.ainvoke(state)` directly) when you want the run captured in
+`data_cache/state.db`; `source` says who started it (dashboard | cio |
+telegram | backtest | cli). The plain `ainvoke` path still works for tests /
+one-offs.
 """
 
 from __future__ import annotations
@@ -34,12 +38,14 @@ NodeFn = Callable[[FinaqState], Awaitable[dict[str, Any]]]
 
 def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
     """Wrap an agent's run() so a raise becomes a state.errors entry instead of
-    a crash, and so every entry/exit writes a `node_runs` telemetry row.
+    a crash, and so every node writes a `node_runs` telemetry row — opened as
+    `running` at entry (schema v9) and closed with its outcome at exit.
 
-    The telemetry write is best-effort: if state.db is unwritable (e.g. disk
+    The telemetry writes are best-effort: if state.db is unwritable (e.g. disk
     full), we log a warning and continue. The graph itself NEVER fails because
     telemetry failed — observability is supposed to be invisible to the
-    happy path.
+    happy path. If the entry write failed, the exit falls back to the one-shot
+    `record_node_run` so the run still gets its node row.
     """
 
     async def wrapped(state: FinaqState) -> dict[str, Any]:
@@ -54,6 +60,12 @@ def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
         # write the totals to node_runs in the `finally` block.
         accumulator = state_db.new_node_telemetry(node=name)
         token_var = state_db.node_telemetry_var.set(accumulator)
+        # Phase 1 of the node row: visible to the live view while we run.
+        node_run_id: int | None = None
+        try:
+            node_run_id = state_db.start_node_run(run_id, name, started_at=started_iso)
+        except Exception as telemetry_exc:
+            logger.warning(f"[telemetry] node_runs entry write failed for {name}: {telemetry_exc}")
         try:
             result = await run_fn(state)
             # Surface "soft failures" — agents that return successfully but
@@ -88,20 +100,34 @@ def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
             # Detach the ContextVar BEFORE writing — if the write fails,
             # the next node still gets a clean accumulator.
             state_db.node_telemetry_var.reset(token_var)
+            totals = {
+                "tokens_in": accumulator.get("tokens_in", 0),
+                "tokens_out": accumulator.get("tokens_out", 0),
+                "cost_usd": accumulator.get("cost_usd", 0.0),
+                "n_calls": accumulator.get("n_calls", 0),
+            }
             try:
-                state_db.record_node_run(
-                    run_id=run_id,
-                    node=name,
-                    started_at=started_iso,
-                    ended_at=ended_iso,
-                    duration_s=duration_s,
-                    status="failed" if error_msg else "completed",
-                    error=error_msg,
-                    tokens_in=accumulator.get("tokens_in", 0),
-                    tokens_out=accumulator.get("tokens_out", 0),
-                    cost_usd=accumulator.get("cost_usd", 0.0),
-                    n_calls=accumulator.get("n_calls", 0),
-                )
+                if node_run_id is not None:
+                    # Phase 2: close the row opened at entry.
+                    state_db.finish_node_run(
+                        node_run_id,
+                        "failed" if error_msg else "completed",
+                        ended_at=ended_iso,
+                        duration_s=duration_s,
+                        error=error_msg,
+                        **totals,
+                    )
+                else:
+                    state_db.record_node_run(
+                        run_id=run_id,
+                        node=name,
+                        started_at=started_iso,
+                        ended_at=ended_iso,
+                        duration_s=duration_s,
+                        status="failed" if error_msg else "completed",
+                        error=error_msg,
+                        **totals,
+                    )
                 if error_msg:
                     state_db.record_error(name, error_msg, run_id=run_id)
             except Exception as telemetry_exc:
@@ -252,12 +278,16 @@ def build_graph():
 # --- Telemetry-wrapped invocation -------------------------------------------
 
 
-async def invoke_with_telemetry(graph: Any, initial_state: dict[str, Any]) -> dict[str, Any]:
+async def invoke_with_telemetry(
+    graph: Any, initial_state: dict[str, Any], *, source: str = "cli"
+) -> dict[str, Any]:
     """Run the graph end-to-end with full state.db telemetry.
 
     Sets the `current_run_id` contextvar so that `_safe_node` writes can be
     attached to a parent `graph_runs` row. Always closes the row on exit
     (status = completed | failed) so we never leave dangling 'running' rows.
+    `source` is stamped on `graph_runs.source` (schema v9): dashboard | cio |
+    telegram | backtest | cli.
 
     Use this from the Streamlit app + the Telegram bot. Plain
     `graph.ainvoke(state)` still works for tests where telemetry is noise.
@@ -277,7 +307,7 @@ async def invoke_with_telemetry(graph: Any, initial_state: dict[str, Any]) -> di
         thesis_label = str(thesis)
     else:
         thesis_label = "?"
-    run_id = state_db.start_graph_run(ticker, thesis_label)
+    run_id = state_db.start_graph_run(ticker, thesis_label, source=source)
     token = state_db.current_run_id.set(run_id)
     t0 = time.perf_counter()
 

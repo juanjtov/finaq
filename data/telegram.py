@@ -886,7 +886,7 @@ async def _run_drill_and_reply(
     # startup path. ui/_runner is the same code the dashboard uses.
     from ui import _runner
 
-    ran_new = _runner.kick_off_drill(ticker, thesis_slug)
+    ran_new = _runner.kick_off_drill(ticker, thesis_slug, source="telegram")
     if ran_new:
         ack = (
             f"🏃 Running drill-in for <b>{_h(ticker)}</b> × "
@@ -2341,21 +2341,25 @@ async def cio_command(
     runs = _state.recent_cio_runs(limit=1)
     duration_s = float((runs[0].get("duration_s") if runs else 0.0) or 0.0)
 
-    tg_text = cio_notify.format_for_telegram(
-        plan, trigger=trigger, duration_s=duration_s,
-    )
-    await update.message.reply_text(
-        tg_text, parse_mode="HTML", disable_web_page_preview=True,
-    )
-
-    # Side mirror to Notion if configured. Soft-fail — already logged
-    # by cio.notify if it doesn't land.
-    try:
-        cio_notify.write_to_notion_alert(
-            plan, trigger=trigger, summary=summary,
+    # Schema v9 — the notify step is a span on the cycle, like the dispatcher's.
+    cio_run_id = getattr(plan, "cio_run_id", None)
+    with _state.span("cio_run", cio_run_id, "notify", label="telegram") as notify_span:
+        tg_text = cio_notify.format_for_telegram(
+            plan, trigger=trigger, duration_s=duration_s,
         )
-    except Exception:
-        pass
+        await update.message.reply_text(
+            tg_text, parse_mode="HTML", disable_web_page_preview=True,
+        )
+        notify_span.meta["telegram_chars"] = len(tg_text)
+
+        # Side mirror to Notion if configured. Soft-fail — already logged
+        # by cio.notify if it doesn't land.
+        try:
+            notify_span.meta["notion"] = bool(
+                cio_notify.write_to_notion_alert(plan, trigger=trigger, summary=summary)
+            )
+        except Exception:
+            pass
 
 
 @require_allowlist

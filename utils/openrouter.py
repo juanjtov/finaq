@@ -14,7 +14,11 @@ Two responsibilities:
    for the accumulator contract. Since schema v6 the interceptor also
    writes one `llm_calls` row per call (model, latency, tokens, cost,
    truncated prompt/response) so failed runs stay debuggable even when
-   LangSmith tracing was off at run time.
+   LangSmith tracing was off at run time. Since schema v9 that row is
+   written in two phases — inserted as `running` with the FULL system +
+   user messages before the SDK call, closed with tokens, cost, latency
+   and the assistant message afterwards — so the live Mission Control
+   view can show the prompt entering a model while it is still answering.
 """
 
 from __future__ import annotations
@@ -91,7 +95,28 @@ def _install_telemetry_interceptor(client: Any) -> Any:
                 break
         return "[" + ", ".join(parts) + "]"
 
-    def _record_trace_row(
+    def _node_name(accumulator: Any) -> str:
+        return str(accumulator.get("node") or "") if isinstance(accumulator, dict) else ""
+
+    def _begin_trace_row(accumulator: Any, kwargs: dict) -> int | None:
+        """Schema v9 — phase 1 of the per-call trace row, written BEFORE the
+        SDK call: status `running`, the full system + user messages (stored
+        through prompt_blobs) and the clipped excerpt for the pre-v9 readers.
+        Best-effort: None when the write failed, so phase 2 falls back to the
+        one-shot `record_llm_call`. run_id is None for calls outside any run."""
+        try:
+            return state_db.start_llm_call(
+                run_id=state_db.current_run_id.get(None),
+                node=_node_name(accumulator),
+                model=kwargs.get("model") or "",
+                messages=kwargs.get("messages"),
+                prompt_excerpt=_prompt_excerpt(kwargs.get("messages")),
+            )
+        except Exception:
+            return None
+
+    def _end_trace_row(
+        call_id: int | None,
         accumulator: Any,
         kwargs: dict,
         latency_s: float,
@@ -99,16 +124,33 @@ def _install_telemetry_interceptor(client: Any) -> Any:
         tokens_out: int,
         cost: float,
         response_excerpt: str,
+        *,
+        status: str,
+        error: str | None = None,
     ) -> None:
-        """Schema v6 — per-call trace row so a run stays debuggable even
-        when LangSmith tracing was off. Best-effort: a lost trace row
-        never breaks the call. run_id is None for calls outside the graph."""
+        """Phase 2 — close the row with tokens, cost, latency, the assistant
+        message and status completed | failed. A lost trace row never breaks
+        the call; when phase 1 failed we still land a one-shot row (schema v6
+        shape) so the run stays debuggable."""
         import contextlib
 
         with contextlib.suppress(Exception):
+            if call_id is not None:
+                state_db.finish_llm_call(
+                    call_id,
+                    status=status,
+                    latency_s=latency_s,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    cost_usd=cost,
+                    response_excerpt=response_excerpt,
+                    response_text=response_excerpt if status == "completed" else None,
+                    error=error,
+                )
+                return
             state_db.record_llm_call(
                 run_id=state_db.current_run_id.get(None),
-                node=str(accumulator.get("node") or "") if isinstance(accumulator, dict) else "",
+                node=_node_name(accumulator),
                 model=kwargs.get("model") or "",
                 latency_s=latency_s,
                 tokens_in=tokens_in,
@@ -119,21 +161,25 @@ def _install_telemetry_interceptor(client: Any) -> Any:
             )
 
     def _wrapped_create(*args: Any, **kwargs: Any) -> Any:
+        accumulator = node_telemetry_var.get(None)
+        # Phase 1 (schema v9): the in-flight call is visible to the live
+        # view before the model answers. Skipped outside a node, same
+        # gating as the accumulator, so ad-hoc SDK calls write no ghost rows.
+        call_id = _begin_trace_row(accumulator, kwargs) if accumulator is not None else None
         t0 = time.perf_counter()
         try:
             resp = original_create(*args, **kwargs)
         except Exception as call_exc:
             # A run that failed BECAUSE of LLM errors is exactly when the
             # trace matters — record the failed attempt, then re-raise.
-            accumulator = node_telemetry_var.get(None)
             if accumulator is not None:
-                _record_trace_row(
-                    accumulator, kwargs, time.perf_counter() - t0,
+                _end_trace_row(
+                    call_id, accumulator, kwargs, time.perf_counter() - t0,
                     0, 0, 0.0, response_excerpt=f"CALL FAILED: {call_exc}",
+                    status="failed", error=str(call_exc),
                 )
             raise
         latency_s = time.perf_counter() - t0
-        accumulator = node_telemetry_var.get(None)
         if accumulator is None:
             return resp  # not inside a node — nothing to record
         tokens_in = tokens_out = 0
@@ -160,8 +206,9 @@ def _install_telemetry_interceptor(client: Any) -> Any:
                 )
         except Exception:
             pass
-        _record_trace_row(
-            accumulator, kwargs, latency_s, tokens_in, tokens_out, cost, response_excerpt
+        _end_trace_row(
+            call_id, accumulator, kwargs, latency_s, tokens_in, tokens_out, cost,
+            response_excerpt, status="completed",
         )
         return resp
 

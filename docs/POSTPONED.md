@@ -174,6 +174,13 @@ evidence channel.
 
 ---
 
+### Mission Control v2 — Phase 1 deferrals (telemetry foundation, schema v9, 2026-10-16)
+
+| Item | Trigger | Effort |
+|---|---|---|
+| **Per-attempt visibility of OpenAI-SDK retries** — `llm_calls.attempt` exists (schema v9) but is always 1: the SDK retries inside one `create()` call, so the interceptor sees a single request. | A failed run's call row shows a latency that only makes sense as several attempts, or the Live tab needs to say "retrying". | ~2h: an httpx event hook on the client that bumps `attempt` on every outbound request. |
+| **`vitals.next_heartbeat` reads a constant** — `data/state.py::HEARTBEAT_HOURS_LOCAL = (5, 13)` mirrors `deploy/launchd/com.finaq.cio.plist`; the droplet's systemd timer is not read. | The schedule changes on either host, or the dashboard shows a wrong next-heartbeat time. | ~1h: read the hours from an env var set by the deploy files. |
+
 ### Telegram NL router calibration
 
 | Item | Trigger | Effort |
