@@ -1293,14 +1293,26 @@ def test_init_db_v8_to_v9_migration_keeps_rows_and_backfills(tmp_path: Path):
     assert _one(db, "SELECT COUNT(*) AS n FROM llm_calls")["n"] == 2
 
 
+def _has_tables(db: Path) -> bool:
+    """False for an empty / unreadable file — a stray 0-byte state.db must
+    make the migration test skip, not fail."""
+    if not db.is_file() or db.stat().st_size == 0:
+        return False
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+            return conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
+    except sqlite3.DatabaseError:
+        return False
+
+
 def _real_state_db() -> Path | None:
-    """The user's live telemetry DB: the default path, or
-    FINAQ_MIGRATION_FIXTURE_DB when this checkout (a worktree) has no
-    data_cache/. The test only ever reads it."""
-    candidate = Path(os.environ.get("FINAQ_MIGRATION_FIXTURE_DB") or st.DB_PATH.name)
-    if not candidate.is_absolute() and not candidate.exists():
-        candidate = Path("data_cache") / "state.db"
-    return candidate if candidate.exists() else None
+    """The user's live telemetry DB. FINAQ_MIGRATION_FIXTURE_DB wins whenever
+    it is set (a worktree has no data_cache/); otherwise the repo-relative
+    default path. None when neither is a populated database. The test only
+    ever reads it."""
+    override = os.environ.get("FINAQ_MIGRATION_FIXTURE_DB")
+    candidate = Path(override) if override else Path("data_cache") / "state.db"
+    return candidate if _has_tables(candidate) else None
 
 
 def _row_counts(db: Path) -> dict[str, int]:
