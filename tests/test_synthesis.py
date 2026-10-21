@@ -277,10 +277,9 @@ def test_build_user_prompt_includes_thesis_thresholds():
 
 def test_build_user_prompt_handles_partial_state(ai_cake):
     """If fundamentals failed but filings + news ran, prompt still assembles."""
-    thesis = ai_cake
     state = {
         "ticker": "NVDA",
-        "thesis": thesis,
+        "thesis": ai_cake,
         "fundamentals": {},  # failed
         "filings": {"summary": "filings summary", "risk_themes": []},
         "news": {"summary": "news summary"},

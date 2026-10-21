@@ -65,15 +65,14 @@ def test_summarise_worker_handles_empty_payload():
 
 
 def test_build_user_prompt_includes_all_three_workers(ai_cake):
-    thesis = ai_cake
     state = {
         "ticker": "NVDA",
-        "thesis": thesis,
+        "thesis": ai_cake,
         "fundamentals": {"summary": "fundies", "kpis": {"fcf_yield": 1.8}},
         "filings": {"summary": "filings", "risk_themes": ["X"]},
         "news": {"summary": "news"},
     }
-    prompt = _build_user_prompt("NVDA", thesis, state)
+    prompt = _build_user_prompt("NVDA", ai_cake, state)
     assert "FUNDAMENTALS" in prompt
     assert "FILINGS" in prompt
     assert "NEWS" in prompt
@@ -82,9 +81,8 @@ def test_build_user_prompt_includes_all_three_workers(ai_cake):
 
 
 def test_build_user_prompt_includes_thesis_thresholds(ai_cake):
-    thesis = ai_cake
-    state = {"ticker": "NVDA", "thesis": thesis, "fundamentals": {"summary": "x"}}
-    prompt = _build_user_prompt("NVDA", thesis, state)
+    state = {"ticker": "NVDA", "thesis": ai_cake, "fundamentals": {"summary": "x"}}
+    prompt = _build_user_prompt("NVDA", ai_cake, state)
     # Thresholds rendered as JSON
     assert "fcf_yield" in prompt or "data_center_capex" in prompt
 

@@ -64,9 +64,8 @@ def test_format_article_renders_source_or_unknown():
 
 
 def test_build_user_prompt_includes_thesis_and_articles(ai_cake):
-    thesis = ai_cake
     articles = [_fake_article(1), _fake_article(2)]
-    prompt = _build_user_prompt("NVDA", "NVIDIA Corporation", thesis, articles)
+    prompt = _build_user_prompt("NVDA", "NVIDIA Corporation", ai_cake, articles)
     assert "AS OF" in prompt
     assert "NVIDIA Corporation" in prompt
     assert "AI cake" in prompt
@@ -77,8 +76,7 @@ def test_build_user_prompt_includes_thesis_and_articles(ai_cake):
 
 
 def test_build_user_prompt_marks_empty_article_list(ai_cake):
-    thesis = ai_cake
-    prompt = _build_user_prompt("NVDA", "NVIDIA", thesis, [])
+    prompt = _build_user_prompt("NVDA", "NVIDIA", ai_cake, [])
     assert "no articles retrieved" in prompt.lower()
 
 

@@ -275,10 +275,9 @@ def test_check_freshness_handles_malformed_timestamp():
 def test_build_user_prompt_renders_as_of_block(ai_cake):
     """The freshness header must be at the top of the prompt so the LLM sees it
     before any KPI."""
-    thesis = ai_cake
     prompt = _build_user_prompt(
         "NVDA",
-        thesis,
+        ai_cake,
         {"data_fetched_at": "2026-04-27T18:30:00Z", "latest_fiscal_period": "2026-01-31"},
     )
     assert "AS OF" in prompt
@@ -291,8 +290,7 @@ def test_build_user_prompt_renders_as_of_block(ai_cake):
 
 
 def test_build_user_prompt_includes_ticker_thesis_kpis(ai_cake):
-    thesis = ai_cake
-    prompt = _build_user_prompt("NVDA", thesis, {"revenue_5y_cagr": 0.45})
+    prompt = _build_user_prompt("NVDA", ai_cake, {"revenue_5y_cagr": 0.45})
     assert "NVDA" in prompt
     assert "AI cake" in prompt
     assert "anchor_tickers" not in prompt  # we render the list, not the field name

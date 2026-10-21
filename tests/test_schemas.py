@@ -35,16 +35,28 @@ ON_DISK_THESES = sorted(p.stem for p in THESES_DIR.glob("*.json"))
 # --- Each committed thesis JSON validates ------------------------------------
 
 
+def test_theses_dir_is_not_empty():
+    """An empty parameter set would turn the four tests below into silent skips."""
+    assert ON_DISK_THESES, f"no thesis JSON under {THESES_DIR}"
+
+
 @pytest.mark.parametrize("slug", ON_DISK_THESES)
 def test_thesis_json_validates(slug):
     thesis = Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
-    assert thesis.name, f"{slug}: empty name"
+    # `general` is the universe-less catch-all; any other thesis needs a universe to be
+    # reachable at all (ticker → thesis resolution, the CIO sweep).
+    assert thesis.universe or slug == "general", f"{slug}: universe is empty"
+    assert thesis.material_thresholds, f"{slug}: no material thresholds"
+    # Monte Carlo silently skips a thesis without a valuation block (seen live with
+    # /drill WEN against general), so every thesis on disk must carry one.
+    assert thesis.valuation is not None, f"{slug}: no valuation block"
 
 
 @pytest.mark.parametrize("slug", sorted(THESES))
 def test_fixture_theses_validate(slug):
     """The theses the unit tests share must stay valid as the schema evolves."""
-    Thesis.model_validate(THESES[slug])
+    thesis = Thesis.model_validate(THESES[slug])
+    assert thesis.valuation is not None, f"{slug}: fixture theses carry a valuation block"
 
 
 # --- Universe / anchor / relationship invariants for every thesis ------------
@@ -227,10 +239,10 @@ def test_risk_output_accepts_convergent_signals_and_threshold_breaches():
 # --- Cross-thesis sanity check (Phase 3 pattern detection foreshadowing) -----
 
 
-def test_overlapping_tickers_match_finaq_context():
-    """VRT, CEG, ANET, PWR appear in 2+ of the Phase-0 theses (per FINAQ_Context.docx).
-    Those theses are archived now; the fixture copies keep the overlap because the
-    Telegram ambiguous-ticker tests rely on CEG sitting in both ai_cake and nvda_halo."""
+def test_fixture_theses_keep_the_shared_ticker_overlap():
+    """VRT, CEG, ANET, PWR sat in 2+ of the Phase-0 theses (FINAQ_Context.docx). This pins
+    that overlap in the fixture copies: the Telegram ambiguous-ticker tests rely on CEG
+    being in both ai_cake and nvda_halo."""
     theses = [
         Thesis.model_validate(THESES[slug]) for slug in ("ai_cake", "nvda_halo", "construction")
     ]

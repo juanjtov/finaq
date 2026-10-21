@@ -110,7 +110,8 @@ def _no_real_vector_store_or_edgar_in_unit_tests(request, monkeypatch):
 
 # --- Thesis fixtures --------------------------------------------------------
 # `theses/*.json` is user-managed (renamed / promoted / archived over time), so
-# tests never read it; they use the dicts in tests/thesis_fixtures.py instead.
+# tests build theses from tests/thesis_fixtures.py instead of reading it; only
+# test_schemas.py opens the files, to check that whatever is there validates.
 
 
 @pytest.fixture

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from data import telegram as tg
-from tests.thesis_fixtures import GENERAL, THESES
+from tests.thesis_fixtures import THESES
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -49,9 +49,7 @@ _ADHOC_DEFENSE_SEMIS = {
         "discount_rate_floor": 0.07,
         "discount_rate_cap": 0.12,
     },
-    "material_thresholds": [
-        {"signal": "roe_ttm", "operator": "<", "value": 12, "unit": "percent"}
-    ],
+    "material_thresholds": [{"signal": "roe_ttm", "operator": "<", "value": 12, "unit": "percent"}],
 }
 
 
@@ -527,11 +525,8 @@ def test_resolve_thesis_slug_returns_none_for_unknown_thesis():
 
 def test_resolve_thesis_slug_picks_universe_match():
     """No thesis specified → pick the first thesis whose universe contains
-    the ticker. NVDA is in ai_cake's universe (and nvda_halo's anchor list)."""
-    slug = tg._resolve_thesis_slug("NVDA", None)
-    assert slug in ("ai_cake", "nvda_halo"), (
-        f"NVDA should resolve to ai_cake or nvda_halo, got {slug}"
-    )
+    the ticker. Among the fixture theses NVDA sits only in ai_cake's universe."""
+    assert tg._resolve_thesis_slug("NVDA", None) == "ai_cake"
 
 
 def test_resolve_thesis_slug_returns_none_for_ticker_in_no_universe():
@@ -803,25 +798,6 @@ async def test_theses_command_dropped_for_unallowed(monkeypatch):
     update = _make_update(chat_id=999, text="/theses")
     await tg.theses_command(update, SimpleNamespace())
     update.message.reply_text.assert_not_called()
-
-
-# --- general thesis MC inputs (regression) --------------------------------
-
-
-def test_general_thesis_has_valuation_block_for_mc():
-    """The MC engine refuses to run without a `valuation` block on the
-    thesis — we observed this live when /drill WEN against general silently
-    skipped MC. Pin that the general fixture thesis (the shape a user-written
-    general.json must follow) carries the required fields."""
-    raw = GENERAL
-    val = raw.get("valuation") or {}
-    assert "equity_risk_premium" in val
-    assert "terminal_growth_rate" in val
-    assert "discount_rate_floor" in val
-    assert "discount_rate_cap" in val
-    # Sanity bounds — Buffett-conservative defaults
-    assert 0.04 <= val["equity_risk_premium"] <= 0.10
-    assert 0.015 <= val["terminal_growth_rate"] <= 0.04
 
 
 # --- /note ---------------------------------------------------------------
@@ -2091,23 +2067,7 @@ async def test_analyze_sends_ticker_picker_keyboard_no_auto_drill(monkeypatch):
 
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
 
-    fake_thesis = Thesis.model_validate({
-        "name": "Defense semis (ad-hoc)",
-        "summary": "Defense-exposed semis with multi-year backlog visibility.",
-        "anchor_tickers": ["MRCY", "KTOS"],
-        "universe": ["MRCY", "KTOS", "LMT", "RTX", "NOC"],
-        "valuation": {
-            "equity_risk_premium": 0.05,
-            "erp_basis": "test",
-            "terminal_growth_rate": 0.025,
-            "terminal_growth_basis": "test",
-            "discount_rate_floor": 0.07,
-            "discount_rate_cap": 0.12,
-        },
-        "material_thresholds": [
-            {"signal": "roe_ttm", "operator": "<", "value": 12, "unit": "percent"},
-        ],
-    })
+    fake_thesis = Thesis.model_validate(_ADHOC_DEFENSE_SEMIS)
     fake_result = at_mod.AdhocThesisResult(
         slug="adhoc_defense_semis",
         thesis=fake_thesis,
@@ -2541,32 +2501,6 @@ def test_resolve_thesis_slug_recognises_general_when_explicit():
     thesis even though AAPL isn't in any universe. Empty universe on the
     general thesis means it can't be auto-picked, but explicit force works."""
     assert tg._resolve_thesis_slug("AAPL", "general") == "general"
-
-
-def test_general_thesis_loaded_with_buffett_thresholds():
-    """Sanity: the general fixture thesis has Buffett-framework material
-    thresholds — moats, leverage, accounting red flags. Pin a few so a
-    future edit can't accidentally swap in a thematic set."""
-    from utils.schemas import Thesis
-
-    raw = GENERAL
-    thesis = Thesis.model_validate(raw)
-    signals = {t.signal for t in thesis.material_thresholds}
-    # Buffett-classic moat / fortress signals must be present.
-    assert "roe_ttm" in signals
-    assert "roic_ttm" in signals
-    assert "debt_to_equity" in signals
-    assert "interest_coverage" in signals
-    # Accounting red flags
-    accounting_phrases = [
-        t.value for t in thesis.material_thresholds
-        if t.signal == "filing_mentions" and t.operator == "contains"
-    ]
-    assert "going concern" in accounting_phrases
-    assert "material weakness" in accounting_phrases
-    # Empty universe is intentional — it's a fall-through thesis.
-    assert thesis.universe == []
-    assert thesis.anchor_tickers == []
 
 
 # --- _send_safe (retry + disk fallback) -----------------------------------

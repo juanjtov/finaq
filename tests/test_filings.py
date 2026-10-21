@@ -22,8 +22,7 @@ from utils.schemas import FilingsOutput
 
 
 def test_build_subqueries_returns_three_with_correct_item_filters(ai_cake):
-    thesis = ai_cake
-    sqs = _build_subqueries("NVDA", thesis)
+    sqs = _build_subqueries("NVDA", ai_cake)
     assert len(sqs) == 3
     labels = {sq["label"] for sq in sqs}
     assert labels == {"risk_factors", "mdna_trajectory", "segment_performance"}
@@ -35,8 +34,7 @@ def test_build_subqueries_returns_three_with_correct_item_filters(ai_cake):
 
 
 def test_build_subqueries_interpolates_thesis_name_and_ticker(ai_cake):
-    thesis = ai_cake
-    sqs = _build_subqueries("NVDA", thesis)
+    sqs = _build_subqueries("NVDA", ai_cake)
     for sq in sqs:
         assert "NVDA" in sq["question"], sq
         assert "AI cake" in sq["question"], sq
@@ -61,7 +59,6 @@ def test_format_chunk_includes_filed_date_and_accession():
 
 
 def test_build_user_prompt_includes_each_subquery_label_and_chunks(ai_cake):
-    thesis = ai_cake
     chunk = {
         "text": "Sample 10-K text.",
         "metadata": {
@@ -70,9 +67,9 @@ def test_build_user_prompt_includes_each_subquery_label_and_chunks(ai_cake):
             "filed_date": "2025-02-26",
         },
     }
-    sqs = _build_subqueries("NVDA", thesis)
+    sqs = _build_subqueries("NVDA", ai_cake)
     prompt = _build_user_prompt(
-        "NVDA", thesis, [(sqs[0], [chunk]), (sqs[1], [chunk]), (sqs[2], [])]
+        "NVDA", ai_cake, [(sqs[0], [chunk]), (sqs[1], [chunk]), (sqs[2], [])]
     )
     assert "AS OF" in prompt
     assert "risk_factors" in prompt

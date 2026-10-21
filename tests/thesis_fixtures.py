@@ -1,12 +1,14 @@
 """Thesis dicts shared by the unit tests.
 
 `theses/*.json` is user-managed — theses get added, renamed, promoted and
-archived over time — so no unit test reads one. These dicts mirror the three
-Phase-0 hand-written theses (now under `theses/archive/`) that the agent
-prompts and the Telegram flows were built against, trimmed to the parts the
-tests assert on: `ai_cake` carries anchors, relationships, thresholds and a
-valuation block; `nvda_halo` and `construction` share tickers with it (the
-ambiguous-ticker flow); `general` is the universe-less catch-all.
+archived over time — so unit tests build theses from these dicts instead
+(only `test_schemas.py` opens the files, to check that whatever is there
+validates). They mirror the Phase-0 theses the agent prompts and the
+Telegram flows were built against — `ai_cake` and `nvda_halo` are archived
+now, `construction` is still live, `general` was the universe-less
+catch-all — trimmed to the parts the tests assert on: `ai_cake` carries
+anchors, relationships, thresholds and a valuation block; `nvda_halo` and
+`construction` share tickers with it (the ambiguous-ticker flow).
 
 Use them through the `ai_cake` / `theses_dir` fixtures in conftest.py, or
 deep-copy a dict where a module-level helper needs one.
