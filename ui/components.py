@@ -58,6 +58,61 @@ BONE = "#EDE5D5"
 INK = "#1A1611"
 
 
+# --- Mission Control component tokens ---------------------------------------
+
+# Day = the §13 palette plus the semantic tones the dashboard already uses
+# (brick for failed, amber for degraded) and three derived surfaces. Night is
+# the same roles re-mapped for a dark surface; it is off by default (Mission
+# Control v2 plan §8) and only reachable through the component's own toggle.
+MC_DAY: dict[str, str] = {
+    "bg": PARCHMENT,
+    "surface": WHITE,
+    "surface2": EGGSHELL,
+    "line": TAUPE,
+    "line2": BONE,
+    "ink": INK,
+    "ink2": "#5E5648",
+    "ink3": "#8A8070",
+    "accent": SAGE,
+    "accent_soft": "#DCE6DD",
+    "warn": "#9A6B1F",
+    "warn_bg": "#F6EBD2",
+    "crit": "#A33D2E",
+    "crit_bg": "#F6E3DD",
+    "glow": "rgba(45,79,58,.22)",
+}
+MC_NIGHT: dict[str, str] = {
+    "bg": "#141A16",
+    "surface": "#1C241F",
+    "surface2": "#232D27",
+    "line": "rgba(241,234,217,.11)",
+    "line2": "rgba(241,234,217,.07)",
+    "ink": "#F1EAD9",
+    "ink2": "#B9B2A2",
+    "ink3": "#8C8678",
+    "accent": "#8FBF9C",
+    "accent_soft": "#24382C",
+    "warn": "#D9A24A",
+    "warn_bg": "#3A2F17",
+    "crit": "#D86A58",
+    "crit_bg": "#3C1F1A",
+    "glow": "rgba(143,191,156,.28)",
+}
+
+
+def mc_tokens(theme: str = "day") -> dict[str, str]:
+    """Placeholder values for `ui/mc_live.html`: the Day set as `{{bg}}`,
+    `{{accent}}`…, the Night set as `{{night_bg}}`…, system font stacks (no
+    CDN), and `{{theme}}` — the set the component starts in. Anything other
+    than "night" starts in Day."""
+    out = dict(MC_DAY)
+    out.update({f"night_{k}": v for k, v in MC_NIGHT.items()})
+    out["theme"] = "night" if theme == "night" else "day"
+    out["font_ui"] = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
+    out["font_mono"] = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace'
+    return out
+
+
 # --- Confidence badge -------------------------------------------------------
 
 

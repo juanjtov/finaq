@@ -1181,7 +1181,8 @@ Curated theses were 3–4 months unedited with no signal anywhere.
   | New Thesis (`new_thesis.py`) | "I want a new persistent thesis." | Pydantic-validated form → `theses/<slug>.json` |
   | Architecture (`architecture.py`) | "What is this platform and how do its parts fit?" | Live read of `agents/`, `data/`, `utils/models.py`, `.env` |
   | Methodology (`methodology.py`) | "Why are the numbers what they are?" | `docs/FINANCE_ASSUMPTIONS.md` + thesis `valuation` blocks |
-  | Mission Control (`mission_control.py`) | "Is the system healthy? What are the recent runs?" | `data_cache/eval/runs/` + (Step 5z) `state.db` |
+  | Mission Control (`mission_control.py`) | Live: "What is the machine doing right now, and what did each agent see and say?" · Runs: "What happened in that run?" · Health: "Is the system healthy?" | `state.db` through `live_snapshot()` / `run_snapshot()` (Live, Runs) + `data_cache/eval/runs/` and freshness probes (Health) |
+  | Run Inspector (`run_inspector.py`) | redirect stub — `/run_inspector?run_id=` lands on Mission Control's Runs tab | — |
 
 - **Why six (not three)**: Direct Agent + New Thesis serve actions (do
   something), not viewing. Architecture + Methodology serve auditability
@@ -1190,9 +1191,20 @@ Curated theses were 3–4 months unedited with no signal anywhere.
   drill-in surface, which is the most-used path.
 - **Reusable widgets** in `ui/components.py`: `confidence_badge`,
   `kpi_grid`, `mc_chart`, `scenario_card`, `evidence_list`,
-  `watchlist_card`, `freshness_card`, `agent_expander`, `page_header`.
-  Every page imports from this module so palette / layout drift across
-  surfaces is impossible.
+  `watchlist_card`, `freshness_card`, `agent_expander`, `page_header`,
+  and `mc_tokens()` — the §13 palette (plus a Night set, off by default)
+  as the placeholder values of `ui/mc_live.html`. Every page imports from
+  this module so palette / layout drift across surfaces is impossible.
+- **Revision (Mission Control v2 Phase 2, 2026-10-21):** Mission Control is
+  one page with three tabs — Live, Runs, Health — and the Run Inspector is a
+  redirect stub into Runs (docs/MISSION_CONTROL_PLAN.md §3.4). The Live tab
+  embeds `ui/mc_live.html` (one file, vanilla JS, no CDN) through
+  `st.components.v1.html`: mockup C's control-room graph with the running
+  node emphasised, edges that light up as data flows, the CIO step ribbon,
+  the fleet column, mockup B's waterfall underneath, and one inspector
+  drawer (system prompt · user prompt · output · telemetry). Replay feeds
+  the same component a stored run with a scrubber. See §11.7 for the
+  snapshot contract and the iframe re-mount rule.
 
 ### 10.4 Per-agent `ask()` Q&A path
 
@@ -1371,7 +1383,7 @@ Curated theses were 3–4 months unedited with no signal anywhere.
   softens this: truncated per-call excerpts are mirrored locally — see
   §11.1 revision — but full traces/replay stay LangSmith-only.)
 
-### 11.6 Run traceability (runs table → Run Inspector)
+### 11.6 Run traceability (runs table → Runs tab)
 
 - **Decision:** Mission Control's "Recent drill-in runs" table shows
   per-run duration, LLM-call count, tokens, summed cost, failed-agent
@@ -1390,6 +1402,40 @@ Curated theses were 3–4 months unedited with no signal anywhere.
   `state.cio_action_for_run()` joining `cio_actions` ↔ `cio_runs`. The
   CIO cycles panel's drill/reuse rows carry Inspect buttons jumping to
   the corresponding run, closing the lineage loop in both directions.
+- **Revision (Mission Control v2 Phase 2, 2026-10-21):** the Run Inspector
+  page is now a redirect stub; Health's "Open →" and the CIO Inspect buttons
+  stage a jump (`inspect_run_id` + `mc_jump_tab` session keys, applied
+  before `st.tabs` renders) into Mission Control's Runs tab, and the call
+  trace there shows the FULL system / user / output text from
+  `run_snapshot()` (`st.expander` + `st.code`), falling back to the clipped
+  excerpts for pre-v9 calls.
+
+### 11.7 The live view: snapshot contract and the iframe re-mount rule
+
+- **Decision:** the Live tab is a Streamlit page plus one embedded HTML/JS
+  component, not a sidecar server (plan §0). `data.state.live_snapshot()` is
+  the single read contract (plan §3.3): `now`, `poll_s`, `vitals`,
+  `medians`, `cio[]` (cycles with `steps` = spans and `actions`), `runs[]`
+  (every ACTIVE run with nodes → calls → full `messages` / `response`) and
+  `recent[]` (last 20 runs with per-node status). `run_snapshot(run_id)` is
+  one run in the same `runs[]` shape with full messages; the Runs tab wraps
+  it (`replay_snapshot`) with the run's CIO cycle so the component replays
+  it unchanged. Both are pure reads; the Live fragment calls
+  `sweep_stale_runs()` itself before polling.
+- **Re-mount rule:** the fragment (`st.fragment(run_every="1s")`) hashes the
+  snapshot WITHOUT `now`, rebuilds the component HTML only when that hash
+  changes (`live_html()`), and otherwise re-emits the previous HTML string
+  byte for byte — Streamlit then leaves the iframe mounted, so the page
+  animates client-side between polls (elapsed counters, progress rings and
+  edge flow tick from the row timestamps offset by the snapshot's `now`)
+  and re-mounts only on a real change (≈15 per drill-in). The component
+  restores its selection, drawer tab and scroll from `sessionStorage`
+  keyed by run id after a re-mount. Prompts containing `</script>` are safe:
+  the snapshot is embedded as JSON with `<` escaped.
+- **Why one module-level cache:** the last hash + HTML live in the page
+  module, not in session state, so every browser tab shares one build per
+  change and the fragment body can be driven directly in tests
+  (`run_every` is inert under `AppTest`).
 
 ---
 
