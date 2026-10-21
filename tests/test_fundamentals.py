@@ -5,9 +5,6 @@ Pure-logic, no network. Real LLM calls live in test_fundamentals_integration.py.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from agents.fundamentals import (
@@ -21,9 +18,6 @@ from agents.fundamentals import (
     run,
 )
 from utils.schemas import FundamentalsOutput, Projections
-
-THESES_DIR = Path(__file__).parents[1] / "theses"
-
 
 # --- KPI computation ---------------------------------------------------------
 
@@ -278,10 +272,10 @@ def test_check_freshness_handles_malformed_timestamp():
     assert _check_freshness({"fetched_at": "not a date"}) is None
 
 
-def test_build_user_prompt_renders_as_of_block():
+def test_build_user_prompt_renders_as_of_block(ai_cake):
     """The freshness header must be at the top of the prompt so the LLM sees it
     before any KPI."""
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
+    thesis = ai_cake
     prompt = _build_user_prompt(
         "NVDA",
         thesis,
@@ -296,8 +290,8 @@ def test_build_user_prompt_renders_as_of_block():
 # --- Prompt assembly ---------------------------------------------------------
 
 
-def test_build_user_prompt_includes_ticker_thesis_kpis():
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
+def test_build_user_prompt_includes_ticker_thesis_kpis(ai_cake):
+    thesis = ai_cake
     prompt = _build_user_prompt("NVDA", thesis, {"revenue_5y_cagr": 0.45})
     assert "NVDA" in prompt
     assert "AI cake" in prompt
@@ -364,14 +358,14 @@ def test_derive_fallback_projections_mixes_derived_and_defaults():
 
 
 @pytest.mark.asyncio
-async def test_run_returns_null_hypothesis_when_no_kpis(monkeypatch):
+async def test_run_returns_null_hypothesis_when_no_kpis(monkeypatch, ai_cake):
     """If yfinance returns nothing AND we have no history, we still emit a valid
     FundamentalsOutput so Monte Carlo and Synthesis don't crash. Projections are
     the generic-mediocre-business baseline."""
     from agents import fundamentals as f
 
     monkeypatch.setattr(f, "get_financials", lambda t, **kw: {})
-    state = {"ticker": "ZZZZ", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "ZZZZ", "thesis": ai_cake}
     result = await run(state)
     out = FundamentalsOutput.model_validate(result["fundamentals"])
     assert Projections(**out.projections.model_dump()) == NULL_HYPOTHESIS_PROJECTIONS
@@ -379,7 +373,7 @@ async def test_run_returns_null_hypothesis_when_no_kpis(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_preserves_deterministic_kpis_when_llm_drops_them(monkeypatch):
+async def test_run_preserves_deterministic_kpis_when_llm_drops_them(monkeypatch, ai_cake):
     """Real-world bug: the LLM sometimes echoes the kpis dict but omits one-off
     keys like `shares_outstanding` or `current_price`. Both are required by
     Monte Carlo downstream — if the LLM drops them, MC silently skips.
@@ -425,7 +419,7 @@ async def test_run_preserves_deterministic_kpis_when_llm_drops_them(monkeypatch)
     monkeypatch.setattr(f, "get_financials", lambda t, **kw: {"info": {"longName": "NVDA"}})
     monkeypatch.setattr(f, "_call_llm", lambda *args, **kwargs: llm_payload)
 
-    state = {"ticker": "NVDA", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "NVDA", "thesis": ai_cake}
     result = await run(state)
     out = FundamentalsOutput.model_validate(result["fundamentals"])
 
@@ -444,7 +438,7 @@ async def test_run_preserves_deterministic_kpis_when_llm_drops_them(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_run_deterministic_kpis_override_llm_hallucinations(monkeypatch):
+async def test_run_deterministic_kpis_override_llm_hallucinations(monkeypatch, ai_cake):
     """If the LLM hallucinates a different value for a deterministic key,
     the deterministic value MUST win. Otherwise an LLM brain fart can corrupt
     Monte Carlo's input distribution."""
@@ -472,7 +466,7 @@ async def test_run_deterministic_kpis_override_llm_hallucinations(monkeypatch):
     monkeypatch.setattr(f, "get_financials", lambda t, **kw: {"info": {"longName": "NVDA"}})
     monkeypatch.setattr(f, "_call_llm", lambda *args, **kwargs: llm_payload)
 
-    state = {"ticker": "NVDA", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "NVDA", "thesis": ai_cake}
     result = await run(state)
     out = FundamentalsOutput.model_validate(result["fundamentals"])
 
@@ -481,7 +475,7 @@ async def test_run_deterministic_kpis_override_llm_hallucinations(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_uses_history_derived_fallback_on_llm_failure(monkeypatch):
+async def test_run_uses_history_derived_fallback_on_llm_failure(monkeypatch, ai_cake):
     """LLM fails but compute_kpis succeeded — fallback uses *those* values, not
     the null hypothesis. Confirms approach (A): degrade with history when we have it."""
     from agents import fundamentals as f
@@ -501,7 +495,7 @@ async def test_run_uses_history_derived_fallback_on_llm_failure(monkeypatch):
         f, "_call_llm", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
     )
 
-    state = {"ticker": "STUB", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "STUB", "thesis": ai_cake}
     result = await run(state)
     out = FundamentalsOutput.model_validate(result["fundamentals"])
 
@@ -521,7 +515,7 @@ async def test_run_uses_history_derived_fallback_on_llm_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
+async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch, ai_cake):
     """Happy path with mocked LLM: output should be the LLM's response, schema-validated."""
     from agents import fundamentals as f
 
@@ -552,7 +546,7 @@ async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
     }
     monkeypatch.setattr(f, "_call_llm", lambda *a, **kw: fake_response)
 
-    state = {"ticker": "NVDA", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "NVDA", "thesis": ai_cake}
     result = await run(state)
     out = FundamentalsOutput.model_validate(result["fundamentals"])
     assert out.projections.revenue_growth_mean == pytest.approx(0.25)

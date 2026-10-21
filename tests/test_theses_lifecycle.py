@@ -248,15 +248,16 @@ def test_review_age_days_reads_last_reviewed(isolated_theses_dir):
 
 def test_review_age_days_falls_back_to_mtime_when_field_absent(isolated_theses_dir):
     import os
-    import time
-    from datetime import date
+    from datetime import UTC, datetime, timedelta
 
     _write(isolated_theses_dir, "beta")  # no last_reviewed
     path = isolated_theses_dir / "beta.json"
-    ten_days_ago = time.time() - 10 * 86400
+    # Same UTC clock as `review_age_days`: `date.today()` is local time and sits a
+    # day off the file's UTC mtime for a few hours around midnight.
+    now = datetime.now(UTC)
+    ten_days_ago = (now - timedelta(days=10)).timestamp()
     os.utime(path, (ten_days_ago, ten_days_ago))
-    age = theses_lifecycle.review_age_days("beta", today=date.today())
-    assert age in (10, 11)  # UTC date rounding at the boundary
+    assert theses_lifecycle.review_age_days("beta", today=now.date()) == 10
 
 
 def test_review_age_days_malformed_field_falls_back_to_mtime(isolated_theses_dir):
@@ -303,10 +304,11 @@ def test_overdue_theses_lists_only_past_threshold_oldest_first(isolated_theses_d
 
 def test_promote_stamps_last_reviewed(isolated_theses_dir):
     """Promotion is a human judgement → counts as a review."""
-    from datetime import date
+    from datetime import UTC, datetime
 
     (isolated_theses_dir / "adhoc_zeta.json").write_text(_valid_thesis_json("Zeta"))
     ok, _ = theses_lifecycle.promote_thesis("adhoc_zeta")
     assert ok
     data = json.loads((isolated_theses_dir / "zeta.json").read_text())
-    assert data["last_reviewed"] == date.today().isoformat()
+    # `mark_reviewed` stamps the UTC date; `date.today()` is local time.
+    assert data["last_reviewed"] == datetime.now(UTC).date().isoformat()

@@ -5,9 +5,6 @@ Pure-logic, no network. Real Finnhub + real LLM live in test_news_integration.py
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from agents.news import (
@@ -20,8 +17,6 @@ from agents.news import (
     run,
 )
 from utils.schemas import NewsOutput
-
-THESES_DIR = Path(__file__).parents[1] / "theses"
 
 
 def _fake_article(idx: int, title: str = "Sample article", **overrides) -> dict:
@@ -68,8 +63,8 @@ def test_format_article_renders_source_or_unknown():
 # --- Prompt assembly --------------------------------------------------------
 
 
-def test_build_user_prompt_includes_thesis_and_articles():
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
+def test_build_user_prompt_includes_thesis_and_articles(ai_cake):
+    thesis = ai_cake
     articles = [_fake_article(1), _fake_article(2)]
     prompt = _build_user_prompt("NVDA", "NVIDIA Corporation", thesis, articles)
     assert "AS OF" in prompt
@@ -81,8 +76,8 @@ def test_build_user_prompt_includes_thesis_and_articles():
     assert "article 2" in prompt
 
 
-def test_build_user_prompt_marks_empty_article_list():
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
+def test_build_user_prompt_marks_empty_article_list(ai_cake):
+    thesis = ai_cake
     prompt = _build_user_prompt("NVDA", "NVIDIA", thesis, [])
     assert "no articles retrieved" in prompt.lower()
 
@@ -135,14 +130,14 @@ def test_company_name_falls_back_to_short_name(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_returns_stale_news_message_when_finnhub_empty(monkeypatch):
+async def test_run_returns_stale_news_message_when_finnhub_empty(monkeypatch, ai_cake):
     """Finnhub returned no articles — output is schema-valid with a clear staleness flag."""
     from agents import news as n
 
     monkeypatch.setattr(n, "_company_name_for", lambda t, **kw: "Stub Co.")
     monkeypatch.setattr(n, "search_news", lambda *a, **kw: [])
 
-    state = {"ticker": "ZZZZ", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "ZZZZ", "thesis": ai_cake}
     result = await run(state)
     out = NewsOutput.model_validate(result["news"])
     assert "STALE NEWS" in out.summary
@@ -150,7 +145,7 @@ async def test_run_returns_stale_news_message_when_finnhub_empty(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_falls_back_when_llm_fails(monkeypatch):
+async def test_run_falls_back_when_llm_fails(monkeypatch, ai_cake):
     """LLM raises but Finnhub succeeded — output must still be schema-valid."""
     from agents import news as n
 
@@ -162,7 +157,7 @@ async def test_run_falls_back_when_llm_fails(monkeypatch):
 
     monkeypatch.setattr(n, "_call_llm", boom)
 
-    state = {"ticker": "STUB", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "STUB", "thesis": ai_cake}
     result = await run(state)
     out = NewsOutput.model_validate(result["news"])
     assert any("llm" in e for e in out.errors)
@@ -171,7 +166,7 @@ async def test_run_falls_back_when_llm_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
+async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch, ai_cake):
     from agents import news as n
 
     monkeypatch.setattr(n, "_company_name_for", lambda t, **kw: "Stub Co.")
@@ -209,7 +204,7 @@ async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
     }
     monkeypatch.setattr(n, "_call_llm", lambda *a, **kw: fake_response)
 
-    state = {"ticker": "NVDA", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "NVDA", "thesis": ai_cake}
     result = await run(state)
     out = NewsOutput.model_validate(result["news"])
     assert "[stub]" in out.summary

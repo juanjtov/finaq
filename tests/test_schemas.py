@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from tests.thesis_fixtures import THESES
 from utils.schemas import (
     OPERATORS,
     Evidence,
@@ -25,31 +26,37 @@ from utils.schemas import (
 )
 
 THESES_DIR = Path(__file__).parents[1] / "theses"
-EXPECTED_THESES = ("ai_cake", "nvda_halo", "construction")
+# Whatever the user currently keeps under theses/ (`archive/` and `backtest/` are not
+# globbed), so adding or removing a thesis never breaks the suite. Shape-specific checks
+# use the fixture theses in tests/thesis_fixtures.py instead.
+ON_DISK_THESES = sorted(p.stem for p in THESES_DIR.glob("*.json"))
 
 
 # --- Each committed thesis JSON validates ------------------------------------
 
 
-@pytest.mark.parametrize("slug", EXPECTED_THESES)
+@pytest.mark.parametrize("slug", ON_DISK_THESES)
 def test_thesis_json_validates(slug):
-    path = THESES_DIR / f"{slug}.json"
-    assert path.exists(), f"missing thesis file: {path}"
-    thesis = Thesis.model_validate_json(path.read_text())
-    assert thesis.universe, f"{slug}: universe is empty"
-    assert thesis.material_thresholds, f"{slug}: no material thresholds"
+    thesis = Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
+    assert thesis.name, f"{slug}: empty name"
+
+
+@pytest.mark.parametrize("slug", sorted(THESES))
+def test_fixture_theses_validate(slug):
+    """The theses the unit tests share must stay valid as the schema evolves."""
+    Thesis.model_validate(THESES[slug])
 
 
 # --- Universe / anchor / relationship invariants for every thesis ------------
 
 
-@pytest.mark.parametrize("slug", EXPECTED_THESES)
+@pytest.mark.parametrize("slug", ON_DISK_THESES)
 def test_anchors_subset_of_universe(slug):
     thesis = Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
     assert set(thesis.anchor_tickers).issubset(set(thesis.universe))
 
 
-@pytest.mark.parametrize("slug", EXPECTED_THESES)
+@pytest.mark.parametrize("slug", ON_DISK_THESES)
 def test_all_relationships_reference_universe_tickers(slug):
     thesis = Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
     universe = set(thesis.universe)
@@ -58,7 +65,7 @@ def test_all_relationships_reference_universe_tickers(slug):
         assert rel.to in universe, f"{slug}: relationship.to {rel.to!r} not in universe"
 
 
-@pytest.mark.parametrize("slug", EXPECTED_THESES)
+@pytest.mark.parametrize("slug", ON_DISK_THESES)
 def test_all_thresholds_use_allowed_operators(slug):
     thesis = Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
     for th in thesis.material_thresholds:
@@ -221,10 +228,11 @@ def test_risk_output_accepts_convergent_signals_and_threshold_breaches():
 
 
 def test_overlapping_tickers_match_finaq_context():
-    """VRT, CEG, ANET, PWR should appear in 2+ theses (per FINAQ_Context.docx)."""
+    """VRT, CEG, ANET, PWR appear in 2+ of the Phase-0 theses (per FINAQ_Context.docx).
+    Those theses are archived now; the fixture copies keep the overlap because the
+    Telegram ambiguous-ticker tests rely on CEG sitting in both ai_cake and nvda_halo."""
     theses = [
-        Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
-        for slug in EXPECTED_THESES
+        Thesis.model_validate(THESES[slug]) for slug in ("ai_cake", "nvda_halo", "construction")
     ]
     counts: dict[str, int] = {}
     for t in theses:

@@ -11,10 +11,14 @@ real `data_cache/state.db`.
 
 from __future__ import annotations
 
+import copy
 import os
+from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
+
+from tests.thesis_fixtures import AI_CAKE, write_theses
 
 load_dotenv()
 
@@ -101,3 +105,21 @@ def _no_real_vector_store_or_edgar_in_unit_tests(request, monkeypatch):
         freshness_mod, "latest_filing_dates", lambda ticker, forms=None: {}
     )
     yield
+
+
+# --- Thesis fixtures --------------------------------------------------------
+# `theses/*.json` is user-managed (renamed / promoted / archived over time), so
+# tests never read it; they use the dicts in tests/thesis_fixtures.py instead.
+
+
+@pytest.fixture
+def ai_cake() -> dict:
+    """A fresh copy of the `ai_cake` fixture thesis."""
+    return copy.deepcopy(AI_CAKE)
+
+
+@pytest.fixture
+def theses_dir(tmp_path: Path) -> Path:
+    """A throwaway `theses/` holding every fixture thesis as `{slug}.json`.
+    Point a module's `THESES_DIR` at it with monkeypatch."""
+    return write_theses(tmp_path / "theses")

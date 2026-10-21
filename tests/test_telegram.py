@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from data import telegram as tg
+from tests.thesis_fixtures import GENERAL, THESES
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -33,6 +34,33 @@ def _make_update(chat_id: int | None, text: str = "") -> SimpleNamespace:
     )
     message = SimpleNamespace(reply_text=reply_mock, text=text)
     return SimpleNamespace(effective_chat=chat, message=message)
+
+
+_ADHOC_DEFENSE_SEMIS = {
+    "name": "Defense semis (ad-hoc)",
+    "summary": "test summary",
+    "anchor_tickers": ["MRCY", "KTOS"],
+    "universe": ["MRCY", "KTOS", "LMT"],
+    "valuation": {
+        "equity_risk_premium": 0.05,
+        "erp_basis": "x",
+        "terminal_growth_rate": 0.025,
+        "terminal_growth_basis": "x",
+        "discount_rate_floor": 0.07,
+        "discount_rate_cap": 0.12,
+    },
+    "material_thresholds": [
+        {"signal": "roe_ttm", "operator": "<", "value": 12, "unit": "percent"}
+    ],
+}
+
+
+@pytest.fixture(autouse=True)
+def _fixture_theses_on_disk(theses_dir, monkeypatch):
+    """Handlers read theses from a throwaway dir holding the fixture theses plus
+    one ad-hoc thesis — never the user-managed `theses/`, whose contents change."""
+    (theses_dir / "adhoc_defense_semis.json").write_text(json.dumps(_ADHOC_DEFENSE_SEMIS))
+    monkeypatch.setattr(tg, "THESES_DIR", theses_dir)
 
 
 # --- Allowlist parsing ----------------------------------------------------
@@ -474,12 +502,8 @@ def test_format_drill_summary_handles_missing_mc(monkeypatch):
 
 
 def test_list_thesis_slugs_returns_existing_files():
-    slugs = tg._list_thesis_slugs()
-    # The repo has these three theses checked in — guard against a
-    # silent rename / removal.
-    assert "ai_cake" in slugs
-    assert "construction" in slugs
-    assert "nvda_halo" in slugs
+    # The autouse fixture seeds THESES_DIR with the fixture theses plus one ad-hoc one.
+    assert tg._list_thesis_slugs() == sorted([*THESES, "adhoc_defense_semis"])
 
 
 def test_resolve_thesis_slug_uses_explicit_when_valid():
@@ -787,8 +811,9 @@ async def test_theses_command_dropped_for_unallowed(monkeypatch):
 def test_general_thesis_has_valuation_block_for_mc():
     """The MC engine refuses to run without a `valuation` block on the
     thesis — we observed this live when /drill WEN against general silently
-    skipped MC. Pin that the general thesis carries the required fields."""
-    raw = json.loads(Path("theses/general.json").read_text())
+    skipped MC. Pin that the general fixture thesis (the shape a user-written
+    general.json must follow) carries the required fields."""
+    raw = GENERAL
     val = raw.get("valuation") or {}
     assert "equity_risk_premium" in val
     assert "terminal_growth_rate" in val
@@ -2180,7 +2205,8 @@ async def test_analyze_action_callback_pick_omits_ingest_for_ingested_ticker(
     button_data = [
         btn.callback_data for row in markup.inline_keyboard for btn in row
     ]
-    assert any(d == "ad:adhoc_defense_semis:NVDA" for d in button_data)
+    # An ingested ticker drills through the EDGAR freshness gate (`ag:`), never raw.
+    assert any(d == "ag:adhoc_defense_semis:NVDA" for d in button_data)
     assert not any(
         d.startswith("ai:") for d in button_data
     ), "Ingest button must NOT appear when ticker is already ingested"
@@ -2217,8 +2243,9 @@ async def test_analyze_action_callback_ingest_then_drill(monkeypatch):
     ingest_called: dict = {}
     drill_called: dict = {}
 
-    async def _stub_ingest(ticker):
+    async def _stub_ingest(ticker, **kwargs):
         ingest_called["ticker"] = ticker
+        ingest_called["force_refresh"] = kwargs.get("force_refresh")
         return 42  # chunk count
 
     async def _stub_drill(reply_target, ticker, thesis_slug):
@@ -2234,8 +2261,10 @@ async def test_analyze_action_callback_ingest_then_drill(monkeypatch):
         chat_id=111, data="ai:adhoc_defense_semis:MRCY"
     )
     await tg.analyze_action_callback(update, SimpleNamespace())
-    # Both ingest + drill must have run, in order.
+    # Both ingest + drill must have run, in order; the bot forces a refresh so a
+    # stale-but-ingested ticker actually pulls the new accession.
     assert ingest_called.get("ticker") == "MRCY"
+    assert ingest_called.get("force_refresh") is True
     assert drill_called.get("ticker") == "MRCY"
     assert drill_called.get("thesis_slug") == "adhoc_defense_semis"
     # And the user saw an ingest-status reply (alongside any others).
@@ -2293,33 +2322,11 @@ async def test_analyze_action_callback_cancel_edits_message(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_analyze_action_callback_back_re_renders_picker(
-    monkeypatch, tmp_path
-):
-    """Tap on 'Back' → bot reloads the thesis from disk + re-renders
-    the ticker-picker keyboard. Same shape as the initial picker."""
+async def test_analyze_action_callback_back_re_renders_picker(monkeypatch):
+    """Tap on 'Back' → bot reloads the thesis from disk (the ad-hoc fixture the
+    autouse fixture wrote) + re-renders the ticker-picker keyboard. Same shape
+    as the initial picker."""
     monkeypatch.setattr(tg, "_allowed_chat_ids", {111})
-    monkeypatch.setattr(tg, "THESES_DIR", tmp_path)
-    # Write a real thesis JSON so _try_load_adhoc_thesis can reload.
-    (tmp_path / "adhoc_defense_semis.json").write_text(
-        json.dumps({
-            "name": "Defense semis (ad-hoc)",
-            "summary": "test summary",
-            "anchor_tickers": ["MRCY", "KTOS"],
-            "universe": ["MRCY", "KTOS", "LMT"],
-            "valuation": {
-                "equity_risk_premium": 0.05,
-                "erp_basis": "x",
-                "terminal_growth_rate": 0.025,
-                "terminal_growth_basis": "x",
-                "discount_rate_floor": 0.07,
-                "discount_rate_cap": 0.12,
-            },
-            "material_thresholds": [
-                {"signal": "roe_ttm", "operator": "<", "value": 12, "unit": "percent"}
-            ],
-        })
-    )
     update, edit, answer, _ = _make_callback_query(
         chat_id=111, data="ab:adhoc_defense_semis"
     )
@@ -2537,12 +2544,12 @@ def test_resolve_thesis_slug_recognises_general_when_explicit():
 
 
 def test_general_thesis_loaded_with_buffett_thresholds():
-    """Sanity: the general thesis on disk has Buffett-framework material
+    """Sanity: the general fixture thesis has Buffett-framework material
     thresholds — moats, leverage, accounting red flags. Pin a few so a
     future edit can't accidentally swap in a thematic set."""
     from utils.schemas import Thesis
 
-    raw = json.loads(Path("theses/general.json").read_text())
+    raw = GENERAL
     thesis = Thesis.model_validate(raw)
     signals = {t.signal for t in thesis.material_thresholds}
     # Buffett-classic moat / fortress signals must be present.

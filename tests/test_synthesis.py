@@ -17,7 +17,7 @@ Tier 3 integration sanity lives in test_synthesis_sanity.py (`pytest -m integrat
 
 from __future__ import annotations
 
-import json
+import copy
 import re
 from pathlib import Path
 
@@ -36,11 +36,9 @@ from agents.synthesis import (
     _strip_code_fences,
     run,
 )
+from tests.thesis_fixtures import AI_CAKE
 from utils.pdf_export import export
 from utils.schemas import SynthesisOutput
-
-THESES_DIR = Path(__file__).parents[1] / "theses"
-
 
 # --- Fixtures ---------------------------------------------------------------
 
@@ -48,10 +46,9 @@ THESES_DIR = Path(__file__).parents[1] / "theses"
 def _full_state() -> dict:
     """A maximally-populated state — every upstream agent emitted a non-empty,
     schema-valid output. Used to exercise the prompt assembly path."""
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
     return {
         "ticker": "NVDA",
-        "thesis": thesis,
+        "thesis": copy.deepcopy(AI_CAKE),
         "fundamentals": {
             "summary": "NVDA: 47% YoY revenue growth, 65% operating margins.",
             "kpis": {
@@ -278,9 +275,9 @@ def test_build_user_prompt_includes_thesis_thresholds():
     assert "fcf_yield" in p
 
 
-def test_build_user_prompt_handles_partial_state():
+def test_build_user_prompt_handles_partial_state(ai_cake):
     """If fundamentals failed but filings + news ran, prompt still assembles."""
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
+    thesis = ai_cake
     state = {
         "ticker": "NVDA",
         "thesis": thesis,
@@ -420,9 +417,9 @@ def test_coerce_keeps_explicit_watchlist_over_markdown_recovery():
 
 
 @pytest.mark.asyncio
-async def test_run_fallback_when_no_upstream_state():
+async def test_run_fallback_when_no_upstream_state(ai_cake):
     """No fundamentals + filings + news + risk + MC → fallback, no LLM call."""
-    state = {"ticker": "ZZZZ", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "ZZZZ", "thesis": ai_cake}
     result = await run(state)
     assert "Synthesis unavailable" in result["report"]
     assert result["synthesis_confidence"] == "low"
