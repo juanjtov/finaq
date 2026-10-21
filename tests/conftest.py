@@ -38,6 +38,7 @@ _MODEL_STUB_VARS = (
     "MODEL_JUDGE",
     "MODEL_AGENT_QA",
     "MODEL_EMBEDDINGS",
+    "MODEL_CIO",
 )
 
 for _name in _MODEL_STUB_VARS:
