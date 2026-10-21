@@ -204,6 +204,7 @@ def test_main_dashboard_renders_without_exception(_no_query_params):
         "new_thesis.py",
         "theses_admin.py",
         "backtest.py",
+        "halo_graph.py",
     ],
 )
 def test_each_page_renders_without_exception(page_file):

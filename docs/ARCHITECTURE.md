@@ -1704,13 +1704,33 @@ data, and edges are frequently plausible-but-wrong. Discovery replaces
   store (`data/graph.py` + `state.db` tables), the proposal prompt, the
   8-ticker universe cap (`MAX_UNIVERSE`), opt-in filings auto-ingest
   (`discover(ingest=True)` / `--ingest`), the
-  `python -m scripts.run_discovery` CLI, and unit tests.
-- **Deferred to a follow-up (POSTPONED §Phase 2+):** the Streamlit
-  graph-visualisation page (kept out to keep the PR reviewable and avoid
-  colliding with in-flight Mission Control UI work), per-edge LLM
+  `python -m scripts.run_discovery` CLI, the Streamlit halo-graph
+  visualisation page (`ui/pages/halo_graph.py`, §13.7, shipped 2026-09-09
+  once the Mission Control UI work had merged), and unit tests.
+- **Deferred to a follow-up (POSTPONED §Phase 2+):** per-edge LLM
   adjudication, persistent re-discovery / graph diffing over time, the
   Notion graph mirror + bidirectional sync, and an eval suite on whether a
   wider universe (beyond the 8-cap) discovers better winners.
+
+### 13.7 Halo-graph visualisation page (`ui/pages/halo_graph.py`)
+
+- **Decision:** a Streamlit page renders a chosen thesis's halo graph as a
+  mermaid node-link diagram (anchors sage-filled, grounded edges solid,
+  pruned edges dashed), an edge table with a confidence bar + an expander of
+  the corroborating filing/news evidence, and a recursive-CTE neighbourhood
+  explorer over the stored graph.
+- **Data-source precedence:** the graph store first (`data.graph` — carries
+  confidence, the grounded flag, evidence, and the pruned edges kept for
+  audit); the thesis file's own `relationships` as a fallback, so curated
+  theses and slugs not yet discovered still render (grounded subset, no
+  confidence). The page states which source it used.
+- **Why this shape:** mermaid is drawn client-side from a CDN — reusing the
+  Architecture page's topology-diagram embedding (§10.3), with `htmlLabels`
+  enabled here for the two-line ticker/name node labels — so the graph needs
+  **no new Python dependency and no graph-layout library**. Per the
+  §13 / CLAUDE.md §13 palette (a single sage accent + neutrals), grounded vs
+  pruned is the only colour axis on edges; the relationship *type* rides in
+  the edge label so all four types stay legible without inventing colours.
 
 ---
 
