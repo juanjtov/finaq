@@ -6,7 +6,11 @@ data_cache/state.db (and so they're isolated from each other).
 
 from __future__ import annotations
 
+import asyncio
+import os
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1182,3 +1186,813 @@ def test_manifest_reads_do_not_create_a_missing_db(tmp_path: Path):
     assert st.ingested_filing_chunks("NKE", "acc", db_path=db) is None
     assert st.ingest_manifest_summary(db_path=db)["tickers"] == 0
     assert not db.exists()
+
+
+# --- Schema v9 — Mission Control v2 Phase 1 ---------------------------------
+# Two-phase node + LLM rows, prompt blobs with retention, spans, the stale
+# sweeper, medians and the live / run snapshots (docs/MISSION_CONTROL_PLAN.md §3).
+
+V9_TABLES = {"prompt_blobs", "llm_messages", "spans"}
+
+
+def _table_names(db: Path) -> set[str]:
+    with sqlite3.connect(db) as conn:
+        return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+
+def _columns(db: Path, table: str) -> set[str]:
+    with sqlite3.connect(db) as conn:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _one(db: Path, sql: str, *args) -> dict:
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        return dict(conn.execute(sql, args).fetchone())
+
+
+def _hours_ago(hours: float) -> str:
+    return (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+
+
+def test_init_db_v9_creates_new_tables_and_columns(tmp_path: Path):
+    db = tmp_path / "v9.db"
+    st.init_db(db)
+    assert st.SCHEMA_VERSION == 9
+    assert V9_TABLES.issubset(_table_names(db))
+    assert "pid" in _columns(db, "node_runs")
+    assert "source" in _columns(db, "graph_runs")
+    assert {"status", "ended_at", "error", "attempt"}.issubset(_columns(db, "llm_calls"))
+
+
+def test_connect_applies_wal_and_busy_timeout(tmp_path: Path):
+    db = tmp_path / "pragmas.db"
+    st.init_db(db)
+    conn = st._connect(db)
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        conn.close()
+    # journal_mode is persistent on the file: a plain connection sees WAL too.
+    with sqlite3.connect(db) as plain:
+        assert plain.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+_V8_DDL = """
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE graph_runs (
+    run_id TEXT PRIMARY KEY, ticker TEXT, thesis TEXT, started_at TEXT NOT NULL,
+    ended_at TEXT, duration_s REAL, status TEXT NOT NULL, error TEXT, confidence TEXT);
+CREATE TABLE node_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, node TEXT NOT NULL,
+    started_at TEXT NOT NULL, ended_at TEXT, duration_s REAL, status TEXT NOT NULL, error TEXT,
+    tokens_in INTEGER NOT NULL DEFAULT 0, tokens_out INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0.0, n_calls INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE llm_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, node TEXT NOT NULL DEFAULT '',
+    ts TEXT NOT NULL, model TEXT, latency_s REAL NOT NULL DEFAULT 0.0,
+    tokens_in INTEGER NOT NULL DEFAULT 0, tokens_out INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0.0, prompt_excerpt TEXT, response_excerpt TEXT);
+INSERT INTO meta VALUES ('schema_version', '8');
+INSERT INTO graph_runs (run_id, ticker, thesis, started_at, status)
+    VALUES ('r1', 'NVDA', 'ai_cake', '2026-10-01T00:00:00+00:00', 'completed');
+INSERT INTO node_runs (run_id, node, started_at, ended_at, duration_s, status)
+    VALUES ('r1', 'fundamentals', '2026-10-01T00:00:00+00:00', '2026-10-01T00:01:00+00:00',
+            60.0, 'completed');
+INSERT INTO llm_calls (run_id, node, ts, model, latency_s, response_excerpt)
+    VALUES ('r1', 'fundamentals', '2026-10-01T00:01:00+00:00', 'm', 1.0, 'ok');
+INSERT INTO llm_calls (run_id, node, ts, model, latency_s, response_excerpt)
+    VALUES ('r1', 'synthesis', '2026-10-01T00:02:00+00:00', 'm', 1.0, 'CALL FAILED: upstream 500');
+"""
+
+
+def test_init_db_v8_to_v9_migration_keeps_rows_and_backfills(tmp_path: Path):
+    """A hand-built v8 file (no v9 columns / tables) migrates in place: every
+    row survives, new columns get their defaults, and the two backfills run —
+    pre-v9 `CALL FAILED` rows become status=failed with the error, and
+    `ended_at` = `ts` (the old rows were written after the response)."""
+    db = tmp_path / "v8.db"
+    with sqlite3.connect(db) as conn:
+        conn.executescript(_V8_DDL)
+    st.init_db(db)
+    assert V9_TABLES.issubset(_table_names(db))
+    assert _one(db, "SELECT COUNT(*) AS n FROM graph_runs")["n"] == 1
+    assert _one(db, "SELECT COUNT(*) AS n FROM node_runs")["n"] == 1
+    assert _one(db, "SELECT COUNT(*) AS n FROM llm_calls")["n"] == 2
+    assert _one(db, "SELECT * FROM graph_runs")["source"] == ""
+    assert _one(db, "SELECT * FROM node_runs")["pid"] is None
+    ok = _one(db, "SELECT * FROM llm_calls WHERE node = 'fundamentals'")
+    assert (ok["status"], ok["attempt"], ok["error"]) == ("completed", 1, None)
+    assert ok["ended_at"] == ok["ts"]
+    failed = _one(db, "SELECT * FROM llm_calls WHERE node = 'synthesis'")
+    assert (failed["status"], failed["error"]) == ("failed", "upstream 500")
+    assert _one(db, "SELECT value FROM meta WHERE key = 'schema_version'")["value"] == "9"
+    # Idempotent: a second init_db on the migrated file changes nothing.
+    st.init_db(db)
+    assert _one(db, "SELECT COUNT(*) AS n FROM llm_calls")["n"] == 2
+
+
+def _has_tables(db: Path) -> bool:
+    """False for an empty / unreadable file — a stray 0-byte state.db must
+    make the migration test skip, not fail."""
+    if not db.is_file() or db.stat().st_size == 0:
+        return False
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+            return conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
+    except sqlite3.DatabaseError:
+        return False
+
+
+def _real_state_db() -> Path | None:
+    """The user's live telemetry DB. FINAQ_MIGRATION_FIXTURE_DB wins whenever
+    it is set (a worktree has no data_cache/); otherwise the repo-relative
+    default path. None when neither is a populated database. The test only
+    ever reads it."""
+    override = os.environ.get("FINAQ_MIGRATION_FIXTURE_DB")
+    candidate = Path(override) if override else Path("data_cache") / "state.db"
+    return candidate if _has_tables(candidate) else None
+
+
+def _row_counts(db: Path) -> dict[str, int]:
+    with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+        tables = [
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+        return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+
+
+def test_migrating_a_copy_of_the_real_state_db_keeps_every_row(tmp_path: Path):
+    """Copy the real data_cache/state.db to a tmp path, migrate the COPY, and
+    check no table lost a row. Skips when no DB is around."""
+    source = _real_state_db()
+    if source is None:
+        pytest.skip("no data_cache/state.db here — set FINAQ_MIGRATION_FIXTURE_DB to point at one")
+    copy = tmp_path / "state_copy.db"
+    # SQLite's online backup copies a consistent snapshot, WAL content included,
+    # and never writes the source (opened read-only).
+    src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    dst = sqlite3.connect(copy)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    source_mtime = source.stat().st_mtime_ns
+    before = _row_counts(copy)
+    assert before, "fixture DB has no tables"
+
+    st.init_db(copy)
+
+    after = _row_counts(copy)
+    for table, n in before.items():
+        if table == "meta":
+            # init_db adds its own bookkeeping key (last_prune); the old keys stay.
+            assert after[table] >= n
+            continue
+        assert after[table] == n, f"{table}: {n} rows before migration, {after[table]} after"
+    assert V9_TABLES.issubset(after)
+    assert {"status", "ended_at", "error", "attempt"}.issubset(_columns(copy, "llm_calls"))
+    assert "source" in _columns(copy, "graph_runs") and "pid" in _columns(copy, "node_runs")
+    assert _one(copy, "SELECT value FROM meta WHERE key = 'schema_version'")["value"] == str(
+        st.SCHEMA_VERSION
+    )
+    with sqlite3.connect(copy) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert source.stat().st_mtime_ns == source_mtime  # the real file was never written
+
+
+# --- v9 node rows -----------------------------------------------------------
+
+
+def test_start_and_finish_node_run_round_trip(tmp_path: Path):
+    db = tmp_path / "t.db"
+    run_id = st.start_graph_run("NVDA", "ai_cake", source="dashboard", db_path=db)
+    assert st.get_graph_run(run_id, db_path=db)["source"] == "dashboard"
+    nid = st.start_node_run(run_id, "fundamentals", db_path=db)
+    [row] = st.all_node_runs_for(run_id, db_path=db)
+    assert row["id"] == nid
+    assert row["status"] == "running"
+    assert row["ended_at"] is None and row["duration_s"] is None
+    assert row["pid"] == os.getpid()
+
+    st.finish_node_run(
+        nid,
+        "completed",
+        duration_s=2.5,
+        tokens_in=10,
+        tokens_out=4,
+        cost_usd=0.01,
+        n_calls=1,
+        db_path=db,
+    )
+    [row] = st.all_node_runs_for(run_id, db_path=db)
+    assert row["id"] == nid  # the same row was updated, not a second one inserted
+    assert row["status"] == "completed"
+    assert row["ended_at"] is not None
+    assert row["duration_s"] == pytest.approx(2.5)
+    assert (row["tokens_in"], row["tokens_out"], row["n_calls"]) == (10, 4, 1)
+    assert row["cost_usd"] == pytest.approx(0.01)
+
+
+def test_finish_node_run_records_failure_and_rejects_unknown_status(tmp_path: Path):
+    db = tmp_path / "t.db"
+    nid = st.start_node_run(None, "news", db_path=db)
+    with pytest.raises(ValueError, match="status must be"):
+        st.finish_node_run(nid, "running", db_path=db)
+    st.finish_node_run(nid, "failed", error="Finnhub 500", duration_s=0.3, db_path=db)
+    row = _one(db, "SELECT * FROM node_runs WHERE id = ?", nid)
+    assert (row["status"], row["error"], row["run_id"]) == ("failed", "Finnhub 500", None)
+
+
+def test_record_node_run_one_shot_path_still_works_without_pid(tmp_path: Path):
+    """Old callers (and the entry-write-failed fallback) keep the one-shot
+    insert; such rows simply have no pid."""
+    db = tmp_path / "t.db"
+    nid = st.record_node_run(
+        None, "risk", st._now_iso(), st._now_iso(), 1.0, "completed", db_path=db
+    )
+    row = _one(db, "SELECT * FROM node_runs WHERE id = ?", nid)
+    assert row["status"] == "completed" and row["pid"] is None
+
+
+def test_running_node_is_visible_in_live_snapshot_between_start_and_finish(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(st, "DB_PATH", tmp_path / "live.db")
+    run_id = st.start_graph_run("NVDA", "ai_cake", source="dashboard")
+    nid = st.start_node_run(run_id, "news")
+    cid = st.start_llm_call(
+        run_id=run_id,
+        node="news",
+        model="m",
+        messages=[{"role": "system", "content": "S"}, {"role": "user", "content": "U"}],
+    )
+
+    snap = st.live_snapshot()
+    assert snap["poll_s"] == 1 and snap["now"]
+    assert snap["vitals"]["active"] == 1 and snap["vitals"]["runs_today"] == 1
+    [run] = snap["runs"]
+    assert (run["run_id"], run["source"], run["status"]) == (run_id, "dashboard", "running")
+    [node] = run["nodes"]
+    assert (node["node"], node["status"], node["ended_at"]) == ("news", "running", None)
+    [call] = node["calls"]
+    assert (call["id"], call["status"], call["response"]) == (cid, "running", None)
+    assert call["messages"] == [{"role": "system", "text": "S"}, {"role": "user", "text": "U"}]
+
+    st.finish_llm_call(cid, status="completed", latency_s=0.5, response_text="A")
+    st.finish_node_run(nid, "completed", duration_s=1.0)
+    st.finish_graph_run(run_id, "completed", duration_s=1.0)
+    snap = st.live_snapshot()
+    assert snap["runs"] == [] and snap["vitals"]["active"] == 0
+    [recent] = snap["recent"]
+    assert recent["run_id"] == run_id and recent["nodes"] == {"news": "completed"}
+    assert snap["medians"] == {"news": 1.0, "run": 1.0}
+
+
+def test_live_snapshot_is_empty_shaped_when_db_missing(tmp_path: Path, monkeypatch):
+    missing = tmp_path / "nope.db"
+    monkeypatch.setattr(st, "DB_PATH", missing)
+    snap = st.live_snapshot()
+    assert snap["runs"] == [] and snap["recent"] == [] and snap["cio"] == []
+    assert snap["medians"] == {}
+    assert snap["vitals"]["active"] == 0 and snap["vitals"]["next_heartbeat"]
+    assert not missing.exists()  # reads never create the file
+
+
+# --- v9 LLM calls + prompt blobs --------------------------------------------
+
+
+def test_start_llm_call_stores_full_messages_and_finish_appends_response(tmp_path: Path):
+    db = tmp_path / "t.db"
+    cid = st.start_llm_call(
+        run_id=None,
+        node="cio.planner",
+        model="m",
+        messages=[{"role": "system", "content": "SYS"}, {"role": "user", "content": "USER"}],
+        prompt_excerpt="[x]",
+        db_path=db,
+    )
+    row = _one(db, "SELECT * FROM llm_calls WHERE id = ?", cid)
+    assert (row["status"], row["ended_at"], row["prompt_excerpt"], row["attempt"]) == (
+        "running",
+        None,
+        "[x]",
+        1,
+    )
+    msgs = st.llm_messages_for_call(cid, db_path=db)
+    assert [(m["seq"], m["role"], m["text"]) for m in msgs] == [
+        (0, "system", "SYS"),
+        (1, "user", "USER"),
+    ]
+
+    st.finish_llm_call(
+        cid,
+        status="completed",
+        latency_s=1.5,
+        tokens_in=10,
+        tokens_out=3,
+        cost_usd=0.002,
+        response_excerpt="ANSWER",
+        response_text="ANSWER",
+        db_path=db,
+    )
+    row = _one(db, "SELECT * FROM llm_calls WHERE id = ?", cid)
+    assert row["status"] == "completed" and row["ended_at"] is not None and row["error"] is None
+    assert (row["tokens_in"], row["tokens_out"]) == (10, 3)
+    assert row["latency_s"] == pytest.approx(1.5) and row["cost_usd"] == pytest.approx(0.002)
+    assert row["response_excerpt"] == "ANSWER"
+    msgs = st.llm_messages_for_call(cid, db_path=db)
+    assert (msgs[-1]["seq"], msgs[-1]["role"], msgs[-1]["text"]) == (2, "assistant", "ANSWER")
+
+
+def test_finish_llm_call_failed_keeps_error_and_no_assistant_message(tmp_path: Path):
+    db = tmp_path / "t.db"
+    cid = st.start_llm_call(
+        run_id=None,
+        node="news",
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        db_path=db,
+    )
+    with pytest.raises(ValueError, match="status must be"):
+        st.finish_llm_call(cid, status="running", latency_s=0.0, db_path=db)
+    st.finish_llm_call(
+        cid,
+        status="failed",
+        latency_s=0.2,
+        response_excerpt="CALL FAILED: 500",
+        error="500",
+        db_path=db,
+    )
+    row = _one(db, "SELECT * FROM llm_calls WHERE id = ?", cid)
+    assert (row["status"], row["error"], row["response_excerpt"]) == (
+        "failed",
+        "500",
+        "CALL FAILED: 500",
+    )
+    assert [m["role"] for m in st.llm_messages_for_call(cid, db_path=db)] == ["user"]
+
+
+def test_prompt_blobs_dedupe_the_system_prompt_across_calls(tmp_path: Path):
+    db = tmp_path / "t.db"
+    system = {"role": "system", "content": "You are the analyst." * 50}
+    first = st.start_llm_call(
+        run_id=None,
+        node="n",
+        model="m",
+        messages=[system, {"role": "user", "content": "one"}],
+        db_path=db,
+    )
+    second = st.start_llm_call(
+        run_id=None,
+        node="n",
+        model="m",
+        messages=[system, {"role": "user", "content": "two"}],
+        db_path=db,
+    )
+    assert _one(db, "SELECT COUNT(*) AS n FROM prompt_blobs")["n"] == 3  # system, one, two
+    assert _one(db, "SELECT COUNT(*) AS n FROM llm_messages")["n"] == 4
+    sha = st.llm_messages_for_call(first, db_path=db)[0]["sha256"]
+    assert st.llm_messages_for_call(second, db_path=db)[0]["sha256"] == sha
+    blob = _one(db, "SELECT * FROM prompt_blobs WHERE sha256 = ?", sha)
+    assert blob["seen_count"] == 2
+    assert blob["last_seen"] >= blob["first_seen"]
+    assert blob["n_chars"] == len(system["content"])
+
+
+def test_record_llm_messages_appends_after_existing_rows(tmp_path: Path):
+    db = tmp_path / "t.db"
+    cid = st.record_llm_call(run_id=None, node="qa", model="m", latency_s=0.1, db_path=db)
+    assert st.llm_messages_for_call(cid, db_path=db) == []
+    n = st.record_llm_messages(cid, [{"role": "user", "content": "hi"}], response="yo", db_path=db)
+    assert n == 2
+    assert [
+        (m["seq"], m["role"], m["text"]) for m in st.llm_messages_for_call(cid, db_path=db)
+    ] == [
+        (0, "user", "hi"),
+        (1, "assistant", "yo"),
+    ]
+    assert st.record_llm_messages(cid, [], db_path=db) == 0
+    # Non-string content (multi-part messages) is serialised, not dropped.
+    st.record_llm_messages(
+        cid, [{"role": "user", "content": [{"type": "text", "text": "x"}]}], db_path=db
+    )
+    assert (
+        st.llm_messages_for_call(cid, db_path=db)[-1]["text"] == '[{"type": "text", "text": "x"}]'
+    )
+
+
+def test_prune_blobs_removes_only_unreferenced_blobs_older_than_the_window(tmp_path: Path):
+    db = tmp_path / "t.db"
+    system = {"role": "system", "content": "shared system prompt"}
+    old = st.start_llm_call(
+        run_id=None,
+        node="n",
+        model="m",
+        messages=[system, {"role": "user", "content": "old user prompt"}],
+        db_path=db,
+    )
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE llm_calls SET ts = ? WHERE id = ?",
+            ((datetime.now(UTC) - timedelta(days=100)).isoformat(), old),
+        )
+    recent = st.start_llm_call(
+        run_id=None,
+        node="n",
+        model="m",
+        messages=[system, {"role": "user", "content": "recent user prompt"}],
+        db_path=db,
+    )
+
+    assert st.prune_blobs(days=90, db_path=db) == {"messages": 2, "blobs": 1}
+
+    assert st.llm_messages_for_call(old, db_path=db) == []
+    assert [m["text"] for m in st.llm_messages_for_call(recent, db_path=db)] == [
+        "shared system prompt",
+        "recent user prompt",
+    ]
+    with sqlite3.connect(db) as conn:
+        remaining = {r[0] for r in conn.execute("SELECT content FROM prompt_blobs")}
+    assert remaining == {"shared system prompt", "recent user prompt"}
+    # The call row itself (telemetry + excerpt) is never pruned.
+    assert _one(db, "SELECT COUNT(*) AS n FROM llm_calls")["n"] == 2
+
+
+def test_init_db_prunes_at_most_once_per_day(tmp_path: Path, monkeypatch):
+    db = tmp_path / "t.db"
+    calls: list[int] = []
+    real = st._prune_blobs_conn
+
+    def _counting(conn, days):
+        calls.append(days)
+        return real(conn, days)
+
+    monkeypatch.setattr(st, "_prune_blobs_conn", _counting)
+    st.init_db(db)
+    st.init_db(db)
+    st.start_graph_run("NVDA", "t", db_path=db)  # every write path calls init_db
+    assert calls == [st.PROMPT_RETENTION_DAYS]
+    today = datetime.now(UTC).date().isoformat()
+    assert _one(db, "SELECT value FROM meta WHERE key = 'last_prune'")["value"] == today
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE meta SET value = '2000-01-01' WHERE key = 'last_prune'")
+    st.init_db(db)
+    assert len(calls) == 2
+    assert _one(db, "SELECT value FROM meta WHERE key = 'last_prune'")["value"] == today
+
+
+def test_prompt_retention_days_reads_env_with_90_day_default(monkeypatch):
+    monkeypatch.delenv("PROMPT_RETENTION_DAYS", raising=False)
+    assert st._retention_days() == 90
+    monkeypatch.setenv("PROMPT_RETENTION_DAYS", "30")
+    assert st._retention_days() == 30
+    monkeypatch.setenv("PROMPT_RETENTION_DAYS", "junk")
+    assert st._retention_days() == 90
+
+
+# --- v9 spans ---------------------------------------------------------------
+
+
+def test_span_records_running_then_completed_with_meta(tmp_path: Path):
+    db = tmp_path / "t.db"
+    with st.span("cio_run", "c1", "probe", label="NVDA", db_path=db) as sp:
+        [row] = st.spans_for("cio_run", "c1", db_path=db)
+        assert row["id"] == sp.id
+        assert (row["status"], row["ended_at"], row["label"]) == ("running", None, "NVDA")
+        sp.meta["stale"] = True
+    [row] = st.spans_for("cio_run", "c1", db_path=db)
+    assert row["status"] == "completed" and row["ended_at"] is not None
+    assert row["meta"] == {"stale": True} and row["error"] is None
+    assert st.spans_for("cio_run", "other", db_path=db) == []
+
+
+def test_span_records_failure_and_reraises(tmp_path: Path):
+    db = tmp_path / "t.db"
+    with pytest.raises(RuntimeError, match="boom"), st.span(
+        "cio_run", "c1", "decide", label="NVDA", db_path=db
+    ):
+        raise RuntimeError("boom")
+    [row] = st.spans_for("cio_run", "c1", db_path=db)
+    assert (row["status"], row["error"]) == ("failed", "boom")
+    assert row["ended_at"] is not None
+
+
+def test_span_soft_failure_via_handle_error(tmp_path: Path):
+    db = tmp_path / "t.db"
+    with st.span("cio_run", "c1", "drill", label="NVDA", db_path=db) as sp:
+        sp.meta["drill_run_id"] = None
+        sp.error = "drill failed"
+    [row] = st.spans_for("cio_run", "c1", db_path=db)
+    assert (row["status"], row["error"], row["meta"]) == (
+        "failed",
+        "drill failed",
+        {"drill_run_id": None},
+    )
+
+
+def test_span_is_noop_without_parent_and_survives_db_failures(tmp_path: Path, monkeypatch):
+    db = tmp_path / "t.db"
+    ran = False
+    with st.span("cio_run", None, "notify", db_path=db) as sp:
+        ran = True
+    assert ran and sp.id is None
+    assert not db.exists()  # nothing was written
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(st, "start_span", _boom)
+    ran = False
+    with st.span("cio_run", "c9", "probe", db_path=db) as sp:
+        ran = True
+    assert ran and sp.id is None  # telemetry failure, not the caller's
+
+
+# --- v9 stale sweeper --------------------------------------------------------
+
+
+def _dead_pid() -> int:
+    """A pid that no longer exists: a child that has already exited."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def test_sweep_stale_runs_closes_dead_process_rows_and_keeps_live_ones(tmp_path: Path):
+    db = tmp_path / "t.db"
+    dead = st.start_graph_run("AAA", "t", db_path=db)
+    dead_node = st.start_node_run(dead, "news", pid=_dead_pid(), db_path=db)
+    dead_call = st.start_llm_call(run_id=dead, node="news", model="m", db_path=db)
+    live = st.start_graph_run("BBB", "t", db_path=db)
+    live_node = st.start_node_run(live, "news", db_path=db)  # this process → alive
+    live_call = st.start_llm_call(run_id=live, node="news", model="m", db_path=db)
+
+    counts = st.sweep_stale_runs(db_path=db)
+    assert counts == {"node_runs": 1, "graph_runs": 1, "cio_runs": 0, "spans": 0, "llm_calls": 1}
+
+    run = st.get_graph_run(dead, db_path=db)
+    assert (run["status"], run["error"]) == ("failed", st.STALE_ERROR) and run["ended_at"]
+    assert _one(db, "SELECT status FROM node_runs WHERE id = ?", dead_node)["status"] == "failed"
+    assert _one(db, "SELECT status, error FROM llm_calls WHERE id = ?", dead_call) == {
+        "status": "failed",
+        "error": st.STALE_ERROR,
+    }
+    assert st.get_graph_run(live, db_path=db)["status"] == "running"
+    assert _one(db, "SELECT status FROM node_runs WHERE id = ?", live_node)["status"] == "running"
+    assert _one(db, "SELECT status FROM llm_calls WHERE id = ?", live_call)["status"] == "running"
+    # Idempotent.
+    assert all(v == 0 for v in st.sweep_stale_runs(db_path=db).values())
+
+
+_SWEEP_TABLES = (
+    ("graph_runs", "run_id", "started_at"),
+    ("node_runs", "id", "started_at"),
+    ("cio_runs", "run_id", "started_at"),
+    ("spans", "id", "started_at"),
+    ("llm_calls", "id", "ts"),
+)
+
+
+def _backdate_everything(db: Path, iso: str) -> None:
+    with sqlite3.connect(db) as conn:
+        for table, _, col in _SWEEP_TABLES:
+            conn.execute(f"UPDATE {table} SET {col} = ?", (iso,))
+
+
+def test_sweep_trusts_a_live_pid_and_uses_the_window_only_without_one(tmp_path: Path):
+    """Real drill-ins and heartbeats exceed 30 minutes, so age alone never
+    closes a row whose process is alive. Strip the pids (pre-v9 rows) and the
+    window decides, children following their parents."""
+    db = tmp_path / "t.db"
+    run = st.start_graph_run("AAA", "t", db_path=db)
+    node = st.start_node_run(run, "fundamentals", db_path=db)  # this process → alive
+    cycle = st.start_cio_run("heartbeat", db_path=db)  # this process → alive
+    span_id = st.start_span("cio_run", cycle, "drill", label="AAA", db_path=db)
+    call = st.start_llm_call(run_id=run, node="fundamentals", model="m", db_path=db)
+    assert _one(db, "SELECT pid FROM cio_runs WHERE run_id = ?", cycle)["pid"] == os.getpid()
+    _backdate_everything(db, _hours_ago(2))
+
+    assert all(v == 0 for v in st.sweep_stale_runs(minutes=30, db_path=db).values())
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE node_runs SET pid = NULL")
+        conn.execute("UPDATE cio_runs SET pid = NULL")
+    assert st.sweep_stale_runs(minutes=30, db_path=db) == {
+        "node_runs": 1,
+        "graph_runs": 1,
+        "cio_runs": 1,
+        "spans": 1,
+        "llm_calls": 1,
+    }
+    keys = {
+        "graph_runs": run,
+        "node_runs": node,
+        "cio_runs": cycle,
+        "spans": span_id,
+        "llm_calls": call,
+    }
+    for table, key_col, _ in _SWEEP_TABLES:
+        row = _one(db, f"SELECT status, error FROM {table} WHERE {key_col} = ?", keys[table])
+        assert (row["status"], row["error"]) == ("failed", st.STALE_ERROR), table
+
+
+def test_sweep_hard_cap_closes_even_a_live_pid(tmp_path: Path):
+    """Past STALE_MAX_MINUTES a running row is closed regardless of its pid,
+    which may belong to an unrelated process by then."""
+    db = tmp_path / "t.db"
+    run = st.start_graph_run("AAA", "t", db_path=db)
+    st.start_node_run(run, "news", db_path=db)
+    st.start_cio_run("heartbeat", db_path=db)
+    _backdate_everything(db, _hours_ago(st.STALE_MAX_MINUTES / 60 + 1))
+    assert st.sweep_stale_runs(db_path=db) == {
+        "node_runs": 1,
+        "graph_runs": 1,
+        "cio_runs": 1,
+        "spans": 0,
+        "llm_calls": 0,
+    }
+
+
+def test_sweep_follows_a_dead_cycle_down_to_its_steps_and_calls(tmp_path: Path):
+    """A cycle whose process is gone is swept with its running span and the
+    planner call attached to it; a live cycle keeps both however old. A pre-v9
+    cycle (no pid) counts as alive while it keeps opening steps."""
+    db = tmp_path / "t.db"
+    old = _hours_ago(2)
+    alive = st.start_cio_run("heartbeat", db_path=db)
+    alive_span = st.start_span("cio_run", alive, "drill", label="NVDA", db_path=db)
+    alive_call = st.start_llm_call(run_id=alive, node="cio.planner", model="m", db_path=db)
+    dead = st.start_cio_run("heartbeat", db_path=db)
+    dead_span = st.start_span("cio_run", dead, "drill", label="NVDA", db_path=db)
+    dead_call = st.start_llm_call(run_id=dead, node="cio.planner", model="m", db_path=db)
+    _backdate_everything(db, old)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE cio_runs SET pid = ? WHERE run_id = ?", (_dead_pid(), dead))
+
+    counts = st.sweep_stale_runs(minutes=30, db_path=db)
+    assert counts == {"node_runs": 0, "graph_runs": 0, "cio_runs": 1, "spans": 1, "llm_calls": 1}
+    for table, key, expected in (
+        ("cio_runs", dead, "failed"),
+        ("cio_runs", alive, "running"),
+    ):
+        assert _one(db, f"SELECT status FROM {table} WHERE run_id = ?", key)["status"] == expected
+    assert _one(db, "SELECT status FROM spans WHERE id = ?", dead_span)["status"] == "failed"
+    assert _one(db, "SELECT status FROM spans WHERE id = ?", alive_span)["status"] == "running"
+    assert _one(db, "SELECT status FROM llm_calls WHERE id = ?", dead_call)["status"] == "failed"
+    assert _one(db, "SELECT status FROM llm_calls WHERE id = ?", alive_call)["status"] == "running"
+
+    legacy = st.start_cio_run("heartbeat", db_path=db)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE cio_runs SET pid = NULL, started_at = ? WHERE run_id = ?", (old, legacy)
+        )
+    st.start_span("cio_run", legacy, "decide", label="AAA", db_path=db)  # a fresh step
+    assert all(v == 0 for v in st.sweep_stale_runs(minutes=30, db_path=db).values())
+
+
+def test_sweep_closes_orphans_of_a_finished_parent_after_the_window(tmp_path: Path):
+    """A call (or span) left `running` after its parent finished — the phase-2
+    write failed — is closed once it is older than the window."""
+    db = tmp_path / "t.db"
+    run = st.start_graph_run("AAA", "t", db_path=db)
+    call = st.start_llm_call(run_id=run, node="news", model="m", db_path=db)
+    st.finish_graph_run(run, "completed", db_path=db)
+    assert st.sweep_stale_runs(minutes=30, db_path=db)["llm_calls"] == 0  # still fresh
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE llm_calls SET ts = ? WHERE id = ?", (_hours_ago(2), call))
+    assert st.sweep_stale_runs(minutes=30, db_path=db)["llm_calls"] == 1
+    assert _one(db, "SELECT status FROM llm_calls WHERE id = ?", call)["status"] == "failed"
+
+
+def test_init_db_is_cheap_after_the_first_call_in_a_process(tmp_path: Path):
+    """The Live tab's per-second sweeper goes through init_db; after the first
+    call in a process it must not write (another connection's data_version is
+    unchanged). A replaced file is migrated again."""
+    db = tmp_path / "t.db"
+    st.init_db(db)
+    probe = sqlite3.connect(db)
+    try:
+        before = probe.execute("PRAGMA data_version").fetchone()[0]
+        for _ in range(5):
+            st.init_db(db)
+            st.sweep_stale_runs(db_path=db)
+            st.live_snapshot(db_path=db)
+        assert probe.execute("PRAGMA data_version").fetchone()[0] == before
+    finally:
+        probe.close()
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(db) + suffix).unlink(missing_ok=True)
+    st.init_db(db)
+    assert V9_TABLES.issubset(_table_names(db))
+
+
+def test_live_snapshot_never_migrates_a_pre_v9_file(tmp_path: Path):
+    """Reads never migrate: a v8 file polled before any write reads as an empty
+    snapshot and stays at schema 8."""
+    db = tmp_path / "v8.db"
+    with sqlite3.connect(db) as conn:
+        conn.executescript(_V8_DDL)
+    snap = st.live_snapshot(db_path=db)
+    assert snap["runs"] == [] and snap["cio"] == [] and snap["recent"] == []
+    assert _one(db, "SELECT value FROM meta WHERE key = 'schema_version'")["value"] == "8"
+    assert not V9_TABLES & _table_names(db)
+
+
+async def test_span_records_a_cancelled_step_as_failed(tmp_path: Path):
+    """asyncio cancellation is not an Exception; the span must still close."""
+    db = tmp_path / "t.db"
+
+    async def step() -> None:
+        with st.span("cio_run", "c1", "drill", label="NVDA", db_path=db):
+            await asyncio.sleep(10)
+
+    task = asyncio.create_task(step())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    [row] = st.spans_for("cio_run", "c1", db_path=db)
+    assert (row["status"], row["error"]) == ("failed", "CancelledError")
+
+
+# --- v9 medians + run snapshot -----------------------------------------------
+
+
+def _completed_run(db: Path, ticker: str, node_s: float, run_s: float) -> str:
+    run_id = st.start_graph_run(ticker, "t", db_path=db)
+    nid = st.start_node_run(run_id, "fundamentals", db_path=db)
+    st.finish_node_run(nid, "completed", duration_s=node_s, db_path=db)
+    st.finish_graph_run(run_id, "completed", duration_s=run_s, db_path=db)
+    time.sleep(0.002)  # distinct started_at ordering
+    return run_id
+
+
+def test_node_medians_over_the_last_completed_runs(tmp_path: Path):
+    db = tmp_path / "t.db"
+    assert st.node_medians(db_path=db) == {}
+    _completed_run(db, "A", node_s=10.0, run_s=100.0)
+    _completed_run(db, "B", node_s=90.0, run_s=300.0)
+    _completed_run(db, "C", node_s=20.0, run_s=200.0)
+    failed = st.start_graph_run("D", "t", db_path=db)  # excluded: not completed
+    nid = st.start_node_run(failed, "fundamentals", db_path=db)
+    st.finish_node_run(nid, "completed", duration_s=999.0, db_path=db)
+    st.finish_graph_run(failed, "failed", duration_s=999.0, db_path=db)
+    st.start_graph_run("E", "t", db_path=db)  # excluded: still running
+
+    assert st.node_medians(db_path=db) == {"fundamentals": 20.0, "run": 200.0}
+    assert st.node_medians(limit=1, db_path=db) == {"fundamentals": 20.0, "run": 200.0}
+
+
+def test_run_snapshot_returns_nodes_calls_messages_and_cio_lineage(tmp_path: Path):
+    db = tmp_path / "t.db"
+    cycle = st.start_cio_run("heartbeat", db_path=db)
+    run_id = st.start_graph_run("NVDA", "ai_cake", source="cio", db_path=db)
+    nid = st.start_node_run(run_id, "risk", db_path=db)
+    cid = st.start_llm_call(
+        run_id=run_id,
+        node="risk",
+        model="m",
+        messages=[{"role": "system", "content": "S"}, {"role": "user", "content": "U"}],
+        db_path=db,
+    )
+    st.finish_llm_call(
+        cid, status="completed", latency_s=1.0, tokens_in=5, response_text="R", db_path=db
+    )
+    st.finish_node_run(nid, "completed", duration_s=1.0, n_calls=1, db_path=db)
+    st.record_error("risk", "soft issue", run_id=run_id, db_path=db)
+    st.finish_graph_run(run_id, "completed", duration_s=2.0, confidence="high", db_path=db)
+    st.record_cio_action(
+        ticker="NVDA", action="drill", cio_run_id=cycle, drill_run_id=run_id, db_path=db
+    )
+
+    snap = st.run_snapshot(run_id, db_path=db)
+    assert (snap["source"], snap["status"], snap["confidence"]) == ("cio", "completed", "high")
+    [node] = snap["nodes"]
+    assert node["node"] == "risk" and node["pid"] == os.getpid()
+    [call] = node["calls"]
+    assert call["messages"] == [{"role": "system", "text": "S"}, {"role": "user", "text": "U"}]
+    assert call["response"] == "R" and call["tokens_in"] == 5 and call["status"] == "completed"
+    assert [e["message"] for e in snap["errors"]] == ["soft issue"]
+    assert snap["cio"]["cio_run_id"] == cycle and snap["cio"]["action"] == "drill"
+    assert st.run_snapshot("missing", db_path=db) is None
+
+    live = st.live_snapshot(db_path=db)
+    [cio] = live["cio"]
+    assert cio["run_id"] == cycle and cio["actions"][0]["drill_run_id"] == run_id
+    assert cio["steps"] == []
+    assert live["vitals"]["degraded_24h"] == 1  # completed, but with a run-scoped error
+
+
+def test_next_heartbeat_picks_the_next_configured_hour():
+    local = datetime.now().astimezone().tzinfo
+    at = lambda h: datetime(2026, 10, 16, h, 0, tzinfo=local)  # noqa: E731
+    assert st.next_heartbeat(at(4)).startswith("2026-10-16T05:00")
+    assert st.next_heartbeat(at(6)).startswith("2026-10-16T13:00")
+    assert st.next_heartbeat(at(14)).startswith("2026-10-17T05:00")

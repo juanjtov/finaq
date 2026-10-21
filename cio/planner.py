@@ -120,6 +120,10 @@ class Plan(BaseModel):
     # [{"slug", "age_days"}], oldest first. Rendered by the summary +
     # Telegram formatter so the nag reaches the user without a dashboard.
     overdue_theses: list[dict] = Field(default_factory=list)
+    # The `cio_runs.run_id` this plan belongs to (schema v9), so the steps
+    # that run after the cycle closed — the dispatcher's notify — can attach
+    # their span to the same parent. None for plans built outside a cycle.
+    cio_run_id: str | None = None
 
     @property
     def n_drilled(self) -> int:
@@ -598,6 +602,8 @@ def decide(
     edgar_freshness: FreshnessReport | None = None,
     cooldown_hours: int = cio_memory.DEFAULT_COOLDOWN_HOURS,
     system_prompt: str | None = None,
+    gates: GateOutcome | None = None,
+    cio_run_id: str | None = None,
 ) -> tuple[CIODecision, dict]:
     """End-to-end per-pair decision: gate → bundle → LLM → parse.
 
@@ -619,12 +625,20 @@ def decide(
     the monthly quota in four days.
 
     `system_prompt` defaults to the persona file. Tests pass a stub.
+
+    `gates`: pass the `GateOutcome` when the caller already evaluated the
+    gates (the orchestrator does, so the gate step gets its own span);
+    None evaluates them here. `cio_run_id`: when given, `current_run_id`
+    is bound to it for the duration of the call so the planner's
+    `llm_calls` rows carry `run_id = cio_run_id` and `node = 'cio.planner'`
+    instead of landing unattributed (schema v9).
     """
     thesis_slug = (thesis or {}).get("slug") if isinstance(thesis, dict) else None
-    gates = evaluate_gates(
-        ticker, thesis_slug, cooldown_hours=cooldown_hours,
-        edgar_freshness=edgar_freshness,
-    )
+    if gates is None:
+        gates = evaluate_gates(
+            ticker, thesis_slug, cooldown_hours=cooldown_hours,
+            edgar_freshness=edgar_freshness,
+        )
     if gates.shortcut is not None:
         return gates.shortcut, _empty_telemetry()
 
@@ -640,9 +654,13 @@ def decide(
     # Bind a fresh telemetry accumulator just for this decide() call. The
     # openrouter interceptor (utils/openrouter.py) reads response.usage on
     # each chat_completions create and writes here. We collect totals on
-    # exit and surface them as the per-action telemetry row.
-    accumulator = state_db.new_node_telemetry()
+    # exit and surface them as the per-action telemetry row. The node name
+    # + run id make the interceptor's llm_calls row attributable to the
+    # CIO cycle (schema v9) — before, 982 planner rows had node '' and
+    # run_id NULL.
+    accumulator = state_db.new_node_telemetry(node="cio.planner")
     cv_token = state_db.node_telemetry_var.set(accumulator)
+    run_token = state_db.current_run_id.set(cio_run_id) if cio_run_id else None
     t0 = time.perf_counter()
     raw: str | None = None
     llm_error: str | None = None
@@ -657,6 +675,8 @@ def decide(
     finally:
         latency_s = time.perf_counter() - t0
         state_db.node_telemetry_var.reset(cv_token)
+        if run_token is not None:
+            state_db.current_run_id.reset(run_token)
 
     telemetry = {
         "model_used":  MODEL_CIO,

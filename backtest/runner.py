@@ -64,7 +64,7 @@ async def run_backtest(
         "thesis": thesis,
         "as_of_date": as_of_date,
     }
-    final = await invoke_with_telemetry(graph, state)
+    final = await invoke_with_telemetry(graph, state, source="backtest")
 
     # 4. Score against realised prices
     score = score_run(

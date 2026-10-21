@@ -91,6 +91,15 @@ async def _run(mode: str, *, ticker: str | None, thesis: str | None) -> int:
     if mode == "auto":
         mode = _resolve_auto_mode()
 
+    # Schema v9 — close rows a killed process left `running` (graph runs,
+    # nodes, LLM calls, spans, cycles) before this cycle adds its own.
+    try:
+        swept = state_db.sweep_stale_runs()
+        if any(swept.values()):
+            logger.info(f"[cio.dispatcher] swept stale telemetry rows: {swept}")
+    except Exception as e:
+        logger.warning(f"[cio.dispatcher] stale sweep failed: {e}")
+
     if mode == "heartbeat":
         plan, summary = await cio_orchestrator.run_heartbeat()
     elif mode == "catchup":
@@ -108,9 +117,17 @@ async def _run(mode: str, *, ticker: str | None, thesis: str | None) -> int:
     runs = state_db.recent_cio_runs(limit=1)
     duration_s = float((runs[0].get("duration_s") if runs else 0.0) or 0.0)
 
-    notify_result = cio_notify.notify_cycle(
-        plan, trigger=mode, duration_s=duration_s, summary_text=summary,
-    )
+    # The notify step runs after the cycle closed; its span still hangs off
+    # the cycle (no row is written when no cycle id is known).
+    cio_run_id = getattr(plan, "cio_run_id", None) or (runs[0].get("run_id") if runs else None)
+    with state_db.span("cio_run", cio_run_id, "notify") as notify_span:
+        notify_result = cio_notify.notify_cycle(
+            plan, trigger=mode, duration_s=duration_s, summary_text=summary,
+        )
+        notify_span.meta.update(
+            telegram_sent=bool(notify_result.get("telegram_sent")),
+            notion=bool(notify_result.get("notion_url")),
+        )
     logger.info(
         f"[cio.dispatcher] {mode} done: "
         f"{plan.n_drilled} drilled, {plan.n_reused} reused, "

@@ -27,24 +27,82 @@ per-call detail" decision):
 Run-ID propagation via `contextvars` — the graph wrapper sets
 `current_run_id` once per ainvoke, and `_safe_node` reads it without
 touching the FinaqState shape (keeps the state clean).
+
+Schema v9 (Mission Control v2, Phase 1 — docs/MISSION_CONTROL_PLAN.md §3):
+  - `node_runs` and `llm_calls` are written in TWO phases: a `running` row
+    on entry (`start_node_run` / `start_llm_call`), closed on exit
+    (`finish_node_run` / `finish_llm_call`), so a live view can see what is
+    executing right now. `record_node_run` / `record_llm_call` remain the
+    one-shot path for old callers.
+  - Full prompts: every message of a call lands in `llm_messages`, content-
+    addressed through `prompt_blobs` (sha256) so an unchanged system prompt
+    is stored once. `prune_blobs` enforces `PROMPT_RETENTION_DAYS`; the
+    clipped excerpts on `llm_calls` stay forever.
+  - `spans` records the steps of non-graph flows (CIO cycle: probe → gates →
+    decide → budget → drill → summary → notify) via the `span()` context
+    manager; `graph_runs.source` says who started a run; `node_runs.pid`
+    lets `sweep_stale_runs` tell a crashed process from a slow one.
+  - `_connect` sets WAL + busy_timeout so a 1 s reader and two writer
+    processes (dashboard, CIO, Telegram) share the file without
+    "database is locked".
+  - `live_snapshot()` / `run_snapshot()` build the single state document the
+    live view and replay render.
 """
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
+import hashlib
+import json
+import os
 import sqlite3
+import statistics
 import uuid
-from datetime import UTC, datetime
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from utils import logger
+
 DB_PATH = Path("data_cache/state.db")
-SCHEMA_VERSION = 8  # graph_nodes + graph_edges — persistent halo graph (Phase 2 Discovery, §13)
+SCHEMA_VERSION = 9  # two-phase node/llm rows, prompt_blobs + llm_messages, spans, source, pid
 
 # Prompt / response excerpts stored per LLM call are clipped to this many
 # characters. Full traces live in LangSmith when tracing is on; the local
 # excerpt exists so a failed run is debuggable offline.
 LLM_EXCERPT_MAX_CHARS = 2000
+
+
+def _retention_days() -> int:
+    try:
+        return max(1, int(os.getenv("PROMPT_RETENTION_DAYS", "90")))
+    except ValueError:
+        return 90
+
+
+# Full prompts (llm_messages + prompt_blobs) older than this are pruned; set
+# PROMPT_RETENTION_DAYS in .env to change the window. Excerpts are kept.
+PROMPT_RETENTION_DAYS = _retention_days()
+
+# Error stamped on `running` rows that `sweep_stale_runs` closes.
+STALE_ERROR = "stale: process ended without finishing"
+
+# Hard cap for the stale sweeper: a `running` row older than this is closed
+# even when its pid is still alive (the pid may have been reused by an
+# unrelated process). Nothing in FINAQ runs a node or a cycle for a day.
+STALE_MAX_MINUTES = 24 * 60
+
+# Local-time hours of the scheduled CIO heartbeat; mirrors the
+# StartCalendarInterval in deploy/launchd/com.finaq.cio.plist. Only used to
+# compute `vitals.next_heartbeat` for the live view.
+HEARTBEAT_HOURS_LOCAL = (5, 13)
+
+# Poll cadence the Live tab runs at; echoed in the snapshot so the client can
+# size its animations.
+LIVE_POLL_S = 1
 
 # Contextvars propagated across asyncio tasks within a single graph invocation.
 # Set by `invoke_with_telemetry`; read by `_safe_node` to attach node rows to
@@ -88,7 +146,9 @@ CREATE TABLE IF NOT EXISTS graph_runs (
     duration_s  REAL,
     status      TEXT NOT NULL,                  -- running | completed | failed
     error       TEXT,
-    confidence  TEXT                            -- low | medium | high (from synthesis)
+    confidence  TEXT,                           -- low | medium | high (from synthesis)
+    -- Schema v9 — who started the run: dashboard | cio | telegram | backtest | cli.
+    source      TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS node_runs (
@@ -98,7 +158,7 @@ CREATE TABLE IF NOT EXISTS node_runs (
     started_at  TEXT NOT NULL,
     ended_at    TEXT,
     duration_s  REAL,
-    status      TEXT NOT NULL,                  -- completed | failed
+    status      TEXT NOT NULL,                  -- running (v9, entry row) | completed | failed
     error       TEXT,
     -- Step 10c.8 (schema v2) — per-node LLM telemetry. Populated by the
     -- ContextVar accumulator in `utils.openrouter`. Nodes that don't make
@@ -107,6 +167,9 @@ CREATE TABLE IF NOT EXISTS node_runs (
     tokens_out  INTEGER NOT NULL DEFAULT 0,
     cost_usd    REAL    NOT NULL DEFAULT 0.0,
     n_calls     INTEGER NOT NULL DEFAULT 0,
+    -- Schema v9 — the process that ran the node, so the stale sweeper can
+    -- tell a crashed process from a slow node.
+    pid         INTEGER,
     FOREIGN KEY (run_id) REFERENCES graph_runs(run_id)
 );
 
@@ -122,17 +185,68 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id            TEXT,
     node              TEXT NOT NULL DEFAULT '',
-    ts                TEXT NOT NULL,
+    ts                TEXT NOT NULL,              -- v9: request start (pre-v9 rows: write time, after the response)
     model             TEXT,
     latency_s         REAL    NOT NULL DEFAULT 0.0,
     tokens_in         INTEGER NOT NULL DEFAULT 0,
     tokens_out        INTEGER NOT NULL DEFAULT 0,
     cost_usd          REAL    NOT NULL DEFAULT 0.0,
     prompt_excerpt    TEXT,
-    response_excerpt  TEXT
+    response_excerpt  TEXT,
+    -- Schema v9 — two-phase write: the row is inserted as `running` before
+    -- the SDK call and closed afterwards. `attempt` is 1 today (SDK retries
+    -- are invisible to the interceptor — see POSTPONED).
+    status            TEXT    NOT NULL DEFAULT 'completed',  -- running | completed | failed
+    ended_at          TEXT,
+    error             TEXT,
+    attempt           INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_calls_run_id ON llm_calls(run_id);
+
+-- Schema v9 — full prompts. `prompt_blobs` is content-addressed (sha256 of
+-- the message text) so a system prompt repeated on every run is stored once;
+-- `llm_messages` lists the messages of one call in order (seq 0 = system,
+-- 1 = user, last = the assistant response). `prune_blobs` drops messages of
+-- calls older than PROMPT_RETENTION_DAYS and every blob nothing references.
+CREATE TABLE IF NOT EXISTS prompt_blobs (
+    sha256      TEXT PRIMARY KEY,
+    content     TEXT    NOT NULL,
+    n_chars     INTEGER NOT NULL,
+    first_seen  TEXT    NOT NULL,
+    last_seen   TEXT    NOT NULL,
+    seen_count  INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS llm_messages (
+    call_id   INTEGER NOT NULL REFERENCES llm_calls(id),
+    seq       INTEGER NOT NULL,
+    role      TEXT    NOT NULL,                  -- system | user | assistant | …
+    sha256    TEXT    NOT NULL REFERENCES prompt_blobs(sha256),
+    PRIMARY KEY (call_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_messages_sha256 ON llm_messages(sha256);
+
+-- Schema v9 — steps of non-graph flows. The CIO cycle writes one span per
+-- step (probe | gates | decide | budget | drill | summary | notify) under
+-- parent_kind='cio_run', parent_id=cio_runs.run_id; Discovery / ad-hoc flows
+-- can use the same table later. `meta_json` is small (counts, decision,
+-- drill_run_id).
+CREATE TABLE IF NOT EXISTS spans (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_kind TEXT NOT NULL,
+    parent_id   TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    label       TEXT,                            -- e.g. the ticker
+    started_at  TEXT NOT NULL,
+    ended_at    TEXT,
+    status      TEXT NOT NULL,                   -- running | completed | failed
+    meta_json   TEXT,
+    error       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_kind, parent_id);
 
 CREATE TABLE IF NOT EXISTS alerts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -198,7 +312,11 @@ CREATE TABLE IF NOT EXISTS cio_runs (
     -- decide time (one cycle = one model). `total_cost_usd` is the sum of
     -- per-action LLM costs computed from MODEL_PRICING + response.usage.
     model_used      TEXT,
-    total_cost_usd  REAL NOT NULL DEFAULT 0.0
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    -- Schema v9 — the process running the cycle, so the stale sweeper can
+    -- tell a killed launchd job from a long heartbeat (cycles legitimately
+    -- exceed 30 minutes when they drill several tickers).
+    pid             INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS cio_actions (
@@ -279,18 +397,60 @@ def _connect(db_path: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(target, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # Schema v9 — three processes share this file (dashboard, CIO, Telegram)
+    # and the Live tab reads it every second. WAL lets readers proceed while a
+    # writer commits; busy_timeout makes a contended writer wait instead of
+    # raising "database is locked". journal_mode is persistent on the file
+    # and a no-op once set; it needs write access, so tolerate a read-only
+    # mount.
+    conn.execute("PRAGMA busy_timeout = 5000")
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute("PRAGMA journal_mode = WAL")
     return conn
+
+
+# Files this process has already migrated: (resolved path, inode) → SQLite's
+# schema cookie (`PRAGMA schema_version`, bumped by any CREATE / ALTER / DROP)
+# right after our migration. Every write path calls init_db, and since v9 so
+# does the stale sweeper the Live tab runs each second; without the memo each
+# call re-ran the whole CREATE/ALTER script and re-stamped meta — a write
+# transaction and a WAL fsync per idle poll. A replaced file (new inode) or
+# any DDL from elsewhere (cookie changed) is migrated again; the daily prune
+# check still runs on every call (reads only).
+_MIGRATED: dict[tuple[str, int], int] = {}
+
+
+def _migration_key(db_path: Path | None) -> tuple[str, int] | None:
+    target = Path(db_path) if db_path is not None else DB_PATH
+    try:
+        return (str(target.resolve()), target.stat().st_ino)
+    except OSError:
+        return None  # file does not exist yet → migrate
+
+
+def _schema_cookie(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA schema_version").fetchone()[0])
 
 
 def init_db(db_path: Path | None = None) -> None:
     """Create the schema if missing + apply forward-only migrations.
-    Idempotent — calling twice is a no-op.
+    Idempotent — calling twice is a no-op, and after the first call in a
+    process it is also cheap (see `_MIGRATED`).
 
     Schema v1 → v2 (Step 10c.8): adds tokens_in / tokens_out / cost_usd /
     n_calls columns to `node_runs`. Existing rows back-fill to 0 (which
     is honest — we didn't track tokens before this migration). New rows
     populate from the ContextVar accumulator.
     """
+    key = _migration_key(db_path)
+    if key is not None and key in _MIGRATED:
+        with _connect(db_path) as conn:
+            if _schema_cookie(conn) == _MIGRATED[key]:
+                try:
+                    _maybe_prune(conn)
+                except Exception as exc:
+                    logger.warning(f"[telemetry] prompt-blob prune skipped: {exc}")
+                return
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA_SQL)
         # Forward-only migrations for DBs created before SCHEMA_VERSION
@@ -334,16 +494,72 @@ def init_db(db_path: Path | None = None) -> None:
         for col_name, col_def in [
             ("model_used",     "TEXT"),
             ("total_cost_usd", "REAL NOT NULL DEFAULT 0.0"),
+            ("pid",            "INTEGER"),  # schema v9
         ]:
             if col_name not in existing_runs:
                 conn.execute(
                     f"ALTER TABLE cio_runs ADD COLUMN {col_name} {col_def}"
                 )
 
+        # Schema v9 — Mission Control v2 Phase 1. New tables come from
+        # _SCHEMA_SQL (CREATE IF NOT EXISTS); the columns below are added to
+        # tables that already existed. Pre-v9 llm_calls rows were written
+        # after the response, so they are `completed` (the default) unless
+        # the interceptor stamped CALL FAILED, and their `ts` IS the end time.
+        if "pid" not in existing:
+            conn.execute("ALTER TABLE node_runs ADD COLUMN pid INTEGER")
+        existing_graph = {
+            row["name"] for row in conn.execute("PRAGMA table_info(graph_runs)")
+        }
+        if "source" not in existing_graph:
+            conn.execute("ALTER TABLE graph_runs ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+        existing_calls = {
+            row["name"] for row in conn.execute("PRAGMA table_info(llm_calls)")
+        }
+        for col_name, col_def in [
+            ("status",   "TEXT NOT NULL DEFAULT 'completed'"),
+            ("ended_at", "TEXT"),
+            ("error",    "TEXT"),
+            ("attempt",  "INTEGER NOT NULL DEFAULT 1"),
+        ]:
+            if col_name not in existing_calls:
+                conn.execute(f"ALTER TABLE llm_calls ADD COLUMN {col_name} {col_def}")
+        if "status" not in existing_calls:
+            conn.execute(
+                """
+                UPDATE llm_calls
+                   SET status = 'failed', error = substr(response_excerpt, 14)
+                 WHERE response_excerpt LIKE 'CALL FAILED:%'
+                """
+            )
+            conn.execute("UPDATE llm_calls SET ended_at = ts WHERE ended_at IS NULL")
+
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
         )
+        # Retention: prune full prompts at most once a day. Best-effort — a
+        # failed prune must never block the write that triggered init_db.
+        try:
+            _maybe_prune(conn)
+        except Exception as exc:
+            logger.warning(f"[telemetry] prompt-blob prune skipped: {exc}")
+        cookie = _schema_cookie(conn)
+    key = _migration_key(db_path)
+    if key is not None:
+        _MIGRATED[key] = cookie
+
+
+def _maybe_prune(conn: sqlite3.Connection) -> None:
+    """Run `_prune_blobs_conn` once per UTC day, remembered in meta.last_prune."""
+    today = datetime.now(UTC).date().isoformat()
+    row = conn.execute("SELECT value FROM meta WHERE key = 'last_prune'").fetchone()
+    if row is not None and str(row["value"]) >= today:
+        return
+    _prune_blobs_conn(conn, PROMPT_RETENTION_DAYS)
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('last_prune', ?)", (today,)
+    )
 
 
 # --- Time helpers -----------------------------------------------------------
@@ -364,20 +580,22 @@ def start_graph_run(
     ticker: str,
     thesis: str,
     *,
+    source: str = "",
     db_path: Path | None = None,
 ) -> str:
     """Insert a graph_runs row in the `running` state and return the run_id.
-    Caller must call `finish_graph_run` after the run completes."""
+    Caller must call `finish_graph_run` after the run completes. `source`
+    (schema v9) names who started it: dashboard | cio | telegram | backtest | cli."""
     init_db(db_path)
     run_id = _new_run_id()
     started_at = _now_iso()
     with _connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO graph_runs (run_id, ticker, thesis, started_at, status)
-            VALUES (?, ?, ?, ?, 'running')
+            INSERT INTO graph_runs (run_id, ticker, thesis, started_at, status, source)
+            VALUES (?, ?, ?, ?, 'running', ?)
             """,
-            (run_id, ticker, thesis, started_at),
+            (run_id, ticker, thesis, started_at, source or ""),
         )
     return run_id
 
@@ -969,10 +1187,10 @@ def start_cio_run(
     with _connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO cio_runs (run_id, trigger, started_at, status)
-            VALUES (?, ?, ?, 'running')
+            INSERT INTO cio_runs (run_id, trigger, started_at, status, pid)
+            VALUES (?, ?, ?, 'running', ?)
             """,
-            (run_id, trigger, started_at),
+            (run_id, trigger, started_at, os.getpid()),
         )
     return run_id
 
@@ -1260,3 +1478,863 @@ def last_successful_cio_run_at(*, db_path: Path | None = None) -> str | None:
     if row is None or row["ended_at"] is None:
         return None
     return str(row["ended_at"])
+
+
+# --- Schema v9: two-phase node rows (Mission Control v2, Phase 1) -----------
+
+
+def start_node_run(
+    run_id: str | None,
+    node: str,
+    *,
+    started_at: str | None = None,
+    pid: int | None = None,
+    db_path: Path | None = None,
+) -> int:
+    """Insert a `node_runs` row in the `running` state at node ENTRY and return
+    its id; `finish_node_run` closes it at exit. `pid` (default: this process)
+    lets `sweep_stale_runs` tell a crashed process from a slow node.
+    `record_node_run` remains the one-shot path for old callers."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO node_runs (run_id, node, started_at, status, pid)
+            VALUES (?, ?, ?, 'running', ?)
+            """,
+            (run_id, node, started_at or _now_iso(), os.getpid() if pid is None else int(pid)),
+        )
+        return cur.lastrowid or 0
+
+
+def finish_node_run(
+    node_run_id: int,
+    status: str,
+    *,
+    ended_at: str | None = None,
+    duration_s: float | None = None,
+    error: str | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    cost_usd: float = 0.0,
+    n_calls: int = 0,
+    db_path: Path | None = None,
+) -> None:
+    """Close a `node_runs` row opened by `start_node_run`. `status` ∈ {completed, failed}."""
+    if status not in ("completed", "failed"):
+        raise ValueError(f"status must be 'completed' or 'failed', got {status!r}")
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE node_runs
+               SET ended_at = ?, duration_s = ?, status = ?, error = ?,
+                   tokens_in = ?, tokens_out = ?, cost_usd = ?, n_calls = ?
+             WHERE id = ?
+            """,
+            (
+                ended_at or _now_iso(),
+                duration_s,
+                status,
+                error,
+                int(tokens_in or 0),
+                int(tokens_out or 0),
+                float(cost_usd or 0.0),
+                int(n_calls or 0),
+                int(node_run_id),
+            ),
+        )
+
+
+# --- Schema v9: two-phase LLM calls + full prompts --------------------------
+
+
+def _message_parts(message: Any) -> tuple[str, str]:
+    """(role, text) for one chat message — dicts or SDK objects. Non-string
+    content (multi-part messages) is JSON-serialised so it still hashes."""
+    if isinstance(message, dict):
+        role, content = message.get("role"), message.get("content")
+    else:
+        role, content = getattr(message, "role", None), getattr(message, "content", None)
+    if content is None:
+        text = ""
+    elif isinstance(content, str):
+        text = content
+    else:
+        text = json.dumps(content, default=str, ensure_ascii=False)
+    return str(role or "unknown"), text
+
+
+def _store_messages(
+    conn: sqlite3.Connection, call_id: int, messages: list[Any], *, start_seq: int
+) -> int:
+    """Insert `messages` as llm_messages rows (seq from `start_seq`), content-
+    addressed through prompt_blobs: an unchanged system prompt is stored once
+    and its seen_count / last_seen are bumped. Returns rows written."""
+    now = _now_iso()
+    for offset, message in enumerate(messages):
+        role, text = _message_parts(message)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        conn.execute(
+            """
+            INSERT INTO prompt_blobs (sha256, content, n_chars, first_seen, last_seen, seen_count)
+            VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(sha256) DO UPDATE
+               SET seen_count = seen_count + 1, last_seen = excluded.last_seen
+            """,
+            (digest, text, len(text), now, now),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO llm_messages (call_id, seq, role, sha256) VALUES (?, ?, ?, ?)",
+            (call_id, start_seq + offset, role, digest),
+        )
+    return len(messages)
+
+
+def _next_seq(conn: sqlite3.Connection, call_id: int) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM llm_messages WHERE call_id = ?",
+        (call_id,),
+    ).fetchone()
+    return int(row["next"])
+
+
+def start_llm_call(
+    *,
+    run_id: str | None,
+    node: str,
+    model: str | None,
+    messages: list[Any] | None = None,
+    prompt_excerpt: str | None = None,
+    attempt: int = 1,
+    db_path: Path | None = None,
+) -> int:
+    """Phase 1 of the two-phase `llm_calls` write: insert the row as `running`
+    BEFORE the SDK call, with the full request messages stored through
+    prompt_blobs in the same transaction. Returns the call id that
+    `finish_llm_call` closes. `prompt_excerpt` keeps the pre-v9 readers fed."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO llm_calls (run_id, node, ts, model, status, attempt, prompt_excerpt)
+            VALUES (?, ?, ?, ?, 'running', ?, ?)
+            """,
+            (
+                run_id,
+                node or "",
+                _now_iso(),
+                model,
+                int(attempt or 1),
+                (prompt_excerpt or "")[:LLM_EXCERPT_MAX_CHARS] or None,
+            ),
+        )
+        call_id = cur.lastrowid or 0
+        if messages:
+            _store_messages(conn, call_id, list(messages), start_seq=0)
+        return call_id
+
+
+def finish_llm_call(
+    call_id: int,
+    *,
+    status: str,
+    latency_s: float,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    cost_usd: float = 0.0,
+    response_excerpt: str | None = None,
+    response_text: str | None = None,
+    error: str | None = None,
+    db_path: Path | None = None,
+) -> None:
+    """Phase 2: close the row with the outcome. `status` ∈ {completed, failed}.
+    `response_text` (the full assistant message) is appended to llm_messages;
+    `response_excerpt` is clipped and kept for the pre-v9 readers."""
+    if status not in ("completed", "failed"):
+        raise ValueError(f"status must be 'completed' or 'failed', got {status!r}")
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE llm_calls
+               SET status = ?, ended_at = ?, latency_s = ?, tokens_in = ?, tokens_out = ?,
+                   cost_usd = ?, response_excerpt = ?, error = ?
+             WHERE id = ?
+            """,
+            (
+                status,
+                _now_iso(),
+                float(latency_s or 0.0),
+                int(tokens_in or 0),
+                int(tokens_out or 0),
+                float(cost_usd or 0.0),
+                (response_excerpt or "")[:LLM_EXCERPT_MAX_CHARS] or None,
+                (error or "")[:1000] or None,
+                int(call_id),
+            ),
+        )
+        if response_text is not None:
+            _store_messages(
+                conn,
+                call_id,
+                [{"role": "assistant", "content": response_text}],
+                start_seq=_next_seq(conn, call_id),
+            )
+
+
+def record_llm_messages(
+    call_id: int,
+    messages: list[Any],
+    *,
+    response: str | None = None,
+    db_path: Path | None = None,
+) -> int:
+    """Append `messages` (and, when given, the assistant `response`) to an
+    existing call after the rows it already has, deduplicated through
+    prompt_blobs. Returns rows written. The interceptor stores messages via
+    `start_llm_call` / `finish_llm_call`; this is for callers that only hold a
+    call id (tests, backfills, one-shot `record_llm_call` users)."""
+    init_db(db_path)
+    items = list(messages or [])
+    if response is not None:
+        items.append({"role": "assistant", "content": response})
+    if not items:
+        return 0
+    with _connect(db_path) as conn:
+        return _store_messages(conn, call_id, items, start_seq=_next_seq(conn, call_id))
+
+
+def llm_messages_for_call(call_id: int, *, db_path: Path | None = None) -> list[dict]:
+    """Full messages of one call in order: [{seq, role, text, sha256, n_chars}].
+    Empty for a missing file or a pre-v9 DB (reads never migrate)."""
+    if not Path(db_path or DB_PATH).exists():
+        return []
+    with _connect(db_path) as conn:
+        try:
+            rows = conn.execute(
+                """
+                SELECT m.seq, m.role, b.content AS text, m.sha256, b.n_chars
+                  FROM llm_messages m
+                  JOIN prompt_blobs b ON b.sha256 = m.sha256
+                 WHERE m.call_id = ?
+                 ORDER BY m.seq
+                """,
+                (int(call_id),),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [dict(r) for r in rows]
+
+
+def _prune_blobs_conn(conn: sqlite3.Connection, days: int) -> dict:
+    cutoff = (datetime.now(UTC) - timedelta(days=int(days))).isoformat()
+    messages = conn.execute(
+        "DELETE FROM llm_messages WHERE call_id IN (SELECT id FROM llm_calls WHERE ts < ?)",
+        (cutoff,),
+    ).rowcount
+    blobs = conn.execute(
+        "DELETE FROM prompt_blobs WHERE sha256 NOT IN (SELECT sha256 FROM llm_messages)"
+    ).rowcount
+    return {"messages": int(messages), "blobs": int(blobs)}
+
+
+def prune_blobs(days: int | None = None, *, db_path: Path | None = None) -> dict:
+    """Drop the llm_messages rows of calls older than `days` (default
+    PROMPT_RETENTION_DAYS) and every prompt_blob nothing references any more.
+    A blob shared with a newer call survives. The llm_calls rows and their
+    excerpts stay forever. `init_db` runs this once a day (meta.last_prune)."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        return _prune_blobs_conn(conn, PROMPT_RETENTION_DAYS if days is None else days)
+
+
+# --- Schema v9: spans (steps of non-graph flows) -----------------------------
+
+
+@dataclass
+class Span:
+    """Handle yielded by `span()`. Mutate `meta` inside the block (it is
+    written at exit) and set `error` to record a soft failure without raising."""
+
+    id: int | None
+    parent_kind: str
+    parent_id: str | None
+    name: str
+    label: str | None = None
+    meta: dict = field(default_factory=dict)
+    error: str | None = None
+
+
+def start_span(
+    parent_kind: str,
+    parent_id: str,
+    name: str,
+    *,
+    label: str | None = None,
+    meta: dict | None = None,
+    db_path: Path | None = None,
+) -> int:
+    """Insert a `running` spans row and return its id."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO spans (parent_kind, parent_id, name, label, started_at, status, meta_json)
+            VALUES (?, ?, ?, ?, ?, 'running', ?)
+            """,
+            (
+                parent_kind,
+                parent_id,
+                name,
+                label,
+                _now_iso(),
+                json.dumps(meta, default=str) if meta else None,
+            ),
+        )
+        return cur.lastrowid or 0
+
+
+def finish_span(
+    span_id: int,
+    status: str,
+    *,
+    meta: dict | None = None,
+    error: str | None = None,
+    db_path: Path | None = None,
+) -> None:
+    """Close a spans row. `status` ∈ {completed, failed}."""
+    if status not in ("completed", "failed"):
+        raise ValueError(f"status must be 'completed' or 'failed', got {status!r}")
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE spans SET ended_at = ?, status = ?, meta_json = ?, error = ? WHERE id = ?",
+            (
+                _now_iso(),
+                status,
+                json.dumps(meta, default=str) if meta else None,
+                (error or "")[:1000] or None,
+                int(span_id),
+            ),
+        )
+
+
+def _close_span(handle: Span, status: str, *, error: str | None, db_path: Path | None) -> None:
+    if handle.id is None:
+        return
+    try:
+        finish_span(handle.id, status, meta=handle.meta, error=error, db_path=db_path)
+    except Exception as exc:
+        logger.warning(
+            f"[telemetry] span close failed for {handle.parent_kind}:{handle.parent_id} "
+            f"{handle.name} ({handle.label}): {exc}"
+        )
+
+
+@contextlib.contextmanager
+def span(
+    parent_kind: str,
+    parent_id: str | None,
+    name: str,
+    *,
+    label: str | None = None,
+    meta: dict | None = None,
+    db_path: Path | None = None,
+) -> Iterator[Span]:
+    """Record one step of a non-graph flow (the CIO cycle today) as a `spans`
+    row: `running` on entry, `completed` or `failed` on exit; an exception
+    inside the block (a cancelled task included) is recorded and re-raised.
+    The bookkeeping itself is best-effort — a telemetry failure is logged,
+    never raised — and with `parent_id=None` nothing is written, so call
+    sites need no branch."""
+    handle = Span(
+        id=None,
+        parent_kind=parent_kind,
+        parent_id=parent_id,
+        name=name,
+        label=label,
+        meta=dict(meta or {}),
+    )
+    if parent_id:
+        try:
+            handle.id = start_span(
+                parent_kind, parent_id, name, label=label, meta=handle.meta, db_path=db_path
+            )
+        except Exception as exc:
+            logger.warning(f"[telemetry] span start failed for {name}: {exc}")
+    try:
+        yield handle
+    except BaseException as exc:  # asyncio.CancelledError is not an Exception
+        _close_span(handle, "failed", error=str(exc) or type(exc).__name__, db_path=db_path)
+        raise
+    _close_span(
+        handle, "failed" if handle.error else "completed", error=handle.error, db_path=db_path
+    )
+
+
+def _span_dict(row: sqlite3.Row) -> dict:
+    out = dict(row)
+    raw = out.pop("meta_json", None)
+    try:
+        out["meta"] = json.loads(raw) if raw else {}
+    except ValueError:
+        out["meta"] = {}
+    return out
+
+
+def spans_for(parent_kind: str, parent_id: str, *, db_path: Path | None = None) -> list[dict]:
+    """Every span of one parent in start order, with `meta` parsed from meta_json."""
+    if not Path(db_path or DB_PATH).exists():
+        return []
+    with _connect(db_path) as conn:
+        try:
+            rows = conn.execute(
+                "SELECT * FROM spans WHERE parent_kind = ? AND parent_id = ? ORDER BY id",
+                (parent_kind, parent_id),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [_span_dict(r) for r in rows]
+
+
+# --- Schema v9: stale sweeper + medians --------------------------------------
+
+
+def _pid_alive(pid: int | None) -> bool:
+    """True when a process with this pid exists (signal 0 probe)."""
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    except (OverflowError, ValueError, OSError):
+        return False
+    return True
+
+
+def _mark_stale(
+    conn: sqlite3.Connection, table: str, key_col: str, keys: list[Any], now: str
+) -> int:
+    if not keys:
+        return 0
+    placeholders = ",".join("?" for _ in keys)
+    cur = conn.execute(
+        f"""
+        UPDATE {table}
+           SET status = 'failed', ended_at = ?, error = ?
+         WHERE status = 'running' AND {key_col} IN ({placeholders})
+        """,
+        [now, STALE_ERROR, *keys],
+    )
+    return int(cur.rowcount)
+
+
+def sweep_stale_runs(
+    minutes: int = 30,
+    *,
+    max_minutes: int = STALE_MAX_MINUTES,
+    db_path: Path | None = None,
+) -> dict[str, int]:
+    """Close `running` rows left behind by a process that died: graph_runs,
+    node_runs, cio_runs, spans and llm_calls become `failed` with
+    error=STALE_ERROR. Returns rows closed per table.
+
+    The pid is authoritative wherever a row has one: a node row or a CIO
+    cycle whose pid is dead is stale at once, and one whose pid is alive is
+    left alone however long it has run (real drill-ins and heartbeats do
+    exceed 30 minutes). A graph run follows the pids of its node rows. The
+    `minutes` window applies only where no pid can answer — pre-v9 rows, a
+    run with no node row yet, an LLM call with no run — and children follow
+    their parent: a span or LLM call whose parent was swept, or whose parent
+    is no longer running, goes with it. `max_minutes` is the hard cap that
+    catches a reused pid. Five small scans, no writes when nothing is stale.
+    Called by the Live tab on each poll and by the CIO dispatcher at cycle
+    start."""
+    init_db(db_path)
+    now_dt = datetime.now(UTC)
+    cutoff = (now_dt - timedelta(minutes=int(minutes))).isoformat()
+    hard_cutoff = (now_dt - timedelta(minutes=int(max_minutes))).isoformat()
+    now = _now_iso()
+    alive: dict[int, bool] = {}
+
+    def _alive(pid: Any) -> bool:
+        key = int(pid)
+        if key not in alive:
+            alive[key] = _pid_alive(key)
+        return alive[key]
+
+    with _connect(db_path) as conn:
+        stale_nodes: list[int] = []
+        for r in conn.execute("SELECT id, pid, started_at FROM node_runs WHERE status = 'running'"):
+            if r["started_at"] < hard_cutoff:
+                stale_nodes.append(r["id"])
+            elif r["pid"] is None:
+                if r["started_at"] < cutoff:
+                    stale_nodes.append(r["id"])
+            elif not _alive(r["pid"]):
+                stale_nodes.append(r["id"])
+
+        stale_runs: list[str] = []
+        live_parents: set[str] = set()
+        for r in conn.execute("SELECT run_id, started_at FROM graph_runs WHERE status = 'running'"):
+            pids = [
+                p["pid"]
+                for p in conn.execute(
+                    "SELECT DISTINCT pid FROM node_runs WHERE run_id = ? AND pid IS NOT NULL",
+                    (r["run_id"],),
+                )
+            ]
+            if r["started_at"] < hard_cutoff:
+                stale_runs.append(r["run_id"])
+            elif pids:
+                if not any(_alive(p) for p in pids):
+                    stale_runs.append(r["run_id"])
+            elif r["started_at"] < cutoff:
+                stale_runs.append(r["run_id"])
+            if r["run_id"] not in stale_runs:
+                live_parents.add(r["run_id"])
+
+        stale_cio: list[str] = []
+        for r in conn.execute(
+            "SELECT run_id, pid, started_at FROM cio_runs WHERE status = 'running'"
+        ):
+            if r["started_at"] < hard_cutoff:
+                stale_cio.append(r["run_id"])
+            elif r["pid"] is not None:
+                if not _alive(r["pid"]):
+                    stale_cio.append(r["run_id"])
+            elif r["started_at"] < cutoff:
+                # Pre-v9 cycle without a pid: alive only if it is still
+                # opening steps.
+                recent = conn.execute(
+                    """
+                    SELECT 1 FROM spans
+                     WHERE parent_kind = 'cio_run' AND parent_id = ? AND started_at >= ?
+                     LIMIT 1
+                    """,
+                    (r["run_id"], cutoff),
+                ).fetchone()
+                if recent is None:
+                    stale_cio.append(r["run_id"])
+            if r["run_id"] not in stale_cio:
+                live_parents.add(r["run_id"])
+
+        swept_parents = set(stale_runs) | set(stale_cio)
+        stale_spans = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id, parent_id, started_at FROM spans WHERE status = 'running'"
+            )
+            if r["started_at"] < hard_cutoff
+            or r["parent_id"] in swept_parents
+            or (r["parent_id"] not in live_parents and r["started_at"] < cutoff)
+        ]
+        stale_calls = [
+            r["id"]
+            for r in conn.execute("SELECT id, run_id, ts FROM llm_calls WHERE status = 'running'")
+            if r["ts"] < hard_cutoff
+            or r["run_id"] in swept_parents
+            or (r["run_id"] not in live_parents and r["ts"] < cutoff)
+        ]
+        counts = {
+            "node_runs": _mark_stale(conn, "node_runs", "id", stale_nodes, now),
+            "graph_runs": _mark_stale(conn, "graph_runs", "run_id", stale_runs, now),
+            "cio_runs": _mark_stale(conn, "cio_runs", "run_id", stale_cio, now),
+            "spans": _mark_stale(conn, "spans", "id", stale_spans, now),
+            "llm_calls": _mark_stale(conn, "llm_calls", "id", stale_calls, now),
+        }
+    return counts
+
+
+def node_medians(limit: int = 60, *, db_path: Path | None = None) -> dict[str, float]:
+    """Median duration in seconds per node, plus `run` for the whole graph,
+    over the last `limit` completed graph runs — the live view's ETA baseline.
+    Empty when nothing has completed yet."""
+    if not Path(db_path or DB_PATH).exists():
+        return {}
+    with _connect(db_path) as conn:
+        runs = conn.execute(
+            """
+            SELECT run_id, duration_s FROM graph_runs
+             WHERE status = 'completed' ORDER BY started_at DESC LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        if not runs:
+            return {}
+        ids = [r["run_id"] for r in runs]
+        placeholders = ",".join("?" for _ in ids)
+        nodes = conn.execute(
+            f"""
+            SELECT node, duration_s FROM node_runs
+             WHERE run_id IN ({placeholders}) AND status = 'completed'
+               AND duration_s IS NOT NULL
+            """,
+            ids,
+        ).fetchall()
+    by_node: dict[str, list[float]] = {}
+    for r in nodes:
+        by_node.setdefault(r["node"], []).append(float(r["duration_s"]))
+    out = {node: round(statistics.median(v), 1) for node, v in sorted(by_node.items())}
+    run_durations = [float(r["duration_s"]) for r in runs if r["duration_s"] is not None]
+    if run_durations:
+        out["run"] = round(statistics.median(run_durations), 1)
+    return out
+
+
+# --- Schema v9: the snapshot (one shape for live and replay) -----------------
+
+
+def next_heartbeat(now: datetime | None = None) -> str:
+    """ISO local time of the next scheduled CIO heartbeat (HEARTBEAT_HOURS_LOCAL)."""
+    now = now or datetime.now().astimezone()
+    for day_offset in (0, 1):
+        day = now + timedelta(days=day_offset)
+        for hour in sorted(HEARTBEAT_HOURS_LOCAL):
+            candidate = day.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if candidate > now:
+                return candidate.isoformat(timespec="minutes")
+    return now.isoformat(timespec="minutes")
+
+
+def _empty_vitals() -> dict:
+    return {
+        "runs_today": 0,
+        "cost_today_usd": 0.0,
+        "failed_24h": 0,
+        "degraded_24h": 0,
+        "active": 0,
+        "next_heartbeat": next_heartbeat(),
+    }
+
+
+def _vitals(conn: sqlite3.Connection) -> dict:
+    today = datetime.now(UTC).date().isoformat()
+    day_ago = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+    runs_today = conn.execute(
+        "SELECT COUNT(*) AS n FROM graph_runs WHERE substr(started_at, 1, 10) = ?", (today,)
+    ).fetchone()["n"]
+    cost = conn.execute(
+        "SELECT COALESCE(SUM(cost_usd), 0.0) AS c FROM node_runs WHERE substr(started_at, 1, 10) = ?",
+        (today,),
+    ).fetchone()["c"]
+    failed = conn.execute(
+        "SELECT COUNT(*) AS n FROM graph_runs WHERE status = 'failed' AND started_at >= ?",
+        (day_ago,),
+    ).fetchone()["n"]
+    # Degraded = finished, but an agent failed or logged a run-scoped soft
+    # error (same derivation as Mission Control's runs table).
+    degraded = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM graph_runs g
+         WHERE g.status = 'completed' AND g.started_at >= ?
+           AND (EXISTS (SELECT 1 FROM node_runs n WHERE n.run_id = g.run_id AND n.status = 'failed')
+                OR EXISTS (SELECT 1 FROM errors e WHERE e.run_id = g.run_id))
+        """,
+        (day_ago,),
+    ).fetchone()["n"]
+    active = conn.execute(
+        "SELECT COUNT(*) AS n FROM graph_runs WHERE status = 'running'"
+    ).fetchone()["n"]
+    return {
+        "runs_today": int(runs_today),
+        "cost_today_usd": round(float(cost or 0.0), 4),
+        "failed_24h": int(failed),
+        "degraded_24h": int(degraded),
+        "active": int(active),
+        "next_heartbeat": next_heartbeat(),
+    }
+
+
+def _run_detail(conn: sqlite3.Connection, run: dict, *, include_messages: bool) -> dict:
+    """One graph run with its node rows, each node's LLM calls and — when
+    `include_messages` — every call's full request messages and response."""
+    run_id = run["run_id"]
+    nodes = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM node_runs WHERE run_id = ? ORDER BY started_at, id", (run_id,)
+        )
+    ]
+    calls = [
+        dict(r)
+        for r in conn.execute("SELECT * FROM llm_calls WHERE run_id = ? ORDER BY id", (run_id,))
+    ]
+    messages_by_call: dict[int, list[dict]] = {}
+    if include_messages and calls:
+        placeholders = ",".join("?" for _ in calls)
+        for r in conn.execute(
+            f"""
+            SELECT m.call_id, m.role, b.content
+              FROM llm_messages m JOIN prompt_blobs b ON b.sha256 = m.sha256
+             WHERE m.call_id IN ({placeholders})
+             ORDER BY m.call_id, m.seq
+            """,
+            [c["id"] for c in calls],
+        ):
+            messages_by_call.setdefault(r["call_id"], []).append(
+                {"role": r["role"], "text": r["content"]}
+            )
+    calls_by_node: dict[str, list[dict]] = {}
+    for c in calls:
+        entry = {
+            "id": c["id"],
+            "model": c["model"],
+            "status": c.get("status") or "completed",
+            "attempt": c.get("attempt") or 1,
+            "started_at": c["ts"],
+            "ended_at": c.get("ended_at"),
+            "latency_s": c["latency_s"],
+            "tokens_in": c["tokens_in"],
+            "tokens_out": c["tokens_out"],
+            "cost_usd": c["cost_usd"],
+            "error": c.get("error"),
+            "prompt_excerpt": c["prompt_excerpt"],
+            "response_excerpt": c["response_excerpt"],
+        }
+        if include_messages:
+            msgs = messages_by_call.get(c["id"], [])
+            entry["messages"] = [m for m in msgs if m["role"] != "assistant"]
+            replies = [m["text"] for m in msgs if m["role"] == "assistant"]
+            entry["response"] = replies[-1] if replies else None
+        calls_by_node.setdefault(c["node"], []).append(entry)
+    node_entries = [
+        {
+            "id": n["id"],
+            "node": n["node"],
+            "status": n["status"],
+            "started_at": n["started_at"],
+            "ended_at": n["ended_at"],
+            "duration_s": n["duration_s"],
+            "error": n["error"],
+            "pid": n.get("pid"),
+            "tokens_in": n["tokens_in"],
+            "tokens_out": n["tokens_out"],
+            "cost_usd": n["cost_usd"],
+            "n_calls": n["n_calls"],
+            "calls": calls_by_node.get(n["node"], []),
+        }
+        for n in nodes
+    ]
+    errors = [
+        dict(r)
+        for r in conn.execute("SELECT * FROM errors WHERE run_id = ? ORDER BY ts", (run_id,))
+    ]
+    return {
+        "run_id": run_id,
+        "ticker": run.get("ticker"),
+        "thesis": run.get("thesis"),
+        "source": run.get("source") or "",
+        "status": run.get("status"),
+        "started_at": run.get("started_at"),
+        "ended_at": run.get("ended_at"),
+        "duration_s": run.get("duration_s"),
+        "confidence": run.get("confidence"),
+        "error": run.get("error"),
+        "nodes": node_entries,
+        "errors": errors,
+    }
+
+
+def _cio_detail(conn: sqlite3.Connection, cycle: dict) -> dict:
+    run_id = cycle["run_id"]
+    steps = [
+        _span_dict(r)
+        for r in conn.execute(
+            "SELECT * FROM spans WHERE parent_kind = 'cio_run' AND parent_id = ? ORDER BY id",
+            (run_id,),
+        )
+    ]
+    actions = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM cio_actions WHERE cio_run_id = ? ORDER BY id", (run_id,)
+        )
+    ]
+    return {**cycle, "steps": steps, "actions": actions}
+
+
+def _empty_snapshot() -> dict:
+    return {
+        "now": _now_iso(),
+        "poll_s": LIVE_POLL_S,
+        "vitals": _empty_vitals(),
+        "medians": {},
+        "cio": [],
+        "runs": [],
+        "recent": [],
+    }
+
+
+def live_snapshot(
+    *,
+    recent_limit: int = 20,
+    cio_limit: int = 5,
+    db_path: Path | None = None,
+) -> dict:
+    """The single state document the Live tab renders (plan §3.3): server
+    time, vitals, node medians, the running (then most recent) CIO cycles with
+    their steps and actions, every ACTIVE graph run with nodes, calls and full
+    messages, and the last `recent_limit` runs with per-node status. Replay
+    feeds the same renderer from `run_snapshot`. A pure read: it never
+    creates or migrates the DB file (a pre-v9 file reads as empty until the
+    first write migrates it). The Live tab calls `sweep_stale_runs()` before
+    polling it; the sweeper is a writer and stays a separate call."""
+    if not Path(db_path or DB_PATH).exists():
+        return _empty_snapshot()
+    with _connect(db_path) as conn:
+        try:
+            vitals = _vitals(conn)
+            active = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM graph_runs WHERE status = 'running' ORDER BY started_at"
+                )
+            ]
+            runs = [_run_detail(conn, r, include_messages=True) for r in active]
+            cycles = [
+                dict(r)
+                for r in conn.execute(
+                    """
+                    SELECT * FROM cio_runs
+                     ORDER BY (status = 'running') DESC, started_at DESC LIMIT ?
+                    """,
+                    (int(cio_limit),),
+                )
+            ]
+            cio = [_cio_detail(conn, c) for c in cycles]
+        except sqlite3.OperationalError as exc:  # pre-v9 file nothing has written to yet
+            logger.warning(f"[telemetry] live_snapshot on a pre-v9 DB reads as empty: {exc}")
+            return _empty_snapshot()
+    recent = recent_runs(limit=recent_limit, db_path=db_path)
+    statuses = node_status_by_run([r["run_id"] for r in recent], db_path=db_path)
+    for r in recent:
+        r["nodes"] = statuses.get(r["run_id"], {})
+    return {
+        "now": _now_iso(),
+        "poll_s": LIVE_POLL_S,
+        "vitals": vitals,
+        "medians": node_medians(db_path=db_path),
+        "cio": cio,
+        "runs": runs,
+        "recent": recent,
+    }
+
+
+def run_snapshot(run_id: str, *, db_path: Path | None = None) -> dict | None:
+    """One graph run in the snapshot's `runs[]` shape with full messages, plus
+    `cio` — the CIO decision that triggered or reused it, if any. The Runs
+    tab's inspector drawer and replay input. None when the run is unknown."""
+    if not run_id or not Path(db_path or DB_PATH).exists():
+        return None
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM graph_runs WHERE run_id = ?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            detail = _run_detail(conn, dict(row), include_messages=True)
+        except sqlite3.OperationalError:
+            return None
+    detail["cio"] = cio_action_for_run(run_id, db_path=db_path)
+    return detail

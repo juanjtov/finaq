@@ -16,10 +16,18 @@ returns.
 
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 from data import state as state_db
+from utils.models import MODEL_PRICING
 from utils.openrouter import _install_telemetry_interceptor
+
+# Any model with a row in the price table — picked at runtime so the tests
+# never hard-code a model id.
+PRICED_MODEL = next(iter(MODEL_PRICING))
 
 
 def _fake_response(prompt_tokens: int, completion_tokens: int):
@@ -331,3 +339,169 @@ def test_interceptor_prompt_excerpt_stops_at_cap(tmp_path, monkeypatch):
         ).fetchone()[0]
     assert len(excerpt) == state_db.LLM_EXCERPT_MAX_CHARS
     assert excerpt.startswith('[{"role"')
+
+
+# --- Schema v9 — two-phase llm_calls rows with full messages ----------------
+
+
+def _rows(db, sql: str, *args) -> list[dict]:
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(sql, args)]
+
+
+def _client_with(create_fn):
+    return _install_telemetry_interceptor(
+        SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_fn)))
+    )
+
+
+def test_call_row_is_running_with_full_messages_before_the_sdk_returns(tmp_path, monkeypatch):
+    """The live view's contract: while the model is still answering, the
+    llm_calls row already exists as `running` with the FULL system and user
+    text; afterwards it carries tokens, cost, latency and the assistant
+    message — and the clipped excerpts the pre-v9 readers expect."""
+    db = tmp_path / "trace.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    run_id = state_db.start_graph_run("NVDA", "ai_cake")
+    system = "You are the fundamentals analyst. " * 200  # ~7 KB: past the 2,000-char excerpt
+    user = "Summarise the KPIs for NVDA. " * 100
+    seen: dict = {}
+
+    def _blocking_create(**kwargs):
+        # The SDK call is in flight — this is what a 1 s poll would see.
+        rows = _rows(db, "SELECT * FROM llm_calls")
+        seen["rows"] = rows
+        seen["messages"] = state_db.llm_messages_for_call(rows[0]["id"]) if rows else []
+        return _fake_response(1000, 500)
+
+    client = _client_with(_blocking_create)
+    run_token = state_db.current_run_id.set(run_id)
+    node_token = state_db.node_telemetry_var.set(state_db.new_node_telemetry(node="fundamentals"))
+    try:
+        client.chat.completions.create(
+            model=PRICED_MODEL,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        )
+    finally:
+        state_db.node_telemetry_var.reset(node_token)
+        state_db.current_run_id.reset(run_token)
+
+    [mid] = seen["rows"]
+    assert (mid["status"], mid["ended_at"], mid["node"], mid["run_id"]) == (
+        "running",
+        None,
+        "fundamentals",
+        run_id,
+    )
+    assert mid["model"] == PRICED_MODEL and mid["attempt"] == 1
+    assert [(m["role"], m["text"]) for m in seen["messages"]] == [
+        ("system", system),
+        ("user", user),
+    ]
+
+    [after] = state_db.llm_calls_for_run(run_id)
+    assert after["id"] == mid["id"]  # closed in place, not re-inserted
+    assert after["status"] == "completed" and after["ended_at"] and after["error"] is None
+    assert (after["tokens_in"], after["tokens_out"]) == (1000, 500)
+    assert after["cost_usd"] > 0 and after["latency_s"] >= 0.0
+    messages = state_db.llm_messages_for_call(after["id"])
+    assert [m["role"] for m in messages] == ["system", "user", "assistant"]
+    assert messages[-1]["text"] == "ok"
+    # Old readers (Run Inspector, Mission Control) still get their excerpts.
+    assert after["prompt_excerpt"].startswith('[{"role"')
+    assert len(after["prompt_excerpt"]) <= state_db.LLM_EXCERPT_MAX_CHARS
+    assert user not in after["prompt_excerpt"]  # the excerpt clipped it; the blob has it
+    assert after["response_excerpt"] == "ok"
+
+
+def test_system_blob_is_stored_once_across_two_calls(tmp_path, monkeypatch):
+    db = tmp_path / "trace.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    system = {"role": "system", "content": "persona " * 500}
+    client = _client_with(lambda **kw: _fake_response(10, 5))
+    token = state_db.node_telemetry_var.set(state_db.new_node_telemetry(node="news"))
+    try:
+        for user in ("first question", "second question"):
+            client.chat.completions.create(
+                model=PRICED_MODEL, messages=[system, {"role": "user", "content": user}]
+            )
+    finally:
+        state_db.node_telemetry_var.reset(token)
+    blobs = _rows(db, "SELECT content, seen_count FROM prompt_blobs ORDER BY first_seen, content")
+    by_content = {b["content"]: b["seen_count"] for b in blobs}
+    # system ×2, two user prompts, and the identical "ok" response ×2.
+    assert by_content == {system["content"]: 2, "first question": 1, "second question": 1, "ok": 2}
+    assert _rows(db, "SELECT COUNT(*) AS n FROM llm_messages")[0]["n"] == 6
+
+
+def test_failed_call_ends_failed_with_error_and_reraises(tmp_path, monkeypatch):
+    db = tmp_path / "trace.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    run_id = state_db.start_graph_run("NVDA", "ai_cake")
+
+    def _explode(**kwargs):
+        raise RuntimeError("upstream 500")
+
+    client = _client_with(_explode)
+    run_token = state_db.current_run_id.set(run_id)
+    node_token = state_db.node_telemetry_var.set(state_db.new_node_telemetry(node="synthesis"))
+    try:
+        with pytest.raises(RuntimeError, match="upstream 500"):
+            client.chat.completions.create(
+                model=PRICED_MODEL,
+                messages=[{"role": "system", "content": "S"}, {"role": "user", "content": "U"}],
+            )
+    finally:
+        state_db.node_telemetry_var.reset(node_token)
+        state_db.current_run_id.reset(run_token)
+
+    [row] = state_db.llm_calls_for_run(run_id)
+    assert (row["status"], row["error"]) == ("failed", "upstream 500")
+    assert row["ended_at"] is not None and row["tokens_in"] == 0
+    assert row["response_excerpt"] == "CALL FAILED: upstream 500"  # pre-v9 readers' marker
+    # The request messages were captured before the failure; no assistant row.
+    assert [m["role"] for m in state_db.llm_messages_for_call(row["id"])] == ["system", "user"]
+
+
+def test_entry_write_failure_falls_back_to_a_one_shot_row(tmp_path, monkeypatch):
+    """Phase 1 failing (disk full, locked DB) must not lose the call: phase 2
+    lands the schema-v6-shaped one-shot row instead."""
+    db = tmp_path / "trace.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+
+    def _boom(**kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(state_db, "start_llm_call", _boom)
+    client = _client_with(lambda **kw: _fake_response(100, 50))
+    token = state_db.node_telemetry_var.set(state_db.new_node_telemetry(node="risk"))
+    try:
+        resp = client.chat.completions.create(
+            model=PRICED_MODEL, messages=[{"role": "user", "content": "hi"}]
+        )
+    finally:
+        state_db.node_telemetry_var.reset(token)
+    assert resp.usage.prompt_tokens == 100
+    [row] = _rows(db, "SELECT * FROM llm_calls")
+    assert (row["node"], row["status"], row["tokens_in"]) == ("risk", "completed", 100)
+    assert "hi" in row["prompt_excerpt"] and row["response_excerpt"] == "ok"
+    assert state_db.llm_messages_for_call(row["id"]) == []  # no messages on the fallback path
+
+
+def test_both_trace_writes_failing_never_breaks_the_call(monkeypatch):
+    def _boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(state_db, "start_llm_call", _boom)
+    monkeypatch.setattr(state_db, "record_llm_call", _boom)
+    monkeypatch.setattr(state_db, "finish_llm_call", _boom)
+    accumulator = state_db.new_node_telemetry(node="news")
+    token = state_db.node_telemetry_var.set(accumulator)
+    try:
+        client = _client_with(lambda **kw: _fake_response(100, 50))
+        resp = client.chat.completions.create(model=PRICED_MODEL, messages=[])
+    finally:
+        state_db.node_telemetry_var.reset(token)
+    assert resp.usage.prompt_tokens == 100
+    assert accumulator["n_calls"] == 1

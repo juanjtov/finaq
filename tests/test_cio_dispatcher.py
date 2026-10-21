@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -185,3 +186,36 @@ def test_main_propagates_cycle_failure_as_exit_1(
     monkeypatch.setattr(cio_orchestrator, "run_heartbeat", _explode)
     code = cio_dispatcher.main(["--mode", "heartbeat"])
     assert code == 1
+
+
+# --- Schema v9 — stale sweep at cycle start + notify span --------------------
+
+
+def test_run_sweeps_stale_rows_before_the_cycle(isolated_db, stub_cycles, stub_notify):
+    """A graph run left `running` by a killed process (here: too old for the
+    window, with no node row to vouch for a live pid) is closed as failed
+    before the cycle starts."""
+    stale = state_db.start_graph_run("AAA", "t")
+    with sqlite3.connect(isolated_db) as conn:
+        conn.execute(
+            "UPDATE graph_runs SET started_at = ? WHERE run_id = ?",
+            ((datetime.now(UTC) - timedelta(hours=2)).isoformat(), stale),
+        )
+    assert cio_dispatcher.main(["--mode", "heartbeat"]) == 0
+    run = state_db.get_graph_run(stale)
+    assert (run["status"], run["error"]) == ("failed", state_db.STALE_ERROR)
+
+
+def test_run_attaches_the_notify_span_to_the_latest_cycle(isolated_db, stub_cycles, stub_notify):
+    """The stubbed plan carries no cio_run_id, so the dispatcher falls back to
+    the most recent cycle row; without any cycle no span is written."""
+    assert cio_dispatcher.main(["--mode", "heartbeat"]) == 0
+    with sqlite3.connect(isolated_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 0
+
+    rid = state_db.start_cio_run("heartbeat")
+    state_db.finish_cio_run(rid, "completed")
+    assert cio_dispatcher.main(["--mode", "heartbeat"]) == 0
+    [notify] = state_db.spans_for("cio_run", rid)
+    assert (notify["name"], notify["status"]) == ("notify", "completed")
+    assert notify["meta"] == {"telegram_sent": True, "notion": False}
