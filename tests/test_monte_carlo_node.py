@@ -9,14 +9,12 @@ are missing or treasury fetch fails.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import copy
 
 import pytest
 
 from agents import monte_carlo
-
-THESES_DIR = Path(__file__).parents[1] / "theses"
+from tests.thesis_fixtures import AI_CAKE
 
 
 def _full_projections() -> dict:
@@ -50,10 +48,9 @@ def _full_kpis() -> dict:
 
 
 def _full_state() -> dict:
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
     return {
         "ticker": "NVDA",
-        "thesis": thesis,
+        "thesis": copy.deepcopy(AI_CAKE),
         "fundamentals": {
             "summary": "test",
             "kpis": _full_kpis(),

@@ -15,8 +15,7 @@ test file when the dashboard integration is needed.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import copy
 
 import pytest
 
@@ -29,18 +28,15 @@ from agents.qa import (
     _strip_code_fences,
     ask,
 )
+from tests.thesis_fixtures import AI_CAKE
 from utils.schemas import AgentAnswer
-
-THESES_DIR = Path(__file__).parents[1] / "theses"
-
 
 # --- Fixtures ---------------------------------------------------------------
 
 
 def _state_with(**fields) -> dict:
     """Build a minimal state with only the requested fields populated."""
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
-    base = {"ticker": "NVDA", "thesis": thesis}
+    base = {"ticker": "NVDA", "thesis": copy.deepcopy(AI_CAKE)}
     base.update(fields)
     return base
 
