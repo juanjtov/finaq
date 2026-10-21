@@ -566,19 +566,19 @@ def test_md_safe_handles_none_input():
     assert md_safe("") == ""
 
 
-# --- Run Inspector page (Step 10c.8) --------------------------------------
+# --- Runs tab (the former Run Inspector, Step 10c.8) -----------------------
 
 
-def test_run_inspector_renders_with_empty_db(tmp_path, monkeypatch):
-    """Empty state.db (no runs) → page renders a friendly 'no runs' note,
-    doesn't crash."""
+def test_runs_tab_renders_with_empty_db(tmp_path, monkeypatch):
+    """Empty state.db (no runs) → the Runs tab renders a friendly 'no runs'
+    note, doesn't crash."""
     from data import state as state_db
 
     monkeypatch.setattr(state_db, "DB_PATH", tmp_path / "empty.db")
     state_db.init_db(db_path=tmp_path / "empty.db")
 
     at = AppTest.from_file(
-        str(PAGES_DIR / "run_inspector.py"), default_timeout=DASHBOARD_TIMEOUT_S
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
     )
     at.run()
     assert not at.exception
@@ -587,9 +587,9 @@ def test_run_inspector_renders_with_empty_db(tmp_path, monkeypatch):
     assert any("No graph runs" in w for w in warnings)
 
 
-def test_run_inspector_renders_with_populated_db(tmp_path, monkeypatch):
-    """Populate state.db with a fake run + per-node rows; the inspector
-    must render the run header + node table without crashing."""
+def test_runs_tab_renders_with_populated_db(tmp_path, monkeypatch):
+    """Populate state.db with a fake run + per-node rows; the Runs tab
+    must render the run header + picker without crashing."""
     from data import state as state_db
 
     db = tmp_path / "test.db"
@@ -608,27 +608,24 @@ def test_run_inspector_renders_with_populated_db(tmp_path, monkeypatch):
     state_db.finish_graph_run(run_id, status="completed", confidence="medium", db_path=db)
 
     at = AppTest.from_file(
-        str(PAGES_DIR / "run_inspector.py"), default_timeout=DASHBOARD_TIMEOUT_S
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
     )
     at.run()
     assert not at.exception
-    # Sidebar selectbox should list the run we just inserted.
+    # The run picker should list the run we just inserted.
     sel = next((sb for sb in at.selectbox if sb.label == "Run"), None)
     assert sel is not None
     assert any("NVDA" in opt and "ai_cake" in opt for opt in sel.options)
 
 
-def test_run_inspector_langsmith_url_only_when_tracing_enabled(monkeypatch):
+def test_runs_tab_langsmith_url_only_when_tracing_enabled(monkeypatch):
     """Defensive: the LangSmith deep-link button MUST NOT appear when
-    LANGSMITH_TRACING is unset — there'd be no traces to link to."""
+    LANGSMITH_TRACING is unset — there'd be no traces to link to. (Moved
+    from the Run Inspector into Mission Control's Runs tab.)"""
     import importlib
 
     monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
-    ri = importlib.reload(
-        importlib.import_module("ui.pages.run_inspector")
-    ) if "ui.pages.run_inspector" in importlib.sys.modules else (
-        importlib.import_module("ui.pages.run_inspector")
-    )
+    ri = importlib.import_module("ui.pages.mission_control")
     assert ri._langsmith_url_for_run("abc-123") is None
 
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
@@ -732,8 +729,8 @@ def test_mission_control_degraded_status_label():
     assert "failed" in mc._run_status_label({"status": "failed"})
 
 
-def test_run_inspector_renders_trace_timeline_and_banner(tmp_path, monkeypatch):
-    """The inspector must render the failure banner, agent timeline, and
+def test_runs_tab_renders_trace_timeline_and_banner(tmp_path, monkeypatch):
+    """The Runs tab must render the failure banner, agent timeline, and
     the local LLM call trace for a failed run."""
     from data import state as state_db
 
@@ -742,7 +739,7 @@ def test_run_inspector_renders_trace_timeline_and_banner(tmp_path, monkeypatch):
     _seed_failed_run(db, state_db)
 
     at = AppTest.from_file(
-        str(PAGES_DIR / "run_inspector.py"), default_timeout=DASHBOARD_TIMEOUT_S
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
     )
     at.run()
     assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
@@ -760,9 +757,9 @@ def test_run_inspector_renders_trace_timeline_and_banner(tmp_path, monkeypatch):
     assert any("fundamentals" in (x.label or "") for x in at.expander)
 
 
-def test_run_inspector_preselects_run_from_session_state(tmp_path, monkeypatch):
-    """Mission Control's row-click hands over `inspect_run_id` via session
-    state — the inspector must open on THAT run, not the newest."""
+def test_runs_tab_preselects_run_from_session_state(tmp_path, monkeypatch):
+    """Health's row-click hands over `inspect_run_id` via session state —
+    the Runs tab must open on THAT run, not the newest."""
     import time as _time
 
     from data import state as state_db
@@ -775,7 +772,7 @@ def test_run_inspector_preselects_run_from_session_state(tmp_path, monkeypatch):
     state_db.finish_graph_run(newer, "completed", db_path=db)
 
     at = AppTest.from_file(
-        str(PAGES_DIR / "run_inspector.py"), default_timeout=DASHBOARD_TIMEOUT_S
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
     )
     at.session_state["inspect_run_id"] = older
     at.run()
@@ -787,7 +784,7 @@ def test_run_inspector_preselects_run_from_session_state(tmp_path, monkeypatch):
     )
 
 
-def test_run_inspector_shows_cio_trigger_line(tmp_path, monkeypatch):
+def test_runs_tab_shows_cio_trigger_line(tmp_path, monkeypatch):
     """A run drilled by the CIO must show the 'triggered by CIO' backlink
     in the header; the helper is unit-tested directly."""
     import importlib
@@ -804,7 +801,7 @@ def test_run_inspector_shows_cio_trigger_line(tmp_path, monkeypatch):
     )
     state_db.finish_graph_run(run_id, "completed", db_path=db)
 
-    ri = importlib.import_module("ui.pages.run_inspector")
+    ri = importlib.import_module("ui.pages.mission_control")
     line = ri._trigger_line(run_id)
     assert "CIO heartbeat" in line
     assert "drill" in line
@@ -813,14 +810,14 @@ def test_run_inspector_shows_cio_trigger_line(tmp_path, monkeypatch):
     assert "manual" in ri._trigger_line(manual)
 
 
-def test_run_inspector_demo_loader_never_matches_other_runs(tmp_path, monkeypatch):
+def test_runs_tab_demo_loader_never_matches_other_runs(tmp_path, monkeypatch):
     """Regression: the payload loader's `{prefix}*.json` glob matched OTHER
     runs' suffixed files (and longer slugs sharing the prefix), silently
     rendering a different run's agent payloads. Only the exact run-id
     suffix or the exact legacy name may match."""
     import importlib
 
-    ri = importlib.import_module("ui.pages.run_inspector")
+    ri = importlib.import_module("ui.pages.mission_control")
     monkeypatch.setattr(ri, "DEMO_DIR", tmp_path)
 
     (tmp_path / "NVDA__nu__aaaaaaaa.json").write_text('{"run_id": "other-run"}')
@@ -838,3 +835,246 @@ def test_run_inspector_demo_loader_never_matches_other_runs(tmp_path, monkeypatc
     (tmp_path / "NVDA__nu.json").write_text('{"run_id": "legacy"}')
     state = ri._load_demo_state("NVDA", "nu", "dddddddd-0000")
     assert state and state["run_id"] == "legacy"
+
+
+# --- Mission Control v2, Phase 2: Live tab, replay, redirect stub -----------
+
+
+_SYSTEM_PROMPT = "You are a senior equity research analyst.\n" + ("Rule line.\n" * 400)
+_USER_PROMPT = "AS OF: 2026-10-21\nTICKER: NVDA\n" + ("KPI line.\n" * 50)
+
+
+def _seed_running_run(state_db) -> tuple[str, int, int]:
+    """One run in flight: a finished load_thesis row, a running news node with
+    an in-flight call whose full messages are stored (schema v9)."""
+    run_id = state_db.start_graph_run("NVDA", "nu", source="dashboard")
+    done = state_db.start_node_run(run_id, "load_thesis")
+    state_db.finish_node_run(done, "completed", duration_s=0.05)
+    node_id = state_db.start_node_run(run_id, "news")
+    call_id = state_db.start_llm_call(
+        run_id=run_id,
+        node="news",
+        model="test/model",
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": _USER_PROMPT},
+        ],
+    )
+    return run_id, node_id, call_id
+
+
+def test_mission_control_has_live_runs_health_tabs_and_renders_the_component():
+    """The page is three tabs; the Live tab mounts the component (an iframe
+    element) even on an empty DB."""
+    at = AppTest.from_file(
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    assert [t.label for t in at.tabs] == ["Live", "Runs", "Health"]
+    assert len(at.get("iframe")) == 1, "the Live fragment must mount exactly one component"
+
+
+def test_live_fragment_emits_one_component_and_memoises_identical_snapshots(
+    tmp_path, monkeypatch
+):
+    """Driven directly (run_every is inert under AppTest): one components.html
+    per fragment run; an unchanged snapshot re-emits the byte-identical HTML
+    string (so Streamlit keeps the iframe mounted); a changed snapshot yields
+    new HTML carrying the new content."""
+    import importlib
+
+    from data import state as state_db
+
+    mc = importlib.import_module("ui.pages.mission_control")
+    monkeypatch.setattr(state_db, "DB_PATH", tmp_path / "live.db")
+    mc._LIVE_CACHE.update({"hash": None, "html": None})
+    emitted: list[str] = []
+    monkeypatch.setattr(mc.components, "html", lambda doc, **kw: emitted.append(doc))
+
+    run_id, node_id, call_id = _seed_running_run(state_db)
+
+    mc.render_live_panel()
+    assert len(emitted) == 1
+    first = emitted[0]
+    # Full prompts ride along (JSON-escaped, so match a newline-free slice).
+    assert "You are a senior equity research analyst." in first and "AS OF: 2026-10-21" in first
+    assert '"status":"running"' in first
+
+    mc.render_live_panel()
+    assert len(emitted) == 2
+    assert emitted[1] == first, "identical snapshot must re-emit byte-identical HTML"
+
+    state_db.finish_llm_call(
+        call_id, status="completed", latency_s=0.7, tokens_in=9, tokens_out=4,
+        response_text="THE ANSWER", cost_usd=0.001,
+    )
+    mc.render_live_panel()
+    assert len(emitted) == 3
+    assert emitted[2] != first
+    assert "THE ANSWER" in emitted[2]
+
+
+def test_live_html_substitutes_every_token_and_parses_as_html(tmp_path, monkeypatch):
+    """Every {{token}} in ui/mc_live.html is known to mc_tokens() + the page,
+    none survives rendering, the document parses, and a prompt containing
+    `</script>` cannot break out of the JSON data block."""
+    import importlib
+    import re
+    from html.parser import HTMLParser
+
+    from data import state as state_db
+    from ui.components import mc_tokens
+
+    mc = importlib.import_module("ui.pages.mission_control")
+    template = mc.MC_TEMPLATE.read_text(encoding="utf-8")
+    placeholders = set(re.findall(r"\{\{(\w+)\}\}", template))
+    known = set(mc_tokens()) | {"snapshot_json", "mode"}
+    assert placeholders <= known, f"unknown placeholders: {placeholders - known}"
+    for required in ("bg", "accent", "ink", "night_bg", "theme", "mode", "snapshot_json"):
+        assert required in placeholders
+
+    monkeypatch.setattr(state_db, "DB_PATH", tmp_path / "t.db")
+    run_id = state_db.start_graph_run("NVDA", "nu", source="cli")
+    state_db.start_node_run(run_id, "risk")
+    state_db.start_llm_call(
+        run_id=run_id, node="risk", model="m",
+        messages=[{"role": "system", "content": "S"}, {"role": "user", "content": "</script><b>x"}],
+    )
+    for mode in ("live", "replay"):
+        snap = state_db.live_snapshot() if mode == "live" else mc.replay_snapshot(run_id)
+        doc = mc.live_html(snap, mode=mode)
+        assert not re.search(r"\{\{\w+\}\}", doc), "unsubstituted placeholder left in the HTML"
+        assert "</script><b>x" not in doc and "\\u003c/script>" in doc
+
+        class _Parser(HTMLParser):
+            tags: list[str] = []
+
+            def handle_starttag(self, tag, attrs):
+                self.tags.append(tag)
+
+        parser = _Parser()
+        parser.tags = []
+        parser.feed(doc)
+        assert {"html", "head", "style", "body", "script"} <= set(parser.tags)
+        assert f'data-mode="{mode}"' in doc
+
+
+def test_mc_tokens_day_is_the_brand_palette_and_night_is_off_by_default():
+    from ui.components import INK, PARCHMENT, SAGE, mc_tokens
+
+    day = mc_tokens()
+    assert (day["bg"], day["accent"], day["ink"], day["theme"]) == (PARCHMENT, SAGE, INK, "day")
+    assert day["night_bg"] != day["bg"] and day["night_accent"] != day["accent"]
+    assert mc_tokens("night")["theme"] == "night"
+    assert mc_tokens("anything-else")["theme"] == "day"
+
+
+def test_runs_tab_shows_full_system_and_user_prompt_for_a_call(tmp_path, monkeypatch):
+    """The LLM call trace renders the FULL stored messages (not the 2,000-char
+    excerpt): a system prompt longer than the excerpt cap must appear whole in
+    an st.code block, alongside the user prompt and the response."""
+    from data import state as state_db
+
+    monkeypatch.setattr(state_db, "DB_PATH", tmp_path / "full.db")
+    run_id, node_id, call_id = _seed_running_run(state_db)
+    state_db.finish_llm_call(
+        call_id, status="completed", latency_s=1.2, tokens_in=10, tokens_out=5,
+        response_text="FULL RESPONSE TEXT",
+    )
+    state_db.finish_node_run(node_id, "completed", duration_s=1.3, n_calls=1)
+    state_db.finish_graph_run(run_id, "completed", duration_s=2.0)
+    assert len(_SYSTEM_PROMPT) > state_db.LLM_EXCERPT_MAX_CHARS
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    codes = [c.value for c in at.code]  # st.code dedents + strips its body
+    assert _SYSTEM_PROMPT.strip() in codes, "full system prompt must be rendered verbatim"
+    assert _USER_PROMPT.strip() in codes, "full user prompt must be rendered verbatim"
+    assert "FULL RESPONSE TEXT" in codes
+    assert any("call 1 — news" in (x.label or "") for x in at.expander)
+
+
+def test_run_id_query_param_preselects_run_on_mission_control(tmp_path, monkeypatch):
+    """`?run_id=` (Telegram deep link) selects that run in the Runs tab even
+    when it is not the newest."""
+    import time as _time
+
+    from data import state as state_db
+
+    db = tmp_path / "deep.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    older = _seed_failed_run(db, state_db)
+    _time.sleep(0.02)
+    newer = state_db.start_graph_run("NU", "nu", db_path=db)
+    state_db.finish_graph_run(newer, "completed", db_path=db)
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.query_params["run_id"] = older
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    sel = next((sb for sb in at.selectbox if sb.label == "Run"), None)
+    assert sel is not None and older[:8] in (sel.value or "")
+    assert at.session_state["mc_tabs"] == "Runs"  # the deep link opens the Runs tab
+
+
+def test_run_inspector_stub_redirects_keeping_run_id(monkeypatch):
+    """The old page is a redirect: it carries `run_id` over as the query
+    param of the switch AND as the `inspect_run_id` session key."""
+    import streamlit as st
+
+    calls: list[tuple] = []
+
+    def _fake_switch(page, *, query_params=None):
+        calls.append((page, query_params))
+
+    monkeypatch.setattr(st, "switch_page", _fake_switch)
+    at = AppTest.from_file(
+        str(PAGES_DIR / "run_inspector.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.query_params["run_id"] = "abc-123"
+    at.run()
+    assert not at.exception, f"stub raised: {[e.message for e in at.exception]}"
+    assert calls == [("pages/mission_control.py", {"run_id": "abc-123"})]
+    assert at.session_state["inspect_run_id"] == "abc-123"
+    assert at.session_state["mc_jump_tab"] == "Runs"
+
+
+def test_replay_snapshot_wraps_a_run_with_its_cio_cycle(tmp_path, monkeypatch):
+    """Replay feeds the component the live snapshot's shape: the run with full
+    messages under `runs`, the cycle behind it (spans + decisions) under
+    `cio`, `now` at the run's end."""
+    import importlib
+
+    from data import state as state_db
+
+    mc = importlib.import_module("ui.pages.mission_control")
+    monkeypatch.setattr(state_db, "DB_PATH", tmp_path / "replay.db")
+    cycle = state_db.start_cio_run("on_demand")
+    with state_db.span("cio_run", cycle, "decide", label="NVDA"):
+        pass
+    run_id, node_id, call_id = _seed_running_run(state_db)
+    state_db.finish_llm_call(call_id, status="completed", latency_s=1.0, response_text="R")
+    state_db.finish_node_run(node_id, "completed", duration_s=1.0, n_calls=1)
+    state_db.finish_graph_run(run_id, "completed", duration_s=2.0)
+    state_db.record_cio_action(
+        ticker="NVDA", thesis="nu", action="drill", cio_run_id=cycle, drill_run_id=run_id,
+        trigger="on_demand", confidence="high",
+    )
+    state_db.finish_cio_run(cycle, "completed", n_actions=1, n_drilled=1)
+
+    snap = mc.replay_snapshot(run_id)
+    assert snap is not None and [r["run_id"] for r in snap["runs"]] == [run_id]
+    [cio] = snap["cio"]
+    assert cio["run_id"] == cycle and [s["name"] for s in cio["steps"]] == ["decide"]
+    assert cio["actions"][0]["drill_run_id"] == run_id
+    assert snap["now"] == snap["runs"][0]["ended_at"]
+    [node] = [n for n in snap["runs"][0]["nodes"] if n["node"] == "news"]
+    assert node["calls"][0]["messages"][0]["text"] == _SYSTEM_PROMPT
+    assert mc.replay_snapshot("missing") is None
+

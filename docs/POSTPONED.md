@@ -38,8 +38,9 @@ Three categories:
 | LangSmith tracing | 5z | Per-LLM-call latency, tokens, full prompt/response, replay. |
 | Streamlit Mission Control page | 8 | Graph-run history, daily-cost chart, freshness cards, recent alerts, errors. |
 | Telegram `/status` command | 10 | Triage last-run, alerts in last 24h, today's $ spend, open errors. |
-| Run Inspector CIO panel | 11 | Recent CIO cycles + per-cycle decisions (drill/reuse/dismiss) with rationale. |
-| Mission Control CIO rows | 11 | Last 20 CIO actions + last 10 cio_runs aggregate. |
+| Runs tab CIO panel (was: Run Inspector) | 11 | Recent CIO cycles + per-cycle decisions (drill/reuse/dismiss) with rationale. Lives in Mission Control's Runs tab since Mission Control v2 Phase 2. |
+| Mission Control CIO rows | 11 | Last 20 CIO actions + last 10 cio_runs aggregate (Health tab). |
+| Mission Control Live tab | MC v2 Phase 2 | Shipped 2026-10-21: the control-room graph, CIO ribbon, fleet, waterfall and prompt drawer over `live_snapshot()`; replay in the Runs tab. |
 | `~ Healthchecks.io ping ~` | ~~11~~ | Replaced — the launchd `RunAtLoad=true` + dispatcher freshness gate produces a catchup cycle on the next wake; no external liveness watcher needed for a single-user Mac path. Re-add for droplet (Step 12) where boot-path catchup doesn't apply. |
 | `journalctl` on the droplet | 12 | SSH-time deep dive into systemd unit logs. |
 
@@ -154,7 +155,7 @@ the remaining deferred follow-ups, each with a trigger.
 | Item | Trigger | Effort |
 |---|---|---|
 | **CIO confidence calibration loop** | When you've corrected the CIO's call ≥10 times in a month (e.g. it dismissed but you /drill'd anyway, or it drilled but you found the report stale). The signal is "predicted confidence vs realised user action" — a small DB query over `cio_actions` joined with manual `/drill` follow-ups. Calibration would weight the persona prompt's confidence rubric or short-circuit low-confidence dismisses into "ask the user". | ~1–2 weeks: instrument the override signal, build the eval harness, A/B the prompt change. |
-| **CIO evidence retention** | Today the CIO's evidence bundle (RAG chunks + news + filings) is built fresh per call and not persisted. When you read a `cio_actions` rationale and want to know what the CIO *saw*, there's no record. Trigger to add a `cio_evidence` table: ≥3 times you wanted to audit a decision and couldn't reproduce the inputs. | ~3-4h: write evidence dict to a JSON column, surface it in Run Inspector. |
+| **CIO evidence retention** | Today the CIO's evidence bundle (RAG chunks + news + filings) is built fresh per call and not persisted. When you read a `cio_actions` rationale and want to know what the CIO *saw*, there's no record. Trigger to add a `cio_evidence` table: ≥3 times you wanted to audit a decision and couldn't reproduce the inputs. | ~3-4h: write evidence dict to a JSON column, surface it in Mission Control's Runs tab. |
 | **Per-action LLM telemetry on cio_actions rows** | Today CIO planner LLM calls are not in `node_runs` (which has a FK to `graph_runs`). Cost / token tracking exists on graph drills triggered by the CIO but not on the planner's own calls. Trigger: monthly OpenRouter bill diverges from `state.db.daily_cost` by ≥$2. | ~2h: add `tokens_in/out/cost_usd` columns to `cio_actions`, wire planner to write them via the same ContextVar accumulator pattern. |
 | **CIO multi-thesis batching** | Today on-demand `/cio TICKER` decides per-thesis serially. For a ticker in 3 theses, that's 3 LLM calls. Could be one batched call. Trigger: a heartbeat regularly does ≥6 LLM calls for cross-thesis tickers (NVDA in ai_cake + nvda_halo). | ~1 day: design the batched prompt, validate it returns N decisions in one shot, update `decide()`. |
 | **Budget-cap demotion preserves original confidence** | Today `apply_drill_budget` overwrites a demoted decision's confidence to `low` to signal "this isn't a real LLM-decision". Empirically that misleads the dashboard — 21% of dismisses (15 of 70) appeared as `low` confidence in cycle #2 but were actually high-confidence drills clipped by the budget cap. The rationale already prefixes `[budget cap]` — that's enough. Trigger to ship: dashboard reader misreads CIO confidence distribution, OR a confidence-calibration loop (entry above) needs to distinguish real LLM uncertainty from cap-induced low. | ~10 min: in `cio/planner.py:apply_drill_budget`, drop the `confidence="low"` overwrite on demoted rows; preserve `d.confidence`. `cio_actions.source='budget_cap'` (schema v5, 2026-09-06) already gives the UI that separation — no extra column needed. |
@@ -181,6 +182,14 @@ evidence channel.
 |---|---|---|
 | **Per-attempt visibility of OpenAI-SDK retries** — `llm_calls.attempt` exists (schema v9) but is always 1: the SDK retries inside one `create()` call, so the interceptor sees a single request. | A failed run's call row shows a latency that only makes sense as several attempts, or the Live tab needs to say "retrying". | ~2h: an httpx event hook on the client that bumps `attempt` on every outbound request. |
 | **`vitals.next_heartbeat` reads a constant** — `data/state.py::HEARTBEAT_HOURS_LOCAL = (5, 13)` mirrors `deploy/launchd/com.finaq.cio.plist`; the droplet's systemd timer is not read. | The schedule changes on either host, or the dashboard shows a wrong next-heartbeat time. | ~1h: read the hours from an env var set by the deploy files. |
+
+### Mission Control v2 — Phase 2 deferrals (Live + Runs tabs, 2026-10-21)
+
+| Item | Trigger | Effort |
+|---|---|---|
+| **CIO planner prompts in the ribbon drawer** — the Decide step's drawer lists the decisions (`cio_actions`), not the planner's system / user prompt: `live_snapshot()` carries `steps` + `actions` per cycle (plan §3.3) and the planner's `llm_calls` rows (`node='cio.planner'`) are not attached. | You want to audit what the planner read for one decision from the Live tab rather than from `llm_calls`. | ~1h: attach the cycle's planner calls (with messages) to `cio[]` in `live_snapshot()`, render them in the Decide drawer like a node call. |
+| **Component height is fixed** — `components.html` cannot size the iframe to its content (`LIVE_HEIGHT` / `REPLAY_HEIGHT` in `ui/pages/mission_control.py`); a very long waterfall scrolls inside the frame. | A run with many LLM calls per node makes the waterfall taller than the frame on your screen. | ~30 min: switch to `st.iframe(height="content")` once the deprecation of `components.v1.html` lands, or compute the height from the snapshot's row count. |
+| **Health "systemic soft failures" card** (plan Phase 3) — e.g. "Filings skipped in 52 of the last 60 runs". | Phase 3. | ~1h over `errors` + `node_runs`. |
 
 ### Telegram NL router calibration
 

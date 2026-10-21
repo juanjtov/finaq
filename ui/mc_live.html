@@ -1,0 +1,864 @@
+<!doctype html>
+<!--
+  FINAQ Mission Control — the live / replay component (Mission Control v2, Phase 2).
+
+  One file, vanilla JS, no CDN. Streamlit embeds it through st.components.v1.html
+  (ui/pages/mission_control.py::live_html) after substituting every double-brace placeholder:
+  palette + fonts from ui/components.py::mc_tokens(), {{theme}} (day | night),
+  {{mode}} (live | replay) and {{snapshot_json}} — the dict data.state.live_snapshot()
+  returns (or a run_snapshot() wrapped in the same shape for replay). The page only
+  renders that document; elapsed counters and progress rings tick client-side from
+  the row timestamps, offset by the snapshot's `now`. Layout: mockup C (control
+  room) with mockup B's waterfall underneath and one inspector drawer for both.
+-->
+<html lang="en" data-theme="{{theme}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FINAQ Mission Control</title>
+<style>
+:root {
+  --bg: {{bg}}; --surface: {{surface}}; --surface2: {{surface2}}; --line: {{line}}; --line2: {{line2}};
+  --ink: {{ink}}; --ink2: {{ink2}}; --ink3: {{ink3}}; --accent: {{accent}}; --accent-soft: {{accent_soft}};
+  --good: {{accent}}; --warn: {{warn}}; --warn-bg: {{warn_bg}}; --crit: {{crit}}; --crit-bg: {{crit_bg}};
+  --glow: {{glow}}; --font-ui: {{font_ui}}; --font-mono: {{font_mono}};
+  color-scheme: light;
+}
+:root[data-theme="night"] {
+  --bg: {{night_bg}}; --surface: {{night_surface}}; --surface2: {{night_surface2}}; --line: {{night_line}}; --line2: {{night_line2}};
+  --ink: {{night_ink}}; --ink2: {{night_ink2}}; --ink3: {{night_ink3}}; --accent: {{night_accent}}; --accent-soft: {{night_accent_soft}};
+  --good: {{night_accent}}; --warn: {{night_warn}}; --warn-bg: {{night_warn_bg}}; --crit: {{night_crit}}; --crit-bg: {{night_crit_bg}};
+  --glow: {{night_glow}};
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--ink); font: 13px/1.4 var(--font-ui); -webkit-font-smoothing: antialiased; }
+button { font-family: inherit; }
+.mono, pre, .num { font-family: var(--font-mono); }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--ink3); }
+.sub { color: var(--ink2); }
+.mc { min-width: 900px; padding: 4px 2px 10px; }
+.mc h5 { margin: 0 0 8px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink3); font-weight: 700; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+svg .n:focus-visible { outline: none; }
+svg .n:focus-visible .n-tile { stroke: var(--ink); stroke-width: 2.5; }
+
+/* status forms (never colour alone) */
+.pill { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; border-radius: 999px; padding: 2px 8px; border: 1px solid var(--line); color: var(--ink2); background: var(--surface2); white-space: nowrap; }
+.pill.running { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.pill.done { color: var(--good); }
+.pill.degraded { color: var(--warn); background: var(--warn-bg); }
+.pill.failed { color: #fff; background: var(--crit); border-color: var(--crit); }
+.pill.pending { border-style: dashed; color: var(--ink3); background: transparent; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--ink3); flex: 0 0 auto; }
+.dot.running { background: var(--accent); box-shadow: 0 0 0 0 var(--glow); animation: pulse 1.4s ease-out infinite; }
+.dot.done { background: var(--good); }
+.dot.degraded { background: var(--warn); }
+.dot.failed { background: var(--crit); }
+.dot.pending { background: transparent; border: 1.5px dashed var(--ink3); }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 var(--glow); } 100% { box-shadow: 0 0 0 10px transparent; } }
+.g { display: inline-block; vertical-align: middle; }
+.tile { width: 34px; height: 34px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; background: var(--accent-soft); color: var(--accent); flex: 0 0 auto; }
+.tile.warn { background: var(--warn-bg); color: var(--warn); }
+.tile.crit { background: var(--crit-bg); color: var(--crit); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 12px; }
+.kv .k { color: var(--ink3); }
+.kv .v { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; word-break: break-all; }
+.ghostbtn { font: 600 11.5px var(--font-ui); color: var(--accent); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+.ghostbtn:hover { border-color: var(--accent); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--surface2); }
+.seg button { font: 600 11.5px var(--font-ui); color: var(--ink2); background: transparent; border: 0; padding: 4px 9px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.skel { height: 10px; border-radius: 5px; background: linear-gradient(90deg, var(--line2), var(--accent-soft), var(--line2)); background-size: 200% 100%; animation: shimmer 1.6s linear infinite; margin: 8px 0; }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* vitals */
+.topbar { display: flex; align-items: center; gap: 10px; padding: 2px 4px 6px; font-size: 11.5px; color: var(--ink3); }
+.topbar .spacer { flex: 1; }
+.c-vitals { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; padding: 0 2px; }
+.vital { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; min-width: 0; }
+.vital .v { font-size: 22px; font-weight: 700; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vital .v.over { color: var(--warn); }
+.vital .k { font-size: 11px; color: var(--ink3); margin-top: 2px; }
+.vital .t { font-size: 11px; color: var(--ink2); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* CIO ribbon */
+.ribbon { display: flex; align-items: center; gap: 0; margin: 10px 2px 0; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 9px 12px; overflow: hidden; }
+.ribbon .rhead { flex: 0 0 auto; padding-right: 12px; margin-right: 6px; border-right: 1px solid var(--line2); min-width: 150px; }
+.ribbon .rhead .nm { font-weight: 800; font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
+.ribbon .rhead .mt { font-size: 10.5px; color: var(--ink3); margin-top: 2px; }
+.ribbon.empty { color: var(--ink3); font-size: 12px; }
+.rstep { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 3px 8px 3px 2px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+.rstep:hover { background: var(--surface2); }
+.rstep[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.rstep .tile { width: 28px; height: 28px; border-radius: 8px; }
+.rstep .nm { font-weight: 700; font-size: 12px; white-space: nowrap; }
+.rstep .nm .m { font-weight: 500; font-size: 10.5px; color: var(--ink3); margin-left: 4px; }
+.rstep .mt { font-size: 10.5px; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rstep.running .nm { color: var(--accent); }
+.rstep.running .tile { box-shadow: 0 0 0 4px var(--glow); }
+.rstep.pending .nm { color: var(--ink3); }
+.rstep.pending .tile { background: transparent; border: 1.5px dashed var(--line); color: var(--ink3); }
+.rstep.failed .tile { background: var(--crit-bg); color: var(--crit); }
+.rstep + .rstep::before { content: ""; width: 14px; height: 1px; background: var(--line); margin-right: 6px; flex: 0 0 auto; }
+.rstep.done + .rstep::before, .rstep.failed + .rstep::before { background: var(--accent); }
+
+/* transport (replay) */
+.transport { display: flex; align-items: center; gap: 10px; margin: 10px 2px 0; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; }
+.transport .lbl { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink3); font-weight: 700; }
+.transport input[type=range] { flex: 1; min-width: 160px; accent-color: var(--accent); }
+.transport .clock { font-family: var(--font-mono); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.btn { font: 600 12px var(--font-ui); color: var(--ink); background: var(--surface2); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; cursor: pointer; white-space: nowrap; }
+.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* body */
+.c-body { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; padding: 10px 2px 0; align-items: start; }
+.c-main { display: grid; gap: 10px; align-content: start; min-width: 0; }
+.canvas { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; position: relative; overflow: hidden; }
+.canvas svg { width: 100%; height: auto; display: block; }
+.run-head { position: absolute; left: 12px; top: 10px; display: flex; gap: 8px; align-items: center; font-size: 12px; background: var(--surface); padding: 4px 6px; border-radius: 8px; max-width: calc(100% - 24px); overflow: hidden; }
+.run-head .tk { font-weight: 800; font-size: 14px; }
+.run-head .m { color: var(--ink3); font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+.canvas .idle { position: absolute; left: 14px; bottom: 10px; font-size: 11.5px; color: var(--ink3); }
+.canvas .follow { position: absolute; right: 12px; top: 12px; }
+.n-tile { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+.n.pending .n-tile { fill: transparent; stroke: var(--ink3); stroke-dasharray: 4 4; }
+.n.degraded .n-tile { fill: var(--warn-bg); stroke: var(--warn); }
+.n.failed .n-tile { fill: var(--crit-bg); stroke: var(--crit); }
+.n.running .n-tile { filter: drop-shadow(0 0 8px var(--glow)); }
+.n .n-g { color: var(--accent); }
+.n.pending .n-g { color: var(--ink3); }
+.n.degraded .n-g { color: var(--warn); }
+.n.failed .n-g { color: var(--crit); }
+.n-ring { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; transform: rotate(-90deg); transform-origin: center; transform-box: fill-box; opacity: 0; transition: opacity .3s; }
+.n.running .n-ring { opacity: 1; }
+.n-ring.over { stroke: var(--warn); }
+.n-track { fill: none; stroke: var(--line2); stroke-width: 3; opacity: 0; }
+.n.running .n-track { opacity: 1; }
+.n-name { font: 700 12.5px var(--font-ui); fill: var(--ink); }
+.n-sub { font: 500 10.5px var(--font-ui); fill: var(--ink3); }
+.n-st { font: 500 10.5px var(--font-mono); fill: var(--ink2); }
+.n.pending .n-name { fill: var(--ink3); }
+.n-badge { fill: var(--surface); stroke: var(--good); stroke-width: 1.5; opacity: 0; }
+.n-badge-mark { stroke: var(--good); stroke-width: 1.8; fill: none; opacity: 0; stroke-linecap: round; stroke-linejoin: round; }
+.n.done .n-badge, .n.done .n-badge-mark, .n.degraded .n-badge, .n.degraded .n-badge-mark, .n.failed .n-badge, .n.failed .n-badge-mark { opacity: 1; }
+.n.degraded .n-badge, .n.degraded .n-badge-mark { stroke: var(--warn); }
+.n.failed .n-badge, .n.failed .n-badge-mark { stroke: var(--crit); }
+.n.sel .n-tile { stroke-width: 2.5; stroke: var(--ink); }
+.n { cursor: pointer; }
+.e { fill: none; stroke: var(--line); stroke-width: 1.5; transition: stroke .4s; }
+.e.flowing { stroke: var(--accent); stroke-dasharray: 5 7; animation: flow 1.1s linear infinite; }
+.e.done { stroke: var(--accent); }
+@keyframes flow { to { stroke-dashoffset: -24; } }
+.e-pill { fill: var(--surface); stroke: var(--line); }
+.e.flowing + .e-lab .e-pill, .e.done + .e-lab .e-pill { stroke: var(--accent); }
+.e-txt { font: 500 10px var(--font-mono); fill: var(--ink2); text-anchor: middle; }
+
+/* waterfall (mockup B) */
+.wf { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; position: relative; }
+.wf-axis { display: grid; grid-template-columns: 190px 1fr; border-bottom: 1px solid var(--line2); font-family: var(--font-mono); font-size: 10px; color: var(--ink3); }
+.wf-axis .lab { padding: 0 10px; line-height: 22px; font-family: var(--font-ui); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.wf-axis .plot { position: relative; height: 22px; }
+.wf-axis .tick { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line2); padding-left: 4px; line-height: 22px; white-space: nowrap; }
+.wf-rows { position: relative; }
+.wf-row { display: grid; grid-template-columns: 190px 1fr; align-items: center; height: 24px; cursor: pointer; border-bottom: 1px solid var(--line2); }
+.wf-row:hover { background: var(--surface2); }
+.wf-row[aria-selected="true"] { background: var(--accent-soft); }
+.wf-row .lab { display: flex; align-items: center; gap: 7px; font-size: 11.5px; padding-left: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink2); }
+.wf-row .lab b { color: var(--ink); font-weight: 700; }
+.wf-row[data-depth="1"] .lab { padding-left: 24px; }
+.wf-row[data-depth="2"] .lab { padding-left: 42px; font-size: 11px; }
+.wf-row .plot { position: relative; height: 100%; }
+.sp { position: absolute; top: 6px; height: 12px; border-radius: 3px; background: var(--accent); opacity: .85; min-width: 2px; }
+.sp.llm { top: 9px; height: 6px; background: var(--ink); opacity: .9; }
+.sp.ghost { background: transparent; border: 1px dashed var(--ink3); opacity: .6; top: 5px; height: 14px; }
+.sp.degraded { background: var(--warn); }
+.sp.failed { background: var(--crit); }
+.sp.running { border-radius: 3px 0 0 3px; }
+.sp.running::after { content: ""; position: absolute; right: -1px; top: -3px; width: 4px; height: 18px; background: var(--accent); border-radius: 2px; box-shadow: 0 0 0 0 var(--glow); animation: pulse 1.2s ease-out infinite; }
+.sp-lab { position: absolute; top: 4px; font-family: var(--font-mono); font-size: 10px; color: var(--ink2); white-space: nowrap; padding-left: 6px; }
+.sp-lab.over { color: var(--warn); }
+.playhead { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid var(--crit); pointer-events: none; z-index: 3; }
+.playhead::before { content: ""; position: absolute; top: -1px; left: -6px; border: 5px solid transparent; border-top: 7px solid var(--crit); }
+.wf-overlay { position: absolute; left: 190px; right: 0; top: 0; bottom: 0; pointer-events: none; }
+.wf .empty { padding: 10px 12px; font-size: 12px; color: var(--ink3); }
+
+/* fleet */
+.fleet { display: grid; grid-template-columns: 1fr 1.25fr 1fr; gap: 10px; align-items: start; }
+.panel .kv .v { word-break: normal; white-space: nowrap; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px; min-width: 0; }
+.runrow { display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; min-width: 0; }
+.runrow:hover { background: var(--surface2); }
+.runrow[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.runrow .tk { font-weight: 800; min-width: 40px; }
+.runrow .th { color: var(--ink3); font-size: 11.5px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runrow .st { font-family: var(--font-mono); font-size: 11px; color: var(--ink2); white-space: nowrap; }
+.panel .none { font-size: 12px; color: var(--ink3); padding: 2px 0; }
+
+/* inspector drawer (shared) */
+.c-drawer { min-height: 560px; height: 100%; position: sticky; top: 0; }
+.insp { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; display: flex; flex-direction: column; min-height: 560px; max-height: 940px; overflow: hidden; }
+.insp-head { padding: 12px 14px 10px; border-bottom: 1px solid var(--line2); display: flex; gap: 10px; align-items: center; min-width: 0; }
+.insp-head .ttl { font-weight: 800; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.insp-head .ctx { font-size: 11.5px; color: var(--ink3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.insp-head > div { min-width: 0; }
+.tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--line2); }
+.tab { font: 600 12px var(--font-ui); color: var(--ink2); background: transparent; border: 0; border-bottom: 2px solid transparent; padding: 6px 10px 8px; cursor: pointer; border-radius: 6px 6px 0 0; }
+.tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.insp-body { padding: 10px 12px 12px; overflow: auto; flex: 1; min-height: 0; }
+.insp-body pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 11.5px; line-height: 1.5; color: var(--ink); background: var(--surface2); border: 1px solid var(--line2); border-radius: 8px; padding: 10px 12px; }
+.insp-body pre .dim { color: var(--ink3); }
+.insp-body pre.err { color: var(--crit); border-color: var(--crit); }
+.meta-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 11.5px; color: var(--ink3); margin-bottom: 8px; }
+.meta-row .mono { color: var(--ink2); }
+.meta-row .spacer { flex: 1; }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
+.tiles > div { background: var(--surface2); border: 1px solid var(--line2); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.tiles .v { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tiles .k { font-size: 10.5px; color: var(--ink3); }
+.tiles .d { font-size: 10.5px; color: var(--ink2); margin-top: 2px; }
+.tiles .d.over { color: var(--warn); }
+.callpick { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
+.callpick button { font: 600 10.5px var(--font-mono); border: 1px solid var(--line); background: var(--surface2); color: var(--ink2); border-radius: 6px; padding: 2px 7px; cursor: pointer; }
+.callpick button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.act { border: 1px solid var(--line2); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: var(--surface2); font-size: 12px; }
+.act .h { display: flex; gap: 8px; align-items: center; font-weight: 700; }
+.act .r { color: var(--ink2); margin-top: 4px; font-size: 11.5px; }
+.act .m { color: var(--ink3); margin-top: 3px; font-family: var(--font-mono); font-size: 10.5px; }
+.spanrow { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--line2); font-size: 12px; }
+.spanrow .l { display: flex; gap: 7px; align-items: center; min-width: 0; }
+.spanrow .l span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spanrow .d { font-family: var(--font-mono); font-size: 11px; color: var(--ink2); }
+.spanrow .meta { grid-column: 1 / -1; font-family: var(--font-mono); font-size: 10.5px; color: var(--ink3); white-space: pre-wrap; word-break: break-word; }
+
+@media (prefers-reduced-motion: reduce) {
+  .dot.running, .sp.running::after, .e.flowing, .skel, .rstep.running .tile { animation: none !important; }
+  .n-ring, .e, .bar > i { transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="mc" id="mc" data-mode="{{mode}}">
+  <div class="topbar" id="c-topbar"></div>
+  <div class="c-vitals" id="c-vitals"></div>
+  <div class="ribbon" id="c-ribbon"></div>
+  <div class="transport" id="c-transport" hidden></div>
+  <div class="c-body">
+    <div class="c-main">
+      <div class="canvas" id="c-canvas"></div>
+      <div class="wf" id="c-wf"></div>
+      <aside class="fleet" id="c-fleet"></aside>
+    </div>
+    <aside class="c-drawer"><div class="insp" id="c-insp"></div></aside>
+  </div>
+</div>
+<script id="mc-data" type="application/json">{{snapshot_json}}</script>
+<script>
+(function () {
+'use strict';
+// ------------------------------------------------------------------ data
+const DATA = JSON.parse(document.getElementById('mc-data').textContent || '{}');
+const MODE = DATA.mode === 'replay' ? 'replay' : 'live';
+const REDUCED = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+const MEDIANS = DATA.medians || {};
+const GLYPHS = {
+  json: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9.5 8c-1.6 0-2 .6-2 2v1.2c0 .9-.5 1.3-1.3 1.3.8 0 1.3.4 1.3 1.3V15c0 1.4.4 2 2 2"/><path d="M14.5 8c1.6 0 2 .6 2 2v1.2c0 .9.5 1.3 1.3 1.3-.8 0-1.3.4-1.3 1.3V15c0 1.4-.4 2-2 2"/>',
+  chart: '<path d="M6 20v-7M12 20V6M18 20v-10M3 20h18"/>',
+  contract: '<path d="M6 3h8l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5M8 12h6"/><circle cx="14.5" cy="17" r="2.6"/>',
+  news: '<rect x="3" y="4" width="18" height="16" rx="2"/><rect x="6" y="7.5" width="6" height="5"/><path d="M14.5 8.5h4M14.5 11.5h4M6 15.5h12.5M6 18h8"/>',
+  flag: '<path d="M5 21V4M5 4h12l-2 4 2 4H5"/>',
+  cube: '<path d="M12 2.5l8.5 4.5v10L12 21.5l-8.5-4.5V7z"/><path d="M3.5 7l8.5 4.5L20.5 7M12 11.5v10"/>',
+  brain: '<path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5 3 3 0 0 0 3 3h3V4zM15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5 3 3 0 0 1-3 3h-3V4z"/>',
+  doc: '<path d="M6 3h8l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/><path d="M8 13h8M8 17h6"/>',
+  sync: '<path d="M20 12a8 8 0 0 1-13.9 5.4M4 12a8 8 0 0 1 13.9-5.4"/><path d="M18 3v4h-4M6 21v-4h4"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  money: '<rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M6 12h.01M18 12h.01"/>',
+  bolt: '<path d="M13 2.5L4.5 14H11l-1 7.5L19 10h-6.5z"/>',
+  chat: '<path d="M4 5h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-5 4z"/><path d="M8 10h8M8 13h5"/>',
+  check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  cross: '<path d="M7 7l10 10M17 7L7 17"/>',
+  warn: '<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17.5v.01"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5.2l3.2 1.9"/>',
+  graph: '<circle cx="6" cy="6" r="2.6"/><circle cx="18" cy="8" r="2.6"/><circle cx="11" cy="18" r="2.6"/><path d="M8.6 6.4l6.8 1.2M7.1 8.4l3 7.2M16.6 10.2l-4.4 5.6"/>',
+  laptop: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>',
+  phone: '<rect x="7" y="2" width="10" height="20" rx="2.2"/><path d="M10.5 18.5h3"/>'
+};
+function glyph(name, size) {
+  return '<svg class="g" viewBox="0 0 24 24" width="' + size + '" height="' + size + '" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (GLYPHS[name] || '') + '</svg>';
+}
+// The seven drill-in nodes in topology order (agents/__init__.py::build_graph). `env` names the
+// MODEL_* registry key the node resolves; the model string itself comes from the call row.
+const NODES = [
+  { id: 'load_thesis', name: 'Load thesis', sub: 'validate JSON', glyph: 'json', env: null },
+  { id: 'fundamentals', name: 'Fundamentals', sub: 'yfinance + LLM', glyph: 'chart', env: 'MODEL_FUNDAMENTALS' },
+  { id: 'filings', name: 'Filings', sub: 'RAG + LLM', glyph: 'contract', env: 'MODEL_FILINGS' },
+  { id: 'news', name: 'News', sub: 'Finnhub + LLM', glyph: 'news', env: 'MODEL_NEWS' },
+  { id: 'risk', name: 'Risk', sub: 'LLM only', glyph: 'flag', env: 'MODEL_RISK' },
+  { id: 'monte_carlo', name: 'Monte Carlo', sub: 'NumPy · 10k paths', glyph: 'cube', env: null },
+  { id: 'synthesis', name: 'Synthesis', sub: 'LLM · report', glyph: 'brain', env: 'MODEL_SYNTHESIS' }
+];
+const NODE_BY = Object.fromEntries(NODES.map(n => [n.id, n]));
+const POS = { load_thesis: [84, 230], fundamentals: [304, 112], filings: [304, 230], news: [304, 348], risk: [546, 168], monte_carlo: [546, 300], synthesis: [778, 230], report: [934, 230] };
+const EDGES = [['load_thesis', 'fundamentals', 'thesis'], ['load_thesis', 'filings', 'thesis'], ['load_thesis', 'news', 'thesis'], ['fundamentals', 'risk', 'kpis + summary'], ['filings', 'risk', 'risk themes'], ['news', 'risk', 'catalysts'], ['fundamentals', 'monte_carlo', 'projections'], ['risk', 'synthesis', 'risk level'], ['monte_carlo', 'synthesis', 'P10 · P50 · P90'], ['synthesis', 'report', 'report']];
+// CIO cycle steps in order (cio/cio.py + cio/dispatcher.py spans).
+const STEPS = [
+  { id: 'probe', name: 'Probe', icon: 'sync' }, { id: 'gates', name: 'Gates', icon: 'lock' },
+  { id: 'decide', name: 'Decide', icon: 'brain' }, { id: 'budget', name: 'Budget', icon: 'money' },
+  { id: 'drill', name: 'Drills', icon: 'bolt' }, { id: 'summary', name: 'Summary', icon: 'doc' },
+  { id: 'notify', name: 'Notify', icon: 'chat' }
+];
+
+// ------------------------------------------------------------------ helpers
+function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function txt(el, s) { if (el && el.textContent !== s) el.textContent = s; }
+function cls(el, c) { if (!el) return; const cur = typeof el.className === 'string' ? el.className : el.getAttribute('class'); if (cur !== c) el.setAttribute('class', c); }
+function setHTML(el, html) { if (el && el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; return true; } return false; }
+function ts(s) {
+  if (!s) return null;
+  const m = String(s).match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(?:\.(\d+))?\s*(Z|[+-]\d{2}:?\d{2})?$/);
+  if (!m) { const d = Date.parse(s); return isNaN(d) ? null : d; }
+  const time = m[2].length === 5 ? m[2] + ':00' : m[2];
+  const frac = m[3] ? '.' + (m[3] + '000').slice(0, 3) : '';
+  let tz = m[4] || 'Z';
+  if (tz.length === 5) tz = tz.slice(0, 3) + ':' + tz.slice(3);
+  const d = Date.parse(m[1] + 'T' + time + frac + tz);
+  return isNaN(d) ? null : d;
+}
+function fmtDur(s) { if (s == null || isNaN(s)) return '—'; if (s < 0) s = 0; if (s < 60) return (s < 10 ? s.toFixed(1) : Math.round(s)) + 's'; const m = Math.floor(s / 60), r = Math.round(s % 60); return m + 'm ' + (r < 10 ? '0' : '') + r + 's'; }
+function fmtMS(s) { if (s < 0) s = 0; const m = Math.floor(s / 60), r = Math.floor(s % 60); return m + ':' + (r < 10 ? '0' : '') + r; }
+function fmtTok(n) { n = Number(n) || 0; return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); }
+function fmtUsd(x) { x = Number(x) || 0; return '$' + x.toFixed(x < 0.1 ? 4 : 2); }
+function fmtClock(ms) { if (ms == null) return '—'; const d = new Date(ms); const p = n => (n < 10 ? '0' : '') + n; return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()); }
+function fmtHM(ms) { if (ms == null) return '—'; const d = new Date(ms); const p = n => (n < 10 ? '0' : '') + n; return p(d.getHours()) + ':' + p(d.getMinutes()); }
+function short(id) { return String(id || '').slice(0, 8); }
+function pill(st) { const ic = st === 'done' ? glyph('check', 10) : st === 'degraded' ? glyph('warn', 10) : st === 'failed' ? glyph('cross', 10) : ''; return '<span class="pill ' + st + '">' + (st === 'running' ? '<span class="dot running"></span>' : ic) + st + '</span>'; }
+function store(key, val) { try { sessionStorage.setItem(key, JSON.stringify(val)); } catch (e) {} }
+function load(key) { try { const v = sessionStorage.getItem(key); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
+function copyText(s) { try { if (navigator.clipboard) navigator.clipboard.writeText(s); } catch (e) {} }
+
+// ------------------------------------------------------------------ clock
+// The snapshot carries the server's `now`; the client ticks from its own clock offset by the
+// difference measured at mount. Replay replaces the clock with the scrubber.
+const SERVER_NOW = ts(DATA.now) || Date.now();
+const OFFSET = Date.now() - SERVER_NOW;
+function liveNow() { return Date.now() - OFFSET; }
+
+// ------------------------------------------------------------------ model
+const S = { runId: null, node: null, auto: true, tabs: {}, call: {}, step: null, t: 0, playing: false, speed: 4 };
+function runFromRecent(r) {
+  if (!r) return null;
+  const failed = String(r.failed_node_names || '').split(',').filter(Boolean);
+  return {
+    run_id: r.run_id, ticker: r.ticker, thesis: r.thesis, source: r.source || '', status: r.status, started_at: r.started_at,
+    ended_at: r.ended_at, duration_s: r.duration_s, confidence: r.confidence, error: r.error, cost_usd: r.cost_usd || 0,
+    tokens: (r.tokens_in || 0) + (r.tokens_out || 0), n_calls: r.n_calls || 0, n_errors: r.n_errors || 0, thin: true,
+    nodes: Object.keys(r.nodes || {}).map(k => ({ node: k, status: r.nodes[k], calls: [], failedHint: failed.indexOf(k) >= 0 })),
+    errors: []
+  };
+}
+function activeRuns() { return DATA.runs || []; }
+function pickRun() {
+  if (MODE === 'replay') return activeRuns()[0] || null;
+  const active = activeRuns();
+  if (S.runId) {
+    const a = active.find(r => r.run_id === S.runId); if (a) return a;
+    const rec = (DATA.recent || []).find(r => r.run_id === S.runId); if (rec) return runFromRecent(rec);
+  }
+  if (active.length) return active[0];
+  return runFromRecent((DATA.recent || [])[0]);
+}
+function finalState(row, soft) { return row.status === 'failed' ? 'failed' : soft ? 'degraded' : 'done'; }
+function nodeState(run, id, t) {
+  const empty = { st: 'pending', row: null, s: null, e: null, elapsed: 0, dur: 0, calls: [], call: null, callSt: null, callElapsed: 0, soft: null };
+  if (!run) return empty;
+  const rows = (run.nodes || []).filter(n => n.node === id); if (!rows.length) return empty;
+  const row = rows[rows.length - 1];
+  const s = ts(row.started_at), e = ts(row.ended_at);
+  const soft = (run.errors || []).find(x => x.agent === id) || null;
+  let st;
+  if (MODE === 'live' || run.thin) st = row.status === 'running' ? 'running' : finalState(row, soft || (run.thin && row.failedHint && row.status !== 'failed'));
+  else if (s !== null && t < s) st = 'pending';
+  else if (row.status === 'running' || (e !== null && t < e)) st = 'running';
+  else st = finalState(row, soft);
+  const dur = row.duration_s != null ? Number(row.duration_s) : (s !== null && e !== null ? (e - s) / 1000 : 0);
+  const elapsed = st === 'pending' ? 0 : st === 'running' ? Math.max(0, (t - (s === null ? t : s)) / 1000) : dur;
+  const all = row.calls || [];
+  const calls = MODE === 'live' ? all : all.filter(c => { const cs = ts(c.started_at); return cs === null || cs <= t; });
+  const idx = S.call[id] != null && S.call[id] < calls.length ? S.call[id] : calls.length - 1;
+  const call = calls.length ? calls[idx] : null;
+  let callSt = null, callElapsed = 0;
+  if (call) {
+    const cs = ts(call.started_at), ce = ts(call.ended_at);
+    if (MODE === 'live') callSt = call.status === 'running' ? 'running' : call.status === 'failed' ? 'failed' : 'done';
+    else callSt = (call.status === 'running' && ce === null) || (ce !== null && t < ce) ? 'running' : call.status === 'failed' ? 'failed' : 'done';
+    callElapsed = callSt === 'running' ? Math.max(0, (t - (cs === null ? t : cs)) / 1000) : Number(call.latency_s || 0);
+  }
+  return { st, row, s, e, elapsed, dur, calls, call, callIdx: idx, callSt, callElapsed, soft };
+}
+function runState(run, t) {
+  if (!run) return 'pending';
+  const s = ts(run.started_at), e = ts(run.ended_at);
+  if (MODE === 'replay') {
+    const s0 = runStart(run);
+    if (s0 !== null && t < s0) return 'pending';
+    if (run.status === 'running' || (e !== null && t < e)) return 'running';
+  } else if (run.status === 'running') return 'running';
+  if (run.status === 'failed') return 'failed';
+  const degraded = (run.errors || []).length || (run.nodes || []).some(n => n.status === 'failed') || (run.thin && run.n_errors);
+  return degraded ? 'degraded' : 'done';
+}
+function runStart(run) {
+  // Envelope start: the run row normally precedes its nodes; tolerate rows that do not.
+  let s = ts(run.started_at);
+  (run.nodes || []).forEach(n => { const a = ts(n.started_at); if (a !== null && (s === null || a < s)) s = a; });
+  return s;
+}
+function runElapsed(run, t) {
+  const s = runStart(run), e = ts(run.ended_at);
+  if (runState(run, t) === 'running') return s === null ? 0 : Math.max(0, (t - s) / 1000);
+  if (run.duration_s != null) return Number(run.duration_s);
+  return s !== null && e !== null ? (e - s) / 1000 : 0;
+}
+function runCost(run, t) {
+  if (run.thin) return Number(run.cost_usd || 0);
+  let c = 0;
+  (run.nodes || []).forEach(n => (n.calls || []).forEach(k => { if (k.status !== 'running' && (MODE === 'live' || (ts(k.ended_at) || 0) <= t)) c += Number(k.cost_usd || 0); }));
+  return c;
+}
+function runTokens(run, t) {
+  if (run.thin) return Number(run.tokens || 0);
+  let a = 0;
+  (run.nodes || []).forEach(n => (n.calls || []).forEach(k => { if (k.status !== 'running' && (MODE === 'live' || (ts(k.ended_at) || 0) <= t)) a += Number(k.tokens_in || 0) + Number(k.tokens_out || 0); }));
+  return a;
+}
+function nodesFinished(run, t) { return NODES.filter(n => { const st = nodeState(run, n.id, t).st; return st !== 'pending' && st !== 'running'; }).length; }
+function liveLlmNode(run, t) {
+  let best = null;
+  for (const n of NODES) { const ns = nodeState(run, n.id, t); if (ns.callSt === 'running') return n.id; if (ns.st === 'running') best = best || n.id; }
+  if (best) return best;
+  let last = 'load_thesis';
+  for (const n of NODES) { if (nodeState(run, n.id, t).st !== 'pending') last = n.id; }
+  return last;
+}
+function runModel(run, t) {
+  const row = (run.nodes || []).find(n => n.node === 'synthesis') || null;
+  const c = row && row.calls && row.calls.length ? row.calls[row.calls.length - 1] : null;
+  return c ? c.model : null;
+}
+// CIO cycle (running first, else the most recent).
+function cycle() { return (DATA.cio || [])[0] || null; }
+function spanState(sp, t) {
+  const s = ts(sp.started_at), e = ts(sp.ended_at);
+  if (MODE === 'replay') {
+    if (s !== null && t < s) return 'pending';
+    if (sp.status === 'running' || (e !== null && t < e)) return 'running';
+  } else if (sp.status === 'running') return 'running';
+  return sp.status === 'failed' ? 'failed' : 'done';
+}
+function stepState(cyc, name, t) {
+  const spans = cyc ? (cyc.steps || []).filter(s => s.name === name) : [];
+  if (!spans.length) return { st: 'pending', spans, elapsed: 0 };
+  const sts = spans.map(s => spanState(s, t));
+  let st = sts.some(x => x === 'running') ? 'running' : sts.every(x => x === 'pending') ? 'pending' : sts.some(x => x === 'failed') ? 'failed' : 'done';
+  const first = ts(spans[0].started_at);
+  let elapsed = 0;
+  spans.forEach(s => { const a = ts(s.started_at), b = ts(s.ended_at); if (a === null) return; elapsed += ((b === null || (MODE === 'replay' && t < b)) ? Math.max(a, Math.min(t, b === null ? t : b)) - a : b - a) / 1000; });
+  if (sts.every(x => x === 'pending')) elapsed = 0;
+  return { st, spans, elapsed, first };
+}
+function cycleState(cyc, t) {
+  if (!cyc) return 'pending';
+  const s = ts(cyc.started_at), e = ts(cyc.ended_at);
+  if (MODE === 'replay') { if (s !== null && t < s) return 'pending'; if (cyc.status === 'running' || (e !== null && t < e)) return 'running'; }
+  else if (cyc.status === 'running') return 'running';
+  return cyc.status === 'failed' ? 'failed' : 'done';
+}
+function stepOf(cyc, t) { let cur = null; STEPS.forEach(s => { const st = stepState(cyc, s.id, t).st; if (st === 'running') cur = cur || s; }); if (cur) return cur; let last = null; STEPS.forEach(s => { if (stepState(cyc, s.id, t).st !== 'pending') last = s; }); return last; }
+
+// ------------------------------------------------------------------ persistence
+function persistKey(run) { return 'mc:' + MODE + ':' + (run ? run.run_id : 'none'); }
+function savePrefs(run) {
+  const body = document.querySelector('#c-insp .insp-body');
+  store(persistKey(run), { node: S.node, auto: S.auto, tabs: S.tabs, call: S.call, step: S.step, scroll: body ? body.scrollTop : 0 });
+  if (MODE === 'live') store('mc:live:run', S.runId);
+  if (MODE === 'replay' && run) store('mc:replay:' + run.run_id + ':t', { t: S.t, playing: S.playing, speed: S.speed });
+}
+function restorePrefs(run) {
+  const p = load(persistKey(run));
+  if (p) { S.node = p.node || null; S.auto = p.auto !== false; S.tabs = p.tabs || {}; S.call = p.call || {}; S.step = p.step || null; S.scroll = p.scroll || 0; }
+}
+
+// ------------------------------------------------------------------ vitals + topbar
+function renderTopbar(run, t) {
+  const el = document.getElementById('c-topbar');
+  let html;
+  if (MODE === 'replay') html = '<span class="pill done">replay</span><span>run <span class="mono">' + esc(run ? short(run.run_id) : '—') + '</span> · recorded ' + esc(run && run.started_at ? fmtClock(ts(run.started_at)) : '—') + ' local</span>';
+  else html = '<span class="pill running"><span class="dot running"></span>live</span><span>snapshot ' + fmtClock(SERVER_NOW) + ' · poll ' + esc(DATA.poll_s || 1) + ' s · ' + (activeRuns().length ? activeRuns().length + ' active' : 'idle') + '</span>';
+  html += '<span class="spacer"></span><span class="seg" role="group" aria-label="Theme"><button type="button" data-theme="day">Day</button><button type="button" data-theme="night">Night</button></span>';
+  if (setHTML(el, html)) el.querySelectorAll('[data-theme]').forEach(b => b.addEventListener('click', () => setTheme(b.dataset.theme)));
+  const cur = document.documentElement.getAttribute('data-theme') || 'day';
+  el.querySelectorAll('[data-theme]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.theme === cur)));
+}
+function setTheme(mode) { document.documentElement.setAttribute('data-theme', mode === 'night' ? 'night' : 'day'); try { localStorage.setItem('mc-theme', mode); } catch (e) {} }
+function vital(v, k, t, over) { return '<div class="vital"><div class="v num' + (over ? ' over' : '') + '">' + v + '</div><div class="k">' + k + '</div><div class="t">' + t + '</div></div>'; }
+function renderVitals(run, t) {
+  const el = document.getElementById('c-vitals');
+  let html = '';
+  if (MODE === 'replay') {
+    const st = runState(run, t);
+    html += vital(run ? pill(st) : '—', 'run', run ? esc(run.ticker) + ' × ' + esc(run.thesis) + ' · ' + esc(run.source || 'manual') : 'no run');
+    html += vital(run ? fmtDur(runElapsed(run, t)) : '—', st === 'running' ? 'elapsed' : 'duration', 'median run ' + (MEDIANS.run ? fmtDur(MEDIANS.run) : '—'), run && MEDIANS.run && runElapsed(run, t) > MEDIANS.run);
+    html += vital(run ? fmtUsd(runCost(run, t)) : '—', 'cost so far', 'completed LLM calls');
+    html += vital(run ? fmtTok(runTokens(run, t)) : '—', 'tokens', 'in + out');
+    html += vital(run ? nodesFinished(run, t) + ' of 7' : '—', 'nodes finished', 'confidence ' + esc(run && run.confidence ? run.confidence : '—'));
+  } else {
+    const v = DATA.vitals || {};
+    const active = activeRuns();
+    const first = active[0];
+    html += vital(String(v.active || active.length || 0), 'drill-ins in flight', first ? esc(first.ticker) + ' × ' + esc(first.thesis) + ' · ' + esc(first.source || '') : 'none');
+    html += vital(fmtUsd(v.cost_today_usd || 0), 'spent today', 'node_runs.cost_usd · UTC day');
+    html += vital(String(v.runs_today || 0), 'runs today', (v.failed_24h || 0) + ' failed · ' + (v.degraded_24h || 0) + ' degraded · 24 h');
+    let eta = '—', etaSub = MEDIANS.run ? 'median run ' + fmtDur(MEDIANS.run) : 'no completed run yet', over = false;
+    if (run && runState(run, t) === 'running' && MEDIANS.run) { const left = MEDIANS.run - runElapsed(run, t); if (left >= 0) eta = '≈ ' + fmtDur(left); else { eta = '+' + fmtDur(-left); over = true; } etaSub = (over ? 'over the median · ' : 'left · ') + 'from medians'; }
+    html += vital(eta, 'run ETA', etaSub, over);
+    const hb = ts(v.next_heartbeat);
+    const hbDay = hb !== null ? (new Date(hb).toDateString() === new Date().toDateString() ? 'today' : 'tomorrow') : '';
+    html += vital(hb !== null ? fmtHM(hb) : '—', 'next heartbeat', hbDay + ' · local · launchd');
+  }
+  setHTML(el, html);
+}
+
+// ------------------------------------------------------------------ ribbon
+function renderRibbon(t) {
+  const el = document.getElementById('c-ribbon');
+  const cyc = cycle();
+  if (!cyc) { cls(el, 'ribbon empty'); setHTML(el, MODE === 'replay' ? 'Manual run · no CIO cycle behind it.' : 'No CIO cycle recorded yet — the ribbon fills on the next heartbeat or <span class="mono">/cio</span>.'); return; }
+  cls(el, 'ribbon');
+  const cst = cycleState(cyc, t);
+  const started = ts(cyc.started_at);
+  let elapsed = 0;
+  if (started !== null) { const e = ts(cyc.ended_at); elapsed = (cst === 'running' || e === null ? Math.max(0, t - started) : e - started) / 1000; if (cyc.duration_s != null && cst !== 'running') elapsed = Number(cyc.duration_s); }
+  let html = '<div class="rhead"><div class="nm">' + glyph('sync', 14) + ' CIO ' + esc(cyc.trigger || 'cycle') + ' ' + pill(cst) + '</div><div class="mt mono">' + (started !== null ? fmtClock(started) : '—') + ' · ' + fmtDur(elapsed) + ' · ' + esc(short(cyc.run_id)) + '</div></div>';
+  STEPS.forEach(s => {
+    const ss = stepState(cyc, s.id, t);
+    let mt = '';
+    const labels = ss.spans.map(x => x.label).filter(Boolean);
+    if (s.id === 'drill') mt = labels.length ? labels.join(', ') : 'none planned';
+    else if (s.id === 'decide' || s.id === 'probe' || s.id === 'gates') mt = ss.spans.length ? ss.spans.length + (ss.spans.length === 1 ? ' pair' : ' pairs') + (ss.st === 'running' ? ' · ' + esc((ss.spans.find(x => spanState(x, t) === 'running') || {}).label || '') : '') : '';
+    else { const m = ss.spans.length ? (ss.spans[ss.spans.length - 1].meta || {}) : {}; const keys = Object.keys(m); mt = keys.length ? keys.slice(0, 2).map(k => k + ' ' + String(m[k])).join(' · ') : (ss.spans.length ? '' : ''); }
+    if (ss.st === 'pending' && !mt) mt = 'waiting';
+    html += '<div class="rstep ' + ss.st + '" data-step="' + s.id + '" role="button" tabindex="0" aria-selected="' + (S.step === s.id) + '"><span class="tile">' + glyph(s.icon, 14) + '</span><div style="min-width:0"><div class="nm">' + s.name + '<span class="m num">' + (ss.st === 'pending' ? '' : fmtDur(ss.elapsed)) + '</span></div><div class="mt">' + esc(mt) + '</div></div></div>';
+  });
+  if (setHTML(el, html)) {
+    el.querySelectorAll('.rstep').forEach(r => {
+      const pick = () => { S.step = S.step === r.dataset.step ? null : r.dataset.step; S.auto = S.step ? false : S.auto; render(true); };
+      r.addEventListener('click', pick);
+      r.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
+    });
+  }
+}
+
+// ------------------------------------------------------------------ canvas (mockup C)
+const CIRC = 2 * Math.PI * 40;
+function initCanvas() {
+  let svg = '<svg viewBox="0 0 1000 470" role="img" aria-label="Drill-in graph"><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" fill="context-stroke"/></marker></defs>';
+  EDGES.forEach(([a, b, lab], i) => { const [x1, y1] = POS[a], [x2, y2] = POS[b]; const sx = x1 + 34, ex = x2 - 36, mx = (sx + ex) / 2; const d = 'M' + sx + ' ' + y1 + ' C' + mx + ' ' + y1 + ',' + mx + ' ' + y2 + ',' + ex + ' ' + y2; const lx = (sx + ex) / 2, ly = (y1 + y2) / 2 - (y1 === y2 ? 12 : 0); const w = lab.length * 6.3 + 14; svg += '<path class="e" data-edge="' + i + '" d="' + d + '" marker-end="url(#arr)"/><g class="e-lab"><rect class="e-pill" x="' + (lx - w / 2) + '" y="' + (ly - 9) + '" width="' + w + '" height="18" rx="9"/><text class="e-txt" x="' + lx + '" y="' + (ly + 3.5) + '">' + esc(lab) + '</text></g>'; });
+  NODES.forEach(n => { const [x, y] = POS[n.id]; svg += '<g class="n pending" data-node="' + n.id + '" tabindex="0" role="button" aria-label="' + n.name + '"><circle class="n-track" cx="' + x + '" cy="' + y + '" r="40"/><circle class="n-ring" data-ring cx="' + x + '" cy="' + y + '" r="40" stroke-dasharray="0 ' + CIRC + '"/><rect class="n-tile" x="' + (x - 28) + '" y="' + (y - 28) + '" width="56" height="56" rx="14"/><g class="n-g" transform="translate(' + (x - 14) + ',' + (y - 14) + ') scale(1.1667)">' + glyph(n.glyph, 24) + '</g><circle class="n-badge" cx="' + (x + 24) + '" cy="' + (y - 24) + '" r="9"/><path class="n-badge-mark" data-mark d="" transform="translate(' + (x + 18) + ',' + (y - 30) + ') scale(0.5)"/><text class="n-name" x="' + x + '" y="' + (y + 50) + '" text-anchor="middle">' + n.name + '</text><text class="n-sub" x="' + x + '" y="' + (y + 64) + '" text-anchor="middle">' + n.sub + '</text><text class="n-st" data-st x="' + x + '" y="' + (y + 79) + '" text-anchor="middle"></text></g>'; });
+  const [rx, ry] = POS.report; svg += '<g class="n pending" data-node="report" aria-hidden="true"><rect class="n-tile" x="' + (rx - 22) + '" y="' + (ry - 22) + '" width="44" height="44" rx="12"/><g class="n-g" transform="translate(' + (rx - 11) + ',' + (ry - 11) + ') scale(0.9167)">' + glyph('doc', 24) + '</g><text class="n-name" x="' + rx + '" y="' + (ry + 42) + '" text-anchor="middle">Report</text><text class="n-sub" x="' + rx + '" y="' + (ry + 56) + '" text-anchor="middle">md · PDF · Notion</text></g>';
+  svg += '</svg>';
+  const canvas = document.getElementById('c-canvas');
+  canvas.innerHTML = svg + '<div class="run-head" id="c-runhead"></div><button class="ghostbtn follow" id="c-follow" type="button" hidden>follow live</button><div class="idle" id="c-idle"></div>';
+  const groups = Array.from(canvas.querySelectorAll('.n[data-node]')).filter(g => g.dataset.node !== 'report');
+  groups.forEach((g, i) => {
+    const pick = () => { S.node = g.dataset.node; S.auto = false; S.step = null; render(true); };
+    g.addEventListener('click', pick);
+    g.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
+      else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); groups[(i + 1) % groups.length].focus(); }
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); groups[(i - 1 + groups.length) % groups.length].focus(); }
+    });
+  });
+  document.getElementById('c-follow').addEventListener('click', () => { S.auto = true; S.step = null; render(true); });
+}
+function updateCanvas(run, t) {
+  const runSt = runState(run, t);
+  document.querySelectorAll('#c-canvas .n[data-node]').forEach(g => {
+    const id = g.dataset.node;
+    if (id === 'report') { cls(g, 'n ' + (runSt === 'done' || runSt === 'degraded' ? 'done' : 'pending')); return; }
+    const ns = nodeState(run, id, t);
+    const st = !run || runSt === 'pending' ? 'pending' : ns.st;
+    cls(g, 'n ' + st + (id === S.node && !S.step ? ' sel' : ''));
+    const ring = g.querySelector('[data-ring]'); const med = MEDIANS[id] || 0;
+    if (st === 'running' && med > 1) { const p = Math.min(1, ns.elapsed / med); ring.setAttribute('stroke-dasharray', (p * CIRC) + ' ' + CIRC); ring.setAttribute('class', 'n-ring' + (ns.elapsed > med ? ' over' : '')); }
+    else if (st === 'running') { ring.setAttribute('stroke-dasharray', (0.5 * CIRC) + ' ' + CIRC); ring.setAttribute('class', 'n-ring'); }
+    const mark = g.querySelector('[data-mark]'); mark.setAttribute('d', st === 'done' ? 'M5 12.5l4.5 4.5L19 7.5' : st === 'degraded' ? 'M12 7v6M12 16.5v.01' : st === 'failed' ? 'M7 7l10 10M17 7L7 17' : '');
+    let stText = '';
+    if (st === 'running') stText = (ns.callSt === 'running' ? 'LLM · ' : '') + fmtDur(ns.elapsed) + (med > 1 ? ' / ' + fmtDur(med) : '');
+    else if (st === 'done') stText = (run.thin ? '' : fmtDur(ns.dur)) + (ns.call && ns.callSt === 'done' ? ' · ' + fmtTok((ns.call.tokens_in || 0) + (ns.call.tokens_out || 0)) + ' tok' : '');
+    else if (st === 'degraded') stText = 'soft error' + (run.thin ? '' : ' · ' + fmtDur(ns.dur));
+    else if (st === 'failed') stText = 'failed' + (ns.dur ? ' · ' + fmtDur(ns.dur) : '');
+    txt(g.querySelector('[data-st]'), stText);
+  });
+  EDGES.forEach(([a, b], i) => {
+    const el = document.querySelector('#c-canvas [data-edge="' + i + '"]');
+    let st = 'pending';
+    if (run && runSt !== 'pending') {
+      const fin = x => x === 'done' || x === 'degraded' || x === 'failed';
+      const sa = a === 'report' ? 'done' : nodeState(run, a, t).st;
+      const sb = b === 'report' ? (runSt === 'done' || runSt === 'degraded' ? 'done' : 'pending') : nodeState(run, b, t).st;
+      if (fin(sa)) st = fin(sb) ? 'done' : 'flowing';
+    }
+    cls(el, 'e ' + st);
+  });
+  const rh = document.getElementById('c-runhead');
+  if (!run) setHTML(rh, '<span class="pill pending">idle</span><span class="m">no drill-in recorded yet</span>');
+  else if (runSt === 'pending') setHTML(rh, '<span class="tk">' + esc(run.ticker) + '</span><span class="sub">× ' + esc(run.thesis) + '</span><span class="pill pending">not started</span>');
+  else setHTML(rh, '<span class="tk">' + esc(run.ticker) + '</span><span class="sub">× ' + esc(run.thesis) + '</span><span class="m">run ' + esc(short(run.run_id)) + ' · ' + esc(run.source || 'manual') + '</span>' + pill(runSt) + '<span class="m">' + fmtDur(runElapsed(run, t)) + ' · ' + fmtUsd(runCost(run, t)) + ' · ' + nodesFinished(run, t) + ' of 7 nodes</span>');
+  const idle = document.getElementById('c-idle');
+  if (run && MODE === 'live' && runSt !== 'running') txt(idle, 'Last drill: ' + run.ticker + ' finished ' + fmtClock(ts(run.ended_at)) + (run.confidence ? ' · confidence ' + run.confidence : '') + (run.thin ? ' · timings in the Runs tab' : '')); else txt(idle, '');
+  document.getElementById('c-follow').hidden = S.auto && !S.step;
+}
+
+// ------------------------------------------------------------------ waterfall (mockup B)
+function niceTick(span) { const c = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]; for (const x of c) { if (span / x <= 8) return x; } return 7200; }
+function renderWaterfall(run, t) {
+  const el = document.getElementById('c-wf');
+  if (!run || run.thin || runState(run, t) === 'pending') { setHTML(el, '<div class="empty">' + (run && run.thin ? 'Timings for ' + esc(run.ticker) + ' are in the Runs tab (replay shows the waterfall).' : 'The waterfall fills as a run starts.') + '</div>'); return; }
+  const t0 = runStart(run); if (t0 === null) { setHTML(el, '<div class="empty">No start time recorded.</div>'); return; }
+  const rs = runState(run, t);
+  const tEnd = ts(run.ended_at);
+  let span = Math.max(10, rs === 'running' ? (t - t0) / 1000 : (tEnd !== null ? (tEnd - t0) / 1000 : runElapsed(run, t)), MEDIANS.run || 0);
+  if (MODE === 'replay' && tEnd !== null) span = Math.max(span, (tEnd - t0) / 1000);
+  span *= 1.04;
+  const pct = s => (Math.max(0, Math.min(span, s)) / span * 100) + '%';
+  const tick = niceTick(span);
+  let axis = '';
+  for (let x = 0; x <= span; x += tick) axis += '<div class="tick" style="left:' + pct(x) + '">' + (x >= 60 ? fmtMS(x) : x + 's') + '</div>';
+  let rows = '';
+  const bar = (cls_, a, b, label, over) => '<div class="sp ' + cls_ + '" style="left:' + pct(a) + ';width:calc(' + pct(b - a) + ')"></div>' + (label ? '<span class="sp-lab' + (over ? ' over' : '') + '" style="left:' + pct(b) + '">' + esc(label) + '</span>' : '');
+  const runEl = runElapsed(run, t);
+  rows += '<div class="wf-row" data-depth="0" data-wf="run"><div class="lab"><span class="dot ' + rs + '"></span><b>' + esc(run.ticker) + '</b><span class="muted">× ' + esc(run.thesis) + '</span></div><div class="plot">' + bar(rs === 'running' ? 'running' : rs === 'failed' ? 'failed' : rs === 'degraded' ? 'degraded' : '', 0, runEl, fmtDur(runEl), MEDIANS.run && runEl > MEDIANS.run) + '</div></div>';
+  NODES.forEach(n => {
+    const ns = nodeState(run, n.id, t);
+    if (ns.st === 'pending') { rows += '<div class="wf-row" data-depth="1" data-wf="' + n.id + '" aria-selected="' + (S.node === n.id && !S.step) + '"><div class="lab">' + glyph(n.glyph, 12) + '<span class="muted">' + n.name + '</span></div><div class="plot"></div></div>'; return; }
+    const a = (ns.s - t0) / 1000, b = ns.st === 'running' ? (t - t0) / 1000 : a + ns.dur;
+    const med = MEDIANS[n.id] || 0;
+    let plot = '';
+    if (ns.st === 'running' && med > 1) plot += '<div class="sp ghost" style="left:' + pct(a) + ';width:' + pct(med) + '"></div>';
+    plot += bar(ns.st === 'running' ? 'running' : ns.st === 'failed' ? 'failed' : ns.st === 'degraded' ? 'degraded' : '', a, b, fmtDur(ns.st === 'running' ? ns.elapsed : ns.dur) + (ns.st === 'degraded' ? ' · soft error' : ns.st === 'failed' ? ' · failed' : ''), med > 1 && (ns.st === 'running' ? ns.elapsed : ns.dur) > med);
+    rows += '<div class="wf-row" data-depth="1" data-wf="' + n.id + '" aria-selected="' + (S.node === n.id && !S.step) + '"><div class="lab">' + glyph(n.glyph, 12) + '<b>' + n.name + '</b>' + (ns.st === 'running' ? '<span class="dot running"></span>' : '') + '</div><div class="plot">' + plot + '</div></div>';
+    ns.calls.forEach((c, i) => {
+      const cs = ts(c.started_at); if (cs === null) return;
+      const ca = (cs - t0) / 1000;
+      const running = MODE === 'live' ? c.status === 'running' : ((c.status === 'running' && !c.ended_at) || (ts(c.ended_at) !== null && t < ts(c.ended_at)));
+      const cb = running ? (t - t0) / 1000 : ca + Number(c.latency_s || 0);
+      rows += '<div class="wf-row" data-depth="2" data-wf="' + n.id + '" data-call="' + i + '"><div class="lab"><span class="muted">llm call ' + (i + 1) + ' · ' + esc(String(c.model || '').split('/').pop()) + '</span></div><div class="plot">' + bar('llm' + (running ? ' running' : ''), ca, cb, running ? 'calling · ' + fmtDur((t - cs) / 1000) : fmtDur(Number(c.latency_s || 0)) + ' · ' + fmtTok((c.tokens_in || 0) + (c.tokens_out || 0)) + ' tok', false) + '</div></div>';
+    });
+  });
+  const ph = (rs === 'running' || MODE === 'replay') ? '<div class="wf-overlay"><div class="playhead" style="left:' + pct((t - t0) / 1000) + '"></div></div>' : '';
+  const html = '<div class="wf-axis"><div class="lab">waterfall</div><div class="plot">' + axis + '</div></div><div class="wf-rows">' + rows + ph + '</div>';
+  if (setHTML(el, html)) {
+    el.querySelectorAll('.wf-row[data-wf]').forEach(r => r.addEventListener('click', () => { if (r.dataset.wf === 'run') return; S.node = r.dataset.wf; if (r.dataset.call != null) S.call[r.dataset.wf] = Number(r.dataset.call); S.auto = false; S.step = null; render(true); }));
+  }
+}
+
+// ------------------------------------------------------------------ fleet (live only)
+function renderFleet(run, t) {
+  const el = document.getElementById('c-fleet');
+  if (MODE === 'replay') { el.hidden = true; return; }
+  el.hidden = false;
+  const active = activeRuns();
+  const rows = (list, thin) => list.map(r => {
+    const st = thin ? (r.status === 'running' ? 'running' : r.status === 'failed' ? 'failed' : ((r.failed_nodes || 0) > 0 || (r.n_errors || 0) > 0) ? 'degraded' : 'done') : runState(r, t);
+    const when = ts(r.started_at);
+    const dur = st === 'running' ? fmtDur(when === null ? 0 : (t - when) / 1000) : fmtDur(r.duration_s);
+    return '<div class="runrow" data-run="' + esc(r.run_id) + '" role="button" tabindex="0" aria-selected="' + (run && run.run_id === r.run_id) + '"><span class="dot ' + st + '"></span><span class="tk">' + esc(r.ticker) + '</span><span class="th">' + esc(r.thesis) + ' · ' + esc(r.source || 'manual') + (when !== null ? ' · ' + fmtHM(when) : '') + '</span><span class="st">' + dur + '</span></div>';
+  }).join('');
+  const v = DATA.vitals || {};
+  const cyc = cycle();
+  const hb = ts(v.next_heartbeat);
+  let html = '<div class="panel"><h5>In flight</h5>' + (active.length ? rows(active, false) : '<div class="none">No drill-in running. Start one from the dashboard, Telegram or a CIO cycle.</div>') + '</div>';
+  html += '<div class="panel"><h5>Recent · last ' + Math.min(8, (DATA.recent || []).length) + '</h5>' + ((DATA.recent || []).length ? rows((DATA.recent || []).slice(0, 8), true) : '<div class="none">Nothing recorded yet.</div>') + '</div>';
+  html += '<div class="panel"><h5>Schedule</h5><div class="kv"><span class="k">next heartbeat</span><span class="v">' + (hb !== null ? fmtHM(hb) : '—') + '</span><span class="k">CIO cycle</span><span class="v">' + (cyc ? esc(cyc.trigger) : 'none') + '</span><span class="k">cycle state</span><span class="v">' + (cyc ? esc(cycleState(cyc, t)) : '—') + '</span><span class="k">median run</span><span class="v">' + (MEDIANS.run ? fmtDur(MEDIANS.run) : '—') + '</span><span class="k">poll</span><span class="v">' + esc(DATA.poll_s || 1) + ' s</span><span class="k">failed · 24 h</span><span class="v">' + (v.failed_24h || 0) + '</span></div></div>';
+  if (setHTML(el, html)) {
+    el.querySelectorAll('.runrow').forEach(r => {
+      const pick = () => { S.runId = r.dataset.run; S.auto = true; S.step = null; S.node = null; render(true); };
+      r.addEventListener('click', pick);
+      r.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
+    });
+  }
+}
+
+// ------------------------------------------------------------------ transport (replay)
+function initTransport(run) {
+  const el = document.getElementById('c-transport');
+  if (MODE !== 'replay' || !run) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = '<button class="btn primary" id="tp-play" type="button" aria-label="Play">▶ Play</button><button class="btn" id="tp-restart" type="button">↺</button><span class="lbl">Speed</span><span class="seg" id="tp-speed"><button type="button" data-speed="1">1×</button><button type="button" data-speed="4">4×</button><button type="button" data-speed="16">16×</button><button type="button" data-speed="64">64×</button></span><span class="clock" id="tp-t0">0:00</span><input type="range" id="tp-scrub" min="0" max="100" step="0.1" value="0" aria-label="Seek within the run"><span class="clock" id="tp-t1">0:00</span><button class="btn" id="tp-end" type="button">⇥ end</button>';
+  const t0 = runStart(run), t1 = replayEnd(run);
+  const dur = Math.max(1, (t1 - t0) / 1000);
+  const scrub = document.getElementById('tp-scrub');
+  scrub.max = String(dur);
+  txt(document.getElementById('tp-t1'), fmtMS(dur));
+  const saved = load('mc:replay:' + run.run_id + ':t');
+  if (saved) { S.t = t0 + Math.min(dur, Math.max(0, saved.t || 0)) * 1000; S.playing = !!saved.playing; S.speed = saved.speed || 4; }
+  else { S.t = t0; S.playing = !REDUCED; S.speed = 4; }
+  const setPlay = () => { const b = document.getElementById('tp-play'); b.textContent = S.playing ? '❚❚ Pause' : '▶ Play'; b.setAttribute('aria-label', S.playing ? 'Pause' : 'Play'); };
+  document.getElementById('tp-play').addEventListener('click', () => { if (S.t >= t1) S.t = t0; S.playing = !S.playing; setPlay(); savePrefs(run); });
+  document.getElementById('tp-restart').addEventListener('click', () => { S.t = t0; S.playing = true; S.auto = true; S.step = null; setPlay(); render(true); savePrefs(run); });
+  document.getElementById('tp-end').addEventListener('click', () => { S.t = t1; S.playing = false; setPlay(); render(true); savePrefs(run); });
+  el.querySelectorAll('#tp-speed button').forEach(b => b.addEventListener('click', () => { S.speed = Number(b.dataset.speed); el.querySelectorAll('#tp-speed button').forEach(x => x.setAttribute('aria-pressed', String(x === b))); savePrefs(run); }));
+  el.querySelectorAll('#tp-speed button').forEach(x => x.setAttribute('aria-pressed', String(Number(x.dataset.speed) === S.speed)));
+  scrub.addEventListener('input', () => { S.t = t0 + Number(scrub.value) * 1000; S.playing = false; setPlay(); render(true); savePrefs(run); });
+  document.addEventListener('keydown', e => { if (e.key === ' ' && e.target && e.target.tagName !== 'INPUT' && e.target.tagName !== 'BUTTON' && e.target.getAttribute('role') !== 'button') { e.preventDefault(); if (S.t >= t1) S.t = t0; S.playing = !S.playing; setPlay(); } });
+  setPlay();
+}
+function replayEnd(run) {
+  let end = ts(run.ended_at);
+  (run.nodes || []).forEach(n => { const e = ts(n.ended_at); if (e !== null && (end === null || e > end)) end = e; });
+  const s = runStart(run);
+  if (end === null || end <= s) end = (s || Date.now()) + 1000;
+  return end;
+}
+function updateTransport(run) {
+  if (MODE !== 'replay' || !run) return;
+  const t0 = runStart(run);
+  const scrub = document.getElementById('tp-scrub');
+  const v = (S.t - t0) / 1000;
+  if (document.activeElement !== scrub) scrub.value = String(v);
+  txt(document.getElementById('tp-t0'), fmtMS(v));
+}
+
+// ------------------------------------------------------------------ inspector (shared drawer)
+function inspector(run, t) {
+  const el = document.getElementById('c-insp');
+  const key = MODE;
+  let tabs = [], head = '', body = '', sel = '';
+  const pickTab = (list, def) => (S.tabs[key] && list.indexOf(S.tabs[key]) >= 0) ? S.tabs[key] : def;
+  const cyc = cycle();
+  if (S.step && cyc) {
+    const step = STEPS.find(s => s.id === S.step) || STEPS[0];
+    const ss = stepState(cyc, step.id, t);
+    tabs = ['Spans'];
+    const actions = (cyc.actions || []);
+    if ((step.id === 'decide' || step.id === 'budget' || step.id === 'drill') && actions.length) tabs.push('Decisions');
+    if (step.id === 'summary' && cyc.summary) tabs.push('Summary');
+    sel = pickTab(tabs, tabs[tabs.length - 1]);
+    head = '<span class="tile' + (ss.st === 'failed' ? ' crit' : '') + '">' + glyph(step.icon, 18) + '</span><div><div class="ttl">CIO ' + step.name.toLowerCase() + ' <span class="muted" style="font-weight:500">· ' + esc(cyc.trigger) + '</span></div><div class="ctx mono">cycle ' + esc(short(cyc.run_id)) + ' · ' + ss.spans.length + ' span' + (ss.spans.length === 1 ? '' : 's') + ' · spans table</div></div><span style="flex:1"></span>' + pill(ss.st);
+    if (sel === 'Spans') {
+      body = ss.spans.length ? ss.spans.map(sp => { const st = spanState(sp, t); const a = ts(sp.started_at), b = ts(sp.ended_at); const d = st === 'running' ? Math.max(0, (t - a) / 1000) : (a !== null && b !== null ? (b - a) / 1000 : null); const meta = Object.keys(sp.meta || {}).length ? JSON.stringify(sp.meta) : ''; return '<div class="spanrow"><div class="l"><span class="dot ' + st + '"></span><span><b>' + esc(sp.label || step.name.toLowerCase()) + '</b></span></div><span class="d">' + (d == null ? '—' : fmtDur(d)) + '</span>' + pill(st) + (meta || sp.error ? '<div class="meta">' + esc(meta) + (sp.error ? '\nerror: ' + esc(sp.error) : '') + '</div>' : '') + '</div>'; }).join('') : '<pre><span class="dim">No span recorded for this step yet.</span></pre>';
+    } else if (sel === 'Decisions') {
+      body = actions.map(a => '<div class="act"><div class="h"><span class="tk">' + esc(a.ticker) + '</span><span class="muted">× ' + esc(a.thesis || '—') + '</span>' + pill(a.action === 'drill' ? 'running' : a.action === 'reuse' ? 'done' : 'pending').replace(/>(running|done|pending)</, '>' + esc(String(a.action || '?')) + '<') + '<span class="muted" style="font-weight:500">confidence ' + esc(a.confidence || '—') + '</span></div><div class="r">' + esc(a.rationale || '') + '</div><div class="m">' + esc(a.model_used || '—') + ' · ' + fmtTok(a.tokens_in) + ' / ' + fmtTok(a.tokens_out) + ' tok · ' + fmtUsd(a.cost_usd) + ' · ' + fmtDur(Number(a.latency_s || 0)) + (a.source ? ' · ' + esc(a.source) : '') + (a.drill_run_id ? ' · run ' + esc(short(a.drill_run_id)) : a.reuse_run_id ? ' · reuse ' + esc(short(a.reuse_run_id)) : '') + '</div></div>').join('');
+    } else {
+      body = '<pre>' + esc(cyc.summary) + '</pre>';
+    }
+  } else if (run && S.node && NODE_BY[S.node]) {
+    const n = NODE_BY[S.node], ns = nodeState(run, n.id, t);
+    const rs = runState(run, t);
+    const st = rs === 'pending' ? 'pending' : ns.st;
+    const isLLM = !!n.env;
+    tabs = isLLM ? ['System prompt', 'User prompt', 'Output', 'Telemetry'] : ['Telemetry'];
+    const def = isLLM ? (ns.callSt === 'done' || ns.callSt === 'failed' || st === 'degraded' ? 'Output' : 'User prompt') : 'Telemetry';
+    sel = pickTab(tabs, def);
+    const call = ns.call;
+    head = '<span class="tile' + (st === 'degraded' ? ' warn' : st === 'failed' ? ' crit' : '') + '">' + glyph(n.glyph, 18) + '</span><div><div class="ttl">' + esc(n.name) + ' <span class="muted" style="font-weight:500">· ' + esc(run.ticker) + ' × ' + esc(run.thesis) + '</span></div><div class="ctx mono">run ' + esc(short(run.run_id)) + ' · ' + esc(run.source || 'manual') + (n.env ? ' · ' + n.env + (call && call.model ? ' → ' + esc(call.model) : '') : ' · no LLM') + '</div></div><span style="flex:1"></span>' + pill(st);
+    const pickRow = ns.calls.length > 1 ? '<div class="callpick">' + ns.calls.map((c, i) => '<button type="button" data-call="' + i + '" aria-pressed="' + (i === ns.callIdx) + '">call ' + (i + 1) + '</button>').join('') + '</div>' : '';
+    const msgs = call ? (call.messages || []) : [];
+    const sysMsgs = msgs.filter(m => m.role === 'system'), userMsgs = msgs.filter(m => m.role !== 'system');
+    const copyBtn = s => '<span class="spacer"></span><button class="ghostbtn" type="button" data-copy>copy</button>';
+    if (sel === 'System prompt') {
+      if (!call) body = '<pre><span class="dim">' + (st === 'pending' ? 'The system prompt appears here the moment the call starts, before the model answers.' : run.thin ? 'Prompts are kept for active runs and replay — open this run in the Runs tab.' : 'No LLM call recorded for this node' + (st === 'degraded' ? ' — it returned before calling the model (soft error).' : '.')) + '</span></pre>';
+      else if (!sysMsgs.length) body = '<pre><span class="dim">' + (call.prompt_excerpt ? 'Full messages were not stored for this call (pre-v9 run); excerpt:\n\n' + esc(call.prompt_excerpt) : 'No system message on this call.') + '</span></pre>';
+      else { const text = sysMsgs.map(m => m.text).join('\n\n'); body = '<div class="meta-row">stored once per content hash · <span class="mono">' + text.length.toLocaleString() + ' chars</span> · llm_calls.id <span class="mono">' + esc(call.id) + '</span>' + copyBtn() + '</div><pre data-text>' + esc(text) + '</pre>'; }
+    } else if (sel === 'User prompt') {
+      if (!call) body = '<pre><span class="dim">' + (st === 'pending' ? 'The user prompt appears here the moment the call starts, before the model answers.' : run.thin ? 'Prompts are kept for active runs and replay — open this run in the Runs tab.' : 'No LLM call recorded for this node.') + '</span></pre>';
+      else if (!userMsgs.length) body = '<pre><span class="dim">' + (call.prompt_excerpt ? 'Full messages were not stored for this call (pre-v9 run); excerpt:\n\n' + esc(call.prompt_excerpt) : 'No user message on this call.') + '</span></pre>';
+      else { const text = userMsgs.map(m => (userMsgs.length > 1 ? '[' + m.role + ']\n' : '') + m.text).join('\n\n'); body = '<div class="meta-row">built by agents/' + n.id + '.py · <span class="mono">' + text.length.toLocaleString() + ' chars</span>' + (ns.callSt === 'done' ? ' · tokens in <span class="mono">' + Number(call.tokens_in || 0).toLocaleString() + '</span>' : '') + copyBtn() + '</div><pre data-text>' + esc(text) + '</pre>'; }
+    } else if (sel === 'Output') {
+      if (st === 'pending') body = '<pre><span class="dim">Not started.</span></pre>';
+      else if (!call) body = '<pre><span class="dim">' + (st === 'running' ? 'Running · no LLM call yet (' + (n.id === 'fundamentals' ? 'fetching yfinance' : n.id === 'filings' ? 'retrieving the three subqueries' : n.id === 'news' ? 'fetching Finnhub articles' : 'working') + ') · ' + fmtDur(ns.elapsed) : st === 'degraded' ? 'Returned before calling the model: ' + esc((ns.soft || {}).message || 'soft error') : st === 'failed' ? 'Failed: ' + esc(ns.row.error || '') : run.thin ? 'Outputs are kept for active runs and replay — open this run in the Runs tab.' : 'No LLM call recorded for this node.') + '</span></pre>';
+      else if (ns.callSt === 'running') body = '<div class="meta-row">waiting for ' + esc(call.model || 'the model') + ' · ' + fmtDur(ns.callElapsed) + ' · attempt ' + esc(call.attempt || 1) + '</div><div class="skel" style="width:92%"></div><div class="skel" style="width:70%"></div><div class="skel" style="width:84%"></div>';
+      else if (ns.callSt === 'failed') body = '<div class="meta-row">call failed after ' + fmtDur(ns.callElapsed) + '</div><pre class="err">' + esc(call.error || 'unknown error') + '</pre>';
+      else body = '<div class="meta-row">tokens out <span class="mono">' + Number(call.tokens_out || 0).toLocaleString() + '</span> · ' + fmtDur(ns.callElapsed) + ' · written to state.' + n.id + (st === 'degraded' ? ' · <span style="color:var(--warn)">soft error recorded in errors</span>' : '') + copyBtn() + '</div><pre data-text>' + (call.response != null ? esc(call.response) : '<span class="dim">' + (call.response_excerpt ? 'Full response not stored for this call (pre-v9 run); excerpt:\n\n' + esc(call.response_excerpt) : 'No response text stored.') + '</span>') + '</pre>';
+    } else {
+      const med = MEDIANS[n.id] || 0;
+      const cur = st === 'pending' ? 0 : st === 'running' ? ns.elapsed : ns.dur;
+      const over = med > 1 && cur > med;
+      let etaTxt = '';
+      if (st === 'running' && med > 1) etaTxt = over ? '+' + Math.round((cur / med - 1) * 100) + '% over the median' : '≈ ' + fmtDur(med - cur) + ' left · median ' + fmtDur(med);
+      else if (med > 1) etaTxt = 'median ' + fmtDur(med) + (st !== 'pending' && over ? ' · +' + Math.round((cur / med - 1) * 100) + '%' : '');
+      else etaTxt = med ? 'sub-second' : 'no median yet';
+      const done = ns.callSt === 'done';
+      const nCalls = run.thin ? (ns.row.n_calls || 0) : ns.calls.length;
+      body = '<div class="tiles">' +
+        '<div><div class="v num">' + (st === 'pending' ? '—' : fmtDur(cur)) + '</div><div class="k">' + (st === 'running' ? 'elapsed' : 'duration') + '</div><div class="d' + (over ? ' over' : '') + '">' + esc(etaTxt) + '</div></div>' +
+        '<div><div class="v num">' + (done ? fmtTok(call.tokens_in) + ' / ' + fmtTok(call.tokens_out) : (run.thin && ns.row.tokens_in != null ? fmtTok(ns.row.tokens_in) + ' / ' + fmtTok(ns.row.tokens_out) : '—')) + '</div><div class="k">tokens in / out</div><div class="d">' + (n.env ? n.env : 'no LLM') + '</div></div>' +
+        '<div><div class="v num">' + (done ? fmtUsd(call.cost_usd) : ns.callSt === 'running' ? '…' : (ns.row && ns.row.cost_usd ? fmtUsd(ns.row.cost_usd) : '$0')) + '</div><div class="k">cost</div><div class="d">' + (call ? 'OpenRouter usage × price table' : '') + '</div></div>' +
+        '<div><div class="v num">' + (ns.callSt === 'running' ? nCalls + ' ↻' : String(nCalls)) + '</div><div class="k">LLM calls</div><div class="d">' + (call ? 'attempt ' + esc(call.attempt || 1) : '') + '</div></div></div>' +
+        '<div class="kv"><span class="k">node_runs.id</span><span class="v">' + esc(ns.row && ns.row.id != null ? ns.row.id : '—') + '</span><span class="k">llm_calls.id</span><span class="v">' + esc(call ? call.id : '—') + '</span><span class="k">model</span><span class="v">' + esc(call && call.model ? call.model : '—') + '</span><span class="k">started</span><span class="v">' + (ns.s !== null ? fmtClock(ns.s) : '—') + '</span><span class="k">pid</span><span class="v">' + esc(ns.row && ns.row.pid != null ? ns.row.pid : '—') + '</span></div>' +
+        (ns.row && ns.row.error ? '<pre class="err" style="margin-top:8px">' + esc(ns.row.error) + '</pre>' : '') +
+        (ns.soft ? '<pre style="margin-top:8px"><span class="dim">soft error · </span>' + esc(ns.soft.message) + '</pre>' : '');
+    }
+    body = pickRow + body;
+  } else if (run) {
+    const rs = runState(run, t);
+    tabs = ['Summary']; sel = 'Summary';
+    head = '<span class="tile">' + glyph('graph', 18) + '</span><div><div class="ttl">' + esc(run.ticker) + ' × ' + esc(run.thesis) + '</div><div class="ctx mono">run ' + esc(short(run.run_id)) + ' · ' + esc(run.source || 'manual') + '</div></div><span style="flex:1"></span>' + pill(rs);
+    const lines = NODES.map(n => { const ns = nodeState(run, n.id, t); return n.name.padEnd(13) + ' ' + ns.st.padEnd(9) + (ns.st === 'pending' || run.thin ? '' : fmtDur(ns.st === 'running' ? ns.elapsed : ns.dur)); }).join('\n');
+    body = '<div class="tiles"><div><div class="v num">' + fmtDur(runElapsed(run, t)) + '</div><div class="k">' + (rs === 'running' ? 'elapsed' : 'duration') + '</div><div class="d">' + (MEDIANS.run ? 'median ' + fmtDur(MEDIANS.run) : '') + '</div></div><div><div class="v num">' + fmtUsd(runCost(run, t)) + '</div><div class="k">cost</div></div><div><div class="v num">' + fmtTok(runTokens(run, t)) + '</div><div class="k">tokens</div></div><div><div class="v num">' + esc(run.confidence || '—') + '</div><div class="k">confidence</div></div></div><pre>' + esc(lines) + '</pre>' + (run.error ? '<pre class="err" style="margin-top:8px">' + esc(run.error) + '</pre>' : '');
+  } else {
+    head = '<div><div class="ttl">Nothing to inspect yet</div><div class="ctx">Prompts, outputs and telemetry appear here once a drill-in runs.</div></div>';
+  }
+  const html = '<div class="insp-head">' + head + '</div>' + (tabs.length ? '<div class="tabs" role="tablist">' + tabs.map(tb => '<button class="tab" role="tab" type="button" data-tab="' + tb + '" aria-selected="' + (tb === sel) + '" tabindex="' + (tb === sel ? 0 : -1) + '">' + tb + '</button>').join('') + '</div>' : '') + '<div class="insp-body">' + body + '</div>';
+  if (setHTML(el, html)) {
+    const b = el.querySelector('.insp-body');
+    if (b) { b.scrollTop = S.scroll || 0; b.addEventListener('scroll', () => { S.scroll = b.scrollTop; savePrefs(run); }); }
+    const tabEls = Array.from(el.querySelectorAll('.tab'));
+    tabEls.forEach((btn, i) => {
+      btn.addEventListener('click', () => { S.tabs[key] = btn.dataset.tab; S.scroll = 0; render(true); });
+      btn.addEventListener('keydown', e => { let j = null; if (e.key === 'ArrowRight') j = (i + 1) % tabEls.length; else if (e.key === 'ArrowLeft') j = (i - 1 + tabEls.length) % tabEls.length; else if (e.key === 'Home') j = 0; else if (e.key === 'End') j = tabEls.length - 1; if (j !== null) { e.preventDefault(); S.tabs[key] = tabEls[j].dataset.tab; S.scroll = 0; render(true); const nb = el.querySelector('.tab[aria-selected="true"]'); if (nb) nb.focus(); } });
+    });
+    el.querySelectorAll('[data-call]').forEach(btn => btn.addEventListener('click', () => { S.call[S.node] = Number(btn.dataset.call); render(true); }));
+    el.querySelectorAll('[data-copy]').forEach(btn => btn.addEventListener('click', () => { const pre = el.querySelector('pre[data-text]'); if (pre) { copyText(pre.textContent); btn.textContent = 'copied'; setTimeout(() => { btn.textContent = 'copy'; }, 1200); } }));
+  }
+}
+
+// ------------------------------------------------------------------ render loop
+let lastRender = 0, lastFrame = null, inited = false, prevRunId = null;
+function render(force) {
+  const run = pickRun();
+  if (run && run.run_id !== prevRunId) { prevRunId = run.run_id; restorePrefs(run); if (MODE === 'replay') initTransport(run); }
+  const t = MODE === 'replay' ? S.t : liveNow();
+  if (run && (S.auto || !S.node || !NODE_BY[S.node]) && !S.step) S.node = liveLlmNode(run, t);
+  try { renderTopbar(run, t); } catch (err) { console.error('topbar', err); }
+  try { renderVitals(run, t); } catch (err) { console.error('vitals', err); }
+  try { renderRibbon(t); } catch (err) { console.error('ribbon', err); }
+  try { updateCanvas(run, t); } catch (err) { console.error('canvas', err); }
+  try { renderWaterfall(run, t); } catch (err) { console.error('waterfall', err); }
+  try { renderFleet(run, t); } catch (err) { console.error('fleet', err); }
+  try { updateTransport(run); } catch (err) { console.error('transport', err); }
+  try { inspector(run, t); } catch (err) { console.error('inspector', err); }
+  if (force) savePrefs(run);
+}
+function frame(now) {
+  if (lastFrame === null) lastFrame = now;
+  const dt = (now - lastFrame) / 1000; lastFrame = now;
+  if (MODE === 'replay' && S.playing) {
+    const run = pickRun();
+    if (run) { const end = replayEnd(run); S.t = Math.min(end, S.t + dt * S.speed * 1000); if (S.t >= end) { S.playing = false; const b = document.getElementById('tp-play'); if (b) { b.textContent = '▶ Play'; b.setAttribute('aria-label', 'Play'); } savePrefs(run); } }
+  }
+  if (now - lastRender > (REDUCED ? 500 : 140)) { lastRender = now; render(false); }
+  requestAnimationFrame(frame);
+}
+try { const m = localStorage.getItem('mc-theme'); if (m === 'night' || m === 'day') document.documentElement.setAttribute('data-theme', m); } catch (e) {}
+if (MODE === 'live') { const r = load('mc:live:run'); if (r && (activeRuns().some(x => x.run_id === r) || (DATA.recent || []).some(x => x.run_id === r))) S.runId = r; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { S.auto = true; S.step = null; render(true); } });
+initCanvas();
+render(true);
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
