@@ -866,6 +866,8 @@ def _seed_running_run(state_db) -> tuple[str, int, int]:
 def test_mission_control_has_live_runs_health_tabs_and_renders_the_component():
     """The page is three tabs; the Live tab mounts the component (an iframe
     element) even on an empty DB."""
+    import re
+
     at = AppTest.from_file(
         str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
     )
@@ -873,6 +875,13 @@ def test_mission_control_has_live_runs_health_tabs_and_renders_the_component():
     assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
     assert [t.label for t in at.tabs] == ["Live", "Runs", "Health"]
     assert len(at.get("iframe")) == 1, "the Live fragment must mount exactly one component"
+    # Every full script run mounts the iframe anew, so it must carry a fresh
+    # `now` for the component's clock offset (the memo only serves fragment
+    # reruns, which do not re-mount).
+    first = re.search(r'"now":"([^"]+)"', at.get("iframe")[0].proto.srcdoc).group(1)
+    at.run()
+    second = re.search(r'"now":"([^"]+)"', at.get("iframe")[0].proto.srcdoc).group(1)
+    assert second > first
 
 
 def test_live_fragment_emits_one_component_and_memoises_identical_snapshots(
@@ -939,12 +948,19 @@ def test_live_html_substitutes_every_token_and_parses_as_html(tmp_path, monkeypa
     state_db.start_node_run(run_id, "risk")
     state_db.start_llm_call(
         run_id=run_id, node="risk", model="m",
-        messages=[{"role": "system", "content": "S"}, {"role": "user", "content": "</script><b>x"}],
+        messages=[
+            {"role": "system", "content": "S uses {{mode}} and {{theme}} literally"},
+            {"role": "user", "content": "</script><b>x"},
+        ],
     )
     for mode in ("live", "replay"):
         snap = state_db.live_snapshot() if mode == "live" else mc.replay_snapshot(run_id)
         doc = mc.live_html(snap, mode=mode)
-        assert not re.search(r"\{\{\w+\}\}", doc), "unsubstituted placeholder left in the HTML"
+        # Stored text keeps its own braces verbatim: the data block is substituted last.
+        assert "S uses {{mode}} and {{theme}} literally" in doc
+        assert not re.search(r"\{\{\w+\}\}", doc.replace("{{mode}} and {{theme}}", "")), (
+            "unsubstituted placeholder left in the HTML"
+        )
         assert "</script><b>x" not in doc and "\\u003c/script>" in doc
 
         class _Parser(HTMLParser):
@@ -1077,4 +1093,40 @@ def test_replay_snapshot_wraps_a_run_with_its_cio_cycle(tmp_path, monkeypatch):
     [node] = [n for n in snap["runs"][0]["nodes"] if n["node"] == "news"]
     assert node["calls"][0]["messages"][0]["text"] == _SYSTEM_PROMPT
     assert mc.replay_snapshot("missing") is None
+
+
+def test_health_open_button_jumps_to_runs_tab_with_that_run(tmp_path, monkeypatch):
+    """Health's per-row "Open →" stages a jump: the next run opens the Runs tab
+    with THAT run selected (not the newest) and the URL carries its id; a later
+    manual pick survives a plain rerun."""
+    import time as _time
+
+    from data import state as state_db
+
+    db = tmp_path / "jump.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    older = state_db.start_graph_run("AAA", "t1", db_path=db)
+    state_db.finish_graph_run(older, "completed", db_path=db)
+    _time.sleep(0.02)
+    newer = state_db.start_graph_run("BBB", "t2", db_path=db)
+    state_db.finish_graph_run(newer, "completed", db_path=db)
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.session_state["mc_tabs"] = "Health"
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    open_btn = next(b for b in at.button if b.key == f"open_{older}")
+    open_btn.click().run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    assert at.session_state["mc_tabs"] == "Runs"
+    sel = next(sb for sb in at.selectbox if sb.label == "Run")
+    assert older[:8] in (sel.value or "")
+    assert at.query_params.get("run_id") == [older]  # AppTest stores parse_qs lists
+
+    sel.select(next(o for o in sel.options if newer[:8] in o)).run()
+    at.run()  # a plain rerun (e.g. a tab click) keeps the manual pick
+    sel = next(sb for sb in at.selectbox if sb.label == "Run")
+    assert newer[:8] in (sel.value or "")
 

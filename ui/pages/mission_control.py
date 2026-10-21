@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from data import state as state_db
 from ui.components import (
@@ -95,28 +96,40 @@ def live_html(snapshot: dict, *, mode: str = "live", theme: str | None = None) -
     contains `</script>` cannot break out of the block. Pure: the same
     snapshot and settings give the same bytes."""
     tokens = mc_tokens(theme or os.getenv("FINAQ_MC_THEME", "day"))
+    tokens["mode"] = mode
     payload = {**snapshot, "mode": mode}
     data = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    tokens["snapshot_json"] = data.replace("<", "\\u003c")
-    tokens["mode"] = mode
     out = MC_TEMPLATE.read_text(encoding="utf-8")
     for key, value in tokens.items():
         out = out.replace("{{" + key + "}}", value)
-    return out
+    # The data block goes in LAST: stored text (a RAG chunk, a prompt) may itself
+    # contain `{{mode}}`-like placeholders, which must reach the page verbatim.
+    return out.replace("{{snapshot_json}}", data.replace("<", "\\u003c"))
 
 
-# One entry: the last snapshot hash and the HTML built for it. Module-level
-# rather than session_state so every browser tab shares one build per change
-# and the fragment body can be driven directly in tests. Re-emitting the same
-# string is what keeps Streamlit from re-mounting the iframe.
+# The last snapshot hash and the HTML built for it. Re-emitting the same
+# string is what keeps Streamlit from re-mounting the iframe between polls.
+# The memo lives in session_state — one per browser session — because the
+# HTML embeds the snapshot's `now`, which the component uses to calibrate its
+# clock at mount: a later session (or a page revisit) must mount a fresh
+# `now`, not the one of the last change. This module-level dict is the memo
+# only outside a script run, so tests can drive `render_live_panel()` directly.
 _LIVE_CACHE: dict[str, str | None] = {"hash": None, "html": None}
+
+
+def _live_cache() -> dict[str, str | None]:
+    if get_script_run_ctx(suppress_warning=True) is None:
+        return _LIVE_CACHE
+    return st.session_state.setdefault("_mc_live_cache", {"hash": None, "html": None})
 
 
 def render_live_panel() -> None:
     """Body of the Live fragment: close stale rows (the sweeper is a writer and
     the caller's job — `live_snapshot()` is a pure read), read the snapshot,
-    rebuild the HTML only when its hash changed, and emit exactly ONE
-    `components.html`."""
+    and emit exactly ONE `components.html`. The HTML is rebuilt when the
+    snapshot hash changed, or on a full script run (page load, navigation,
+    a tab click) because the iframe mounts anew then and needs a fresh `now`;
+    a fragment rerun with the same hash re-emits the previous string."""
     if Path(state_db.DB_PATH).exists():  # never create the file from a poll
         try:
             state_db.sweep_stale_runs()
@@ -124,10 +137,13 @@ def render_live_panel() -> None:
             logger.warning(f"[mission-control] stale sweep skipped: {exc}")
     snapshot = state_db.live_snapshot()
     digest = snapshot_hash(snapshot)
-    if _LIVE_CACHE["hash"] != digest or _LIVE_CACHE["html"] is None:
-        _LIVE_CACHE["html"] = live_html(snapshot)
-        _LIVE_CACHE["hash"] = digest
-    components.html(_LIVE_CACHE["html"], height=LIVE_HEIGHT, scrolling=True)
+    cache = _live_cache()
+    ctx = get_script_run_ctx(suppress_warning=True)
+    full_run = ctx is not None and not getattr(ctx, "fragment_ids_this_run", None)
+    if full_run or cache["hash"] != digest or cache["html"] is None:
+        cache["html"] = live_html(snapshot)
+        cache["hash"] = digest
+    components.html(cache["html"], height=LIVE_HEIGHT, scrolling=True)
 
 
 # `run_every` is inert under AppTest; tests call `render_live_panel()` directly.

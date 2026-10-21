@@ -475,7 +475,6 @@ function cycleState(cyc, t) {
   else if (cyc.status === 'running') return 'running';
   return cyc.status === 'failed' ? 'failed' : 'done';
 }
-function stepOf(cyc, t) { let cur = null; STEPS.forEach(s => { const st = stepState(cyc, s.id, t).st; if (st === 'running') cur = cur || s; }); if (cur) return cur; let last = null; STEPS.forEach(s => { if (stepState(cyc, s.id, t).st !== 'pending') last = s; }); return last; }
 
 // ------------------------------------------------------------------ persistence
 function persistKey(run) { return 'mc:' + MODE + ':' + (run ? run.run_id : 'none'); }
@@ -608,7 +607,7 @@ function updateCanvas(run, t) {
       const fin = x => x === 'done' || x === 'degraded' || x === 'failed';
       const sa = a === 'report' ? 'done' : nodeState(run, a, t).st;
       const sb = b === 'report' ? (runSt === 'done' || runSt === 'degraded' ? 'done' : 'pending') : nodeState(run, b, t).st;
-      if (fin(sa)) st = fin(sb) ? 'done' : 'flowing';
+      if (fin(sa)) st = fin(sb) ? 'done' : (runSt === 'running' ? 'flowing' : 'pending');  // a dead run has nothing in flight
     }
     cls(el, 'e ' + st);
   });
@@ -791,10 +790,11 @@ function inspector(run, t) {
       else if (med > 1) etaTxt = 'median ' + fmtDur(med) + (st !== 'pending' && over ? ' · +' + Math.round((cur / med - 1) * 100) + '%' : '');
       else etaTxt = med ? 'sub-second' : 'no median yet';
       const done = ns.callSt === 'done';
-      const nCalls = run.thin ? (ns.row.n_calls || 0) : ns.calls.length;
+      const row = ns.row || {};  // a thin run may show a node that never wrote a row
+      const nCalls = run.thin ? (row.n_calls || 0) : ns.calls.length;
       body = '<div class="tiles">' +
         '<div><div class="v num">' + (st === 'pending' ? '—' : fmtDur(cur)) + '</div><div class="k">' + (st === 'running' ? 'elapsed' : 'duration') + '</div><div class="d' + (over ? ' over' : '') + '">' + esc(etaTxt) + '</div></div>' +
-        '<div><div class="v num">' + (done ? fmtTok(call.tokens_in) + ' / ' + fmtTok(call.tokens_out) : (run.thin && ns.row.tokens_in != null ? fmtTok(ns.row.tokens_in) + ' / ' + fmtTok(ns.row.tokens_out) : '—')) + '</div><div class="k">tokens in / out</div><div class="d">' + (n.env ? n.env : 'no LLM') + '</div></div>' +
+        '<div><div class="v num">' + (done ? fmtTok(call.tokens_in) + ' / ' + fmtTok(call.tokens_out) : (run.thin && row.tokens_in != null ? fmtTok(row.tokens_in) + ' / ' + fmtTok(row.tokens_out) : '—')) + '</div><div class="k">tokens in / out</div><div class="d">' + (n.env ? n.env : 'no LLM') + '</div></div>' +
         '<div><div class="v num">' + (done ? fmtUsd(call.cost_usd) : ns.callSt === 'running' ? '…' : (ns.row && ns.row.cost_usd ? fmtUsd(ns.row.cost_usd) : '$0')) + '</div><div class="k">cost</div><div class="d">' + (call ? 'OpenRouter usage × price table' : '') + '</div></div>' +
         '<div><div class="v num">' + (ns.callSt === 'running' ? nCalls + ' ↻' : String(nCalls)) + '</div><div class="k">LLM calls</div><div class="d">' + (call ? 'attempt ' + esc(call.attempt || 1) : '') + '</div></div></div>' +
         '<div class="kv"><span class="k">node_runs.id</span><span class="v">' + esc(ns.row && ns.row.id != null ? ns.row.id : '—') + '</span><span class="k">llm_calls.id</span><span class="v">' + esc(call ? call.id : '—') + '</span><span class="k">model</span><span class="v">' + esc(call && call.model ? call.model : '—') + '</span><span class="k">started</span><span class="v">' + (ns.s !== null ? fmtClock(ns.s) : '—') + '</span><span class="k">pid</span><span class="v">' + esc(ns.row && ns.row.pid != null ? ns.row.pid : '—') + '</span></div>' +
