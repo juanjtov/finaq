@@ -209,7 +209,7 @@ Plus: PDF export with the brand palette (sage `#2D4F3A` / parchment `#F4ECDC`), 
 | **New Thesis**      | Form-based thesis creator. Pydantic-validated, writes to `theses/<slug>.json`.                                                          |
 | **Architecture**    | Live snapshot — LangGraph topology, agent cards with **current** `MODEL_*` env strings, data sources, eval tiers, brand palette. Never rots. |
 | **Methodology**     | Per-thesis valuation parameters with rationale, Owner-Earnings DCF formula, full `FINANCE_ASSUMPTIONS.md` rendered.                     |
-| **Mission Control** | Eval run history, data-source freshness, cached drill-in audit, error log from `state.db`.                                              |
+| **Mission Control** | Live tab: the drill-in graph and CIO cycle as they run, every agent's prompts + output + telemetry; Runs tab: inspect or replay any run; Health tab: freshness, cost, errors, evals. |
 
 ---
 
@@ -258,7 +258,7 @@ cio/           CIO meta-layer — planner, rag, cio (orchestrator), notify, disp
   prompts/     CIO persona prompt
 data/          edgar.py, yfin.py, vectors.py, finnhub.py, treasury.py, state.py, telegram.py, notion.py, theses.py
 theses/        hand-written thesis JSONs — ai_cake, nvda_halo, construction, general (+ adhoc_*, archive/)
-ui/            Streamlit app + 7 pages (mission_control, new_thesis, direct_agent, methodology, architecture, run_inspector, theses_admin)
+ui/            Streamlit app + pages (mission_control [Live | Runs | Health] + mc_live.html component, new_thesis, direct_agent, methodology, architecture, run_inspector → redirect, theses_admin, halo_graph, backtest)
 utils/         schemas, monte_carlo, charts, pdf_export, models, openrouter, rag_eval, rag_ragas, live_eval
 tests/         20k+ lines — Tier 1 (deterministic), Tier 2 (LLM-judge), Tier 3 (RAGAS), CIO workflow + RAG eval
   eval/        golden query datasets — golden_queries.py, news_golden_queries.py, cio_reports_golden_queries.py

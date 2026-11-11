@@ -1160,6 +1160,19 @@ def get_graph_run(run_id: str, *, db_path: Path | None = None) -> dict | None:
     return dict(row) if row else None
 
 
+def get_cio_run(run_id: str, *, db_path: Path | None = None) -> dict | None:
+    """One `cio_runs` row by id — the Runs tab's replay ribbon resolves a run's
+    CIO lineage through it. None when unknown or on a pre-CIO file."""
+    if not run_id or not Path(db_path or DB_PATH).exists():
+        return None
+    with _connect(db_path) as conn:
+        try:
+            row = conn.execute("SELECT * FROM cio_runs WHERE run_id = ?", (run_id,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return dict(row) if row else None
+
+
 # --- CIO cycle + action recording (Step 11.5) -----------------------------
 
 
