@@ -6,9 +6,6 @@ test_retrieval_quality.py.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from agents.filings import (
@@ -21,15 +18,11 @@ from agents.filings import (
 )
 from utils.schemas import FilingsOutput
 
-THESES_DIR = Path(__file__).parents[1] / "theses"
-
-
 # --- Subquery construction ---------------------------------------------------
 
 
-def test_build_subqueries_returns_three_with_correct_item_filters():
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
-    sqs = _build_subqueries("NVDA", thesis)
+def test_build_subqueries_returns_three_with_correct_item_filters(ai_cake):
+    sqs = _build_subqueries("NVDA", ai_cake)
     assert len(sqs) == 3
     labels = {sq["label"] for sq in sqs}
     assert labels == {"risk_factors", "mdna_trajectory", "segment_performance"}
@@ -40,9 +33,8 @@ def test_build_subqueries_returns_three_with_correct_item_filters():
     assert by_label["segment_performance"]["item_filter"] is None
 
 
-def test_build_subqueries_interpolates_thesis_name_and_ticker():
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
-    sqs = _build_subqueries("NVDA", thesis)
+def test_build_subqueries_interpolates_thesis_name_and_ticker(ai_cake):
+    sqs = _build_subqueries("NVDA", ai_cake)
     for sq in sqs:
         assert "NVDA" in sq["question"], sq
         assert "AI cake" in sq["question"], sq
@@ -66,8 +58,7 @@ def test_format_chunk_includes_filed_date_and_accession():
     assert "supply-constrained" in out
 
 
-def test_build_user_prompt_includes_each_subquery_label_and_chunks():
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
+def test_build_user_prompt_includes_each_subquery_label_and_chunks(ai_cake):
     chunk = {
         "text": "Sample 10-K text.",
         "metadata": {
@@ -76,9 +67,9 @@ def test_build_user_prompt_includes_each_subquery_label_and_chunks():
             "filed_date": "2025-02-26",
         },
     }
-    sqs = _build_subqueries("NVDA", thesis)
+    sqs = _build_subqueries("NVDA", ai_cake)
     prompt = _build_user_prompt(
-        "NVDA", thesis, [(sqs[0], [chunk]), (sqs[1], [chunk]), (sqs[2], [])]
+        "NVDA", ai_cake, [(sqs[0], [chunk]), (sqs[1], [chunk]), (sqs[2], [])]
     )
     assert "AS OF" in prompt
     assert "risk_factors" in prompt
@@ -107,7 +98,7 @@ def test_strip_code_fences(raw, expected):
 
 
 @pytest.mark.asyncio
-async def test_run_returns_ticker_not_ingested_message_when_index_empty(monkeypatch):
+async def test_run_returns_ticker_not_ingested_message_when_index_empty(monkeypatch, ai_cake):
     """When the filings index has no chunks for the ticker AT ALL, surface a precise
     actionable error pointing at scripts.ingest_universe — not a generic
     'no chunks retrieved' message."""
@@ -117,7 +108,7 @@ async def test_run_returns_ticker_not_ingested_message_when_index_empty(monkeypa
     # has_ticker returns False → "ticker_not_ingested" path
     monkeypatch.setattr("data.vectors.has_ticker", lambda ticker: False)
 
-    state = {"ticker": "ZZZZ", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "ZZZZ", "thesis": ai_cake}
     result = await run(state)
     out = FilingsOutput.model_validate(result["filings"])
     assert "ZZZZ" in out.summary
@@ -128,6 +119,7 @@ async def test_run_returns_ticker_not_ingested_message_when_index_empty(monkeypa
 @pytest.mark.asyncio
 async def test_run_returns_empty_query_match_when_ticker_ingested_but_no_hits(
     monkeypatch,
+    ai_cake,
 ):
     """When the filings index DOES have chunks for the ticker but the 3 subqueries all
     return 0 matches, emit a different (rare) error so we know the issue is
@@ -138,7 +130,7 @@ async def test_run_returns_empty_query_match_when_ticker_ingested_but_no_hits(
     monkeypatch.setattr("data.vectors.has_ticker", lambda ticker: True)
     monkeypatch.setattr("data.edgar.has_filings_in_unsupported_kinds", lambda t: [])
 
-    state = {"ticker": "ABCD", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "ABCD", "thesis": ai_cake}
     result = await run(state)
     out = FilingsOutput.model_validate(result["filings"])
     assert "ABCD" in out.summary
@@ -197,6 +189,7 @@ def test_retrieve_for_subquery_does_not_retry_when_filter_already_none(monkeypat
 @pytest.mark.asyncio
 async def test_run_emits_actionable_error_when_ticker_ingested_but_subqueries_miss(
     monkeypatch,
+    ai_cake,
 ):
     """Edge case after 20-F/6-K support: ticker IS ingested but the 3
     subqueries all returned 0 (e.g., a 6-K-only ticker where item_filter
@@ -208,7 +201,7 @@ async def test_run_emits_actionable_error_when_ticker_ingested_but_subqueries_mi
     monkeypatch.setattr(f, "_retrieve_for_subquery", lambda *a, **kw: [])
     monkeypatch.setattr("data.vectors.has_ticker", lambda ticker: True)
 
-    state = {"ticker": "ABCD", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "ABCD", "thesis": ai_cake}
     result = await run(state)
     out = FilingsOutput.model_validate(result["filings"])
 
@@ -218,7 +211,7 @@ async def test_run_emits_actionable_error_when_ticker_ingested_but_subqueries_mi
 
 
 @pytest.mark.asyncio
-async def test_run_falls_back_when_llm_fails(monkeypatch):
+async def test_run_falls_back_when_llm_fails(monkeypatch, ai_cake):
     """LLM raises but retrieval succeeded — output must still be schema-valid."""
     from agents import filings as f
 
@@ -239,7 +232,7 @@ async def test_run_falls_back_when_llm_fails(monkeypatch):
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated openrouter outage")),
     )
 
-    state = {"ticker": "STUB", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "STUB", "thesis": ai_cake}
     result = await run(state)
     out = FilingsOutput.model_validate(result["filings"])
     assert any("llm" in e for e in out.errors)
@@ -249,7 +242,7 @@ async def test_run_falls_back_when_llm_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
+async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch, ai_cake):
     from agents import filings as f
 
     fake_chunks = [
@@ -286,7 +279,7 @@ async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
     }
     monkeypatch.setattr(f, "_call_llm", lambda *a, **kw: fake_response)
 
-    state = {"ticker": "NVDA", "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text())}
+    state = {"ticker": "NVDA", "thesis": ai_cake}
     result = await run(state)
     out = FilingsOutput.model_validate(result["filings"])
     assert "[stub]" in out.summary

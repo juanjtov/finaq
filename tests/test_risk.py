@@ -5,9 +5,6 @@ Pure-logic, no network. Real LLM in test_risk_integration.py.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from agents.risk import (
@@ -19,9 +16,6 @@ from agents.risk import (
     run,
 )
 from utils.schemas import RISK_LEVEL_TO_SCORE, RiskOutput
-
-THESES_DIR = Path(__file__).parents[1] / "theses"
-
 
 # --- Worker summarisation ---------------------------------------------------
 
@@ -70,16 +64,15 @@ def test_summarise_worker_handles_empty_payload():
 # --- Prompt assembly --------------------------------------------------------
 
 
-def test_build_user_prompt_includes_all_three_workers():
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
+def test_build_user_prompt_includes_all_three_workers(ai_cake):
     state = {
         "ticker": "NVDA",
-        "thesis": thesis,
+        "thesis": ai_cake,
         "fundamentals": {"summary": "fundies", "kpis": {"fcf_yield": 1.8}},
         "filings": {"summary": "filings", "risk_themes": ["X"]},
         "news": {"summary": "news"},
     }
-    prompt = _build_user_prompt("NVDA", thesis, state)
+    prompt = _build_user_prompt("NVDA", ai_cake, state)
     assert "FUNDAMENTALS" in prompt
     assert "FILINGS" in prompt
     assert "NEWS" in prompt
@@ -87,10 +80,9 @@ def test_build_user_prompt_includes_all_three_workers():
     assert "AI cake" in prompt
 
 
-def test_build_user_prompt_includes_thesis_thresholds():
-    thesis = json.loads((THESES_DIR / "ai_cake.json").read_text())
-    state = {"ticker": "NVDA", "thesis": thesis, "fundamentals": {"summary": "x"}}
-    prompt = _build_user_prompt("NVDA", thesis, state)
+def test_build_user_prompt_includes_thesis_thresholds(ai_cake):
+    state = {"ticker": "NVDA", "thesis": ai_cake, "fundamentals": {"summary": "x"}}
+    prompt = _build_user_prompt("NVDA", ai_cake, state)
     # Thresholds rendered as JSON
     assert "fcf_yield" in prompt or "data_center_capex" in prompt
 
@@ -152,11 +144,11 @@ def test_coerce_handles_missing_optional_fields():
 
 
 @pytest.mark.asyncio
-async def test_run_returns_fallback_when_all_workers_empty():
+async def test_run_returns_fallback_when_all_workers_empty(ai_cake):
     """Risk has nothing to synthesize → return graceful fallback."""
     state = {
         "ticker": "ZZZZ",
-        "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text()),
+        "thesis": ai_cake,
         "fundamentals": {},
         "filings": {},
         "news": {},
@@ -169,7 +161,7 @@ async def test_run_returns_fallback_when_all_workers_empty():
 
 
 @pytest.mark.asyncio
-async def test_run_returns_fallback_when_llm_fails(monkeypatch):
+async def test_run_returns_fallback_when_llm_fails(monkeypatch, ai_cake):
     """LLM raises but worker outputs exist — fallback keeps graph alive."""
     from agents import risk as r
 
@@ -180,7 +172,7 @@ async def test_run_returns_fallback_when_llm_fails(monkeypatch):
     )
     state = {
         "ticker": "NVDA",
-        "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text()),
+        "thesis": ai_cake,
         "fundamentals": {"summary": "x"},
         "filings": {"summary": "y"},
         "news": {"summary": "z"},
@@ -192,7 +184,7 @@ async def test_run_returns_fallback_when_llm_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
+async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch, ai_cake):
     """Happy path: mocked LLM returns a valid level → derived score + structured fields."""
     from agents import risk as r
 
@@ -231,7 +223,7 @@ async def test_run_propagates_llm_output_when_call_succeeds(monkeypatch):
 
     state = {
         "ticker": "NVDA",
-        "thesis": json.loads((THESES_DIR / "ai_cake.json").read_text()),
+        "thesis": ai_cake,
         "fundamentals": {"summary": "x"},
         "filings": {"summary": "y"},
         "news": {"summary": "z"},

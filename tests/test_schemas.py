@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from tests.thesis_fixtures import THESES
 from utils.schemas import (
     OPERATORS,
     Evidence,
@@ -25,31 +26,49 @@ from utils.schemas import (
 )
 
 THESES_DIR = Path(__file__).parents[1] / "theses"
-EXPECTED_THESES = ("ai_cake", "nvda_halo", "construction")
+# Whatever the user currently keeps under theses/ (`archive/` and `backtest/` are not
+# globbed), so adding or removing a thesis never breaks the suite. Shape-specific checks
+# use the fixture theses in tests/thesis_fixtures.py instead.
+ON_DISK_THESES = sorted(p.stem for p in THESES_DIR.glob("*.json"))
 
 
 # --- Each committed thesis JSON validates ------------------------------------
 
 
-@pytest.mark.parametrize("slug", EXPECTED_THESES)
+def test_theses_dir_is_not_empty():
+    """An empty parameter set would turn the four tests below into silent skips."""
+    assert ON_DISK_THESES, f"no thesis JSON under {THESES_DIR}"
+
+
+@pytest.mark.parametrize("slug", ON_DISK_THESES)
 def test_thesis_json_validates(slug):
-    path = THESES_DIR / f"{slug}.json"
-    assert path.exists(), f"missing thesis file: {path}"
-    thesis = Thesis.model_validate_json(path.read_text())
-    assert thesis.universe, f"{slug}: universe is empty"
+    thesis = Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
+    # `general` is the universe-less catch-all; any other thesis needs a universe to be
+    # reachable at all (ticker → thesis resolution, the CIO sweep).
+    assert thesis.universe or slug == "general", f"{slug}: universe is empty"
     assert thesis.material_thresholds, f"{slug}: no material thresholds"
+    # Monte Carlo silently skips a thesis without a valuation block (seen live with
+    # /drill WEN against general), so every thesis on disk must carry one.
+    assert thesis.valuation is not None, f"{slug}: no valuation block"
+
+
+@pytest.mark.parametrize("slug", sorted(THESES))
+def test_fixture_theses_validate(slug):
+    """The theses the unit tests share must stay valid as the schema evolves."""
+    thesis = Thesis.model_validate(THESES[slug])
+    assert thesis.valuation is not None, f"{slug}: fixture theses carry a valuation block"
 
 
 # --- Universe / anchor / relationship invariants for every thesis ------------
 
 
-@pytest.mark.parametrize("slug", EXPECTED_THESES)
+@pytest.mark.parametrize("slug", ON_DISK_THESES)
 def test_anchors_subset_of_universe(slug):
     thesis = Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
     assert set(thesis.anchor_tickers).issubset(set(thesis.universe))
 
 
-@pytest.mark.parametrize("slug", EXPECTED_THESES)
+@pytest.mark.parametrize("slug", ON_DISK_THESES)
 def test_all_relationships_reference_universe_tickers(slug):
     thesis = Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
     universe = set(thesis.universe)
@@ -58,7 +77,7 @@ def test_all_relationships_reference_universe_tickers(slug):
         assert rel.to in universe, f"{slug}: relationship.to {rel.to!r} not in universe"
 
 
-@pytest.mark.parametrize("slug", EXPECTED_THESES)
+@pytest.mark.parametrize("slug", ON_DISK_THESES)
 def test_all_thresholds_use_allowed_operators(slug):
     thesis = Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
     for th in thesis.material_thresholds:
@@ -220,11 +239,12 @@ def test_risk_output_accepts_convergent_signals_and_threshold_breaches():
 # --- Cross-thesis sanity check (Phase 3 pattern detection foreshadowing) -----
 
 
-def test_overlapping_tickers_match_finaq_context():
-    """VRT, CEG, ANET, PWR should appear in 2+ theses (per FINAQ_Context.docx)."""
+def test_fixture_theses_keep_the_shared_ticker_overlap():
+    """VRT, CEG, ANET, PWR sat in 2+ of the Phase-0 theses (FINAQ_Context.docx). This pins
+    that overlap in the fixture copies: the Telegram ambiguous-ticker tests rely on CEG
+    being in both ai_cake and nvda_halo."""
     theses = [
-        Thesis.model_validate_json((THESES_DIR / f"{slug}.json").read_text())
-        for slug in EXPECTED_THESES
+        Thesis.model_validate(THESES[slug]) for slug in ("ai_cake", "nvda_halo", "construction")
     ]
     counts: dict[str, int] = {}
     for t in theses:

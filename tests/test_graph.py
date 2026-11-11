@@ -18,7 +18,6 @@ import pytest
 from agents import build_graph
 from utils.state import FinaqState
 
-THESES_DIR = Path(__file__).parents[1] / "theses"
 EXPECTED_NODES = (
     "load_thesis",
     "fundamentals",
@@ -193,11 +192,6 @@ def _stub_real_agents(monkeypatch):
     monkeypatch.setattr(agents_pkg, "monte_carlo", stub_mc)
 
 
-@pytest.fixture(scope="module")
-def ai_cake() -> dict:
-    return json.loads((THESES_DIR / "ai_cake.json").read_text())
-
-
 # --- Topology ----------------------------------------------------------------
 
 
@@ -220,7 +214,7 @@ def test_graph_topology_includes_all_nodes_and_edges():
 
 def test_langgraph_json_points_to_compiled_graph():
     """langgraph.json's drill_in entrypoint must resolve to a callable that builds a compiled graph."""
-    cfg = json.loads((THESES_DIR.parent / "langgraph.json").read_text())
+    cfg = json.loads((Path(__file__).parents[1] / "langgraph.json").read_text())
     assert "graphs" in cfg
     assert "drill_in" in cfg["graphs"]
     assert cfg["graphs"]["drill_in"].endswith(":build_graph")
@@ -260,7 +254,10 @@ async def test_graph_runs_end_to_end_with_stubs(ai_cake):
 
 
 @pytest.mark.asyncio
-async def test_graph_loads_thesis_from_slug(ai_cake):
+async def test_graph_loads_thesis_from_slug(ai_cake, theses_dir, monkeypatch):
+    import agents as agents_pkg
+
+    monkeypatch.setattr(agents_pkg, "THESES_DIR", theses_dir)
     graph = build_graph()
     final = await graph.ainvoke({"ticker": "NVDA", "thesis": "ai_cake"})
     assert final["thesis"]["name"] == ai_cake["name"]
