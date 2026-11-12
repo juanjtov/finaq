@@ -1599,6 +1599,12 @@ and prefixes with `[budget cap]`.
   `{TICKER}__` id prefix); metadata `run_id` is the real
   `graph_runs.run_id`, because the planner echoes it back as
   `reuse_run_id` and that has to deep-link to a run that exists.
+  Two guards keep that memory honest: when Synthesis fell back to its
+  placeholder (`synthesis_errors` non-empty) the state is saved but
+  nothing goes to Notion or the index — a "Synthesis failed" template
+  must not become the pair's latest watchlist; and a failed index
+  upsert is recorded against the run (`errors` row, agent
+  `report_index`) instead of only logged.
 
 ### 12.6 Telemetry: `cio_runs` + `cio_actions` tables
 
@@ -1652,10 +1658,15 @@ and prefixes with `[budget cap]`.
   A crashed drill and a drill whose analysts had failed both read as
   "Drilled", and the drill link carried no run id. `_execute_plan` now
   stamps each drill's outcome on its `CIODecision` — `drill_run_id`,
-  `report_url` (the Notion page), `degraded` (agents with a run-scoped
+  `report_url` (the Notion page), `degraded` (steps with a run-scoped
   `errors` row or a failed node: the same derivation Mission Control
-  uses). Telegram and the stored summary flag failed and degraded
-  drills and link the report.
+  uses; covers the agents plus the post-drill `report_save` /
+  `report_index` steps). Telegram and the stored summary flag failed
+  and degraded drills and link the report. These fields are dropped
+  from the LLM's JSON before validation, so only the orchestrator sets
+  them. Synthesis's own soft failure used to be invisible to this —
+  its `errors` never left the node — and now travels as the
+  `synthesis_errors` state key, which `_safe_node` records.
 - **Model preflight (2026-11-11):** before every cycle
   `cio.dispatcher._preflight` checks each `MODEL_*` role against
   OpenRouter's public model listings

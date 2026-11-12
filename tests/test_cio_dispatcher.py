@@ -21,13 +21,6 @@ def isolated_db(tmp_path, monkeypatch):
     return db
 
 
-@pytest.fixture(autouse=True)
-def _all_models_listed(monkeypatch):
-    """The dispatcher's preflight asks OpenRouter which models exist; unit
-    tests never do. Preflight tests override this with their own answer."""
-    monkeypatch.setattr(cio_dispatcher, "unavailable_models", lambda: {})
-
-
 @pytest.fixture
 def stub_cycles(monkeypatch):
     """Stub the three cycle entry points so dispatcher tests don't run
@@ -257,6 +250,7 @@ def test_preflight_is_silent_when_every_model_is_listed(
 ):
     from cio import notify as cio_notify
 
+    monkeypatch.setattr(cio_dispatcher, "unavailable_models", lambda: {})
     monkeypatch.setattr(
         cio_notify, "send_telegram_message", lambda *a, **k: pytest.fail("no alert expected")
     )

@@ -129,8 +129,8 @@ def format_for_telegram(plan: Plan, *, trigger: str, duration_s: float) -> str:
                 lines.append("  ❌ <i>Drill failed — no report was produced.</i>")
             elif d.degraded:
                 lines.append(
-                    f"  ⚠️ <i>Degraded — {_h(', '.join(d.degraded))} failed; "
-                    f"treat this report as incomplete.</i>"
+                    f"  ⚠️ <i>Degraded — failed steps: {_h(', '.join(d.degraded))}. "
+                    f"Check the run before relying on it.</i>"
                 )
         lines.append("")
 

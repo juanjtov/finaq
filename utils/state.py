@@ -23,6 +23,11 @@ class FinaqState(TypedDict, total=False):
     synthesis_confidence: str  # low|medium|high — duplicated from inside the markdown
     synthesis_verdict: str  # undervalued|fairly_priced|overvalued — structured side-channel
     # for the backtest scorer; preferred over a regex parse of the report prose.
+    # Non-empty when Synthesis fell back to its placeholder report (LLM call
+    # failed, or no upstream output). Synthesis has no payload dict of its
+    # own, so its soft failures travel here: `_safe_node` records them and
+    # `finish_drill` keeps the placeholder out of Notion and the reports index.
+    synthesis_errors: list[str]
     gaps: list[str]  # upstream content Synthesis wished it had (retrospective observability)
     watchlist: list[str]  # forward-looking events to track before next drill-in (per-agent suffix)
     run_id: str  # set by invoke_with_telemetry; lets the dashboard key cached files by run

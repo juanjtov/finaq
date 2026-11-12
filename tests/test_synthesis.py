@@ -441,6 +441,8 @@ async def test_run_fallback_when_llm_raises(monkeypatch):
     assert result["synthesis_confidence"] == "low"
     # Synthesis-failure top-risk should be present in the fallback
     assert "Synthesis failure" in result["report"]
+    # … and the failure leaves the node, so the run can be flagged degraded.
+    assert result["synthesis_errors"] == ["llm: openrouter outage"]
 
 
 @pytest.mark.asyncio

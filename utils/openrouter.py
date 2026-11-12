@@ -236,25 +236,35 @@ def unavailable_models() -> dict[str, str]:
 
     A retired model fails every call that uses it while the graph still
     closes the run as completed, so nothing else reports it. Empty as well
-    when the listing itself can't be fetched: a network blip must not raise
-    a false alarm.
+    when the chat listing can't be fetched or comes back empty: an outage
+    must not raise a false alarm.
 
     Matching is deliberately lenient, to never flag a working model: a
     `:variant` suffix falls back to its base id (routing variants are not
     listed separately), and an embeddings id may omit its provider prefix.
+    The embeddings listing is fetched on its own — if it fails, only the
+    embeddings role goes unchecked, the chat roles still are.
     """
     from utils import models
 
     try:
         chat = _listed_model_ids("models")
-        embeddings = _listed_model_ids("embeddings/models")
     except Exception as e:
         logger.warning(f"[openrouter] model listing unavailable, skipping check: {e}")
         return {}
+    if not chat:
+        return {}
+    roles = models.configured()
+    try:
+        embeddings = _listed_model_ids("embeddings/models")
+    except Exception as e:
+        logger.warning(f"[openrouter] embeddings listing unavailable: {e}")
+        embeddings = set()
+        roles.pop("MODEL_EMBEDDINGS", None)
     known = chat | embeddings | {i.split("/", 1)[-1] for i in embeddings}
     return {
         name: model
-        for name, model in models.configured().items()
+        for name, model in roles.items()
         if model not in known and model.split(":", 1)[0] not in known
     }
 

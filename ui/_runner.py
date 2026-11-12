@@ -27,12 +27,14 @@ Why a module-level dict (not st.session_state):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
+from data import state as state_db
 from utils import logger
 
 # --- Module singleton -------------------------------------------------------
@@ -172,19 +174,28 @@ def finish_drill(final: dict[str, Any], thesis: dict, thesis_slug: str) -> Path:
     """
     # Per-drill-in RAG eval. Opt-in via EVAL_LIVE_DRILL_INS.
     _maybe_run_live_eval(final, thesis)
-    # Report + watchlist to Notion. No-op when NOTION_API_KEY isn't set.
-    _maybe_write_to_notion(final, thesis)
+    # When Synthesis fell back to its placeholder there is no report to
+    # publish: a "Synthesis failed" page in Notion, or its section chunks
+    # becoming the pair's latest memory, would be worse than nothing. The
+    # state is still saved so the dashboard can show the upstream outputs.
+    has_report = not final.get("synthesis_errors")
+    if has_report:
+        # Report + watchlist to Notion. No-op when NOTION_API_KEY isn't set.
+        _maybe_write_to_notion(final, thesis)
     path = _save_run_to_demo_dir(
         str(final.get("ticker") or "?").upper(), thesis_slug, final
     )
-    _index_report(path)
+    if has_report:
+        _index_report(path, final.get("run_id"))
     return path
 
 
-def _index_report(path: Path) -> None:
+def _index_report(path: Path, run_id: str | None) -> None:
     """Add the saved report to the reports index — the CIO planner's memory of
     past drill-ins and their watchlists. Soft-fail: an embedding or Pinecone
-    outage must not turn a finished drill into a failed one; the backfill
+    outage must not turn a finished drill into a failed one. It is recorded
+    against the run so the miss is visible (memory going stale in silence is
+    the failure this step exists to prevent); the backfill
     (`python -m scripts.index_existing_reports`) picks up what was missed."""
     try:
         from scripts.index_existing_reports import index_one
@@ -192,6 +203,8 @@ def _index_report(path: Path) -> None:
         index_one(path)
     except Exception as e:
         logger.warning(f"[runner] report indexing failed for {path.name}: {e}")
+        with contextlib.suppress(Exception):
+            state_db.record_error("report_index", f"{path.name}: {e}", run_id=run_id)
 
 
 def _maybe_write_to_notion(final: dict[str, Any], thesis: dict) -> None:

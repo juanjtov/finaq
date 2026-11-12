@@ -7,6 +7,8 @@ import json
 import threading
 from pathlib import Path
 
+import pytest
+
 from ui import _runner
 
 
@@ -52,9 +54,9 @@ def test_finish_drill_saves_then_indexes_with_the_notion_link(tmp_path, monkeypa
 
     indexed: list[dict] = []
 
-    def _index(path):
+    def _index(path, run_id):
         steps.append("index")
-        indexed.append(json.loads(path.read_text()))
+        indexed.append({**json.loads(path.read_text()), "_run_id_arg": run_id})
 
     monkeypatch.setattr(_runner, "_maybe_write_to_notion", _notion)
     monkeypatch.setattr(_runner, "_index_report", _index)
@@ -65,18 +67,49 @@ def test_finish_drill_saves_then_indexes_with_the_notion_link(tmp_path, monkeypa
     assert steps == ["eval", "notion", "index"]
     assert path == Path("data_cache/demos/NU__nu__abcdef12.json")
     assert indexed[0]["notion_report_url"] == "https://notion.example/r"
+    assert indexed[0]["_run_id_arg"] == "abcdef1234"
     assert "messages" not in indexed[0]
 
 
-def test_index_report_soft_fails(tmp_path, monkeypatch):
-    """An embedding / Pinecone outage must not fail a finished drill."""
+def test_finish_drill_keeps_a_placeholder_report_out_of_notion_and_memory(
+    tmp_path, monkeypatch
+):
+    """Synthesis fell back → there is no report. Its placeholder must not
+    become a Notion page or the pair's latest watchlist in the reports index;
+    the state is still saved for the dashboard."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_runner, "_maybe_run_live_eval", lambda f, t: None)
+    for step in ("_maybe_write_to_notion", "_index_report"):
+        monkeypatch.setattr(
+            _runner, step, lambda *a, _s=step, **k: pytest.fail(f"{_s} must not run")
+        )
+
+    final = {
+        "ticker": "NU",
+        "run_id": "abcdef1234",
+        "report": "# placeholder",
+        "synthesis_errors": ["llm: model gone"],
+    }
+    path = _runner.finish_drill(final, {"name": "Nu"}, "nu")
+
+    assert json.loads(path.read_text())["synthesis_errors"] == ["llm: model gone"]
+
+
+def test_index_report_failure_is_soft_but_recorded(tmp_path, monkeypatch):
+    """An embedding / Pinecone outage must not fail a finished drill — and
+    must not pass in silence either: memory going stale unnoticed is the
+    failure this step exists to prevent."""
+    from data import state as state_db
     from scripts import index_existing_reports as indexer
 
     def _boom(path, **kw):
         raise RuntimeError("pinecone down")
 
     monkeypatch.setattr(indexer, "index_one", _boom)
-    _runner._index_report(tmp_path / "NU__nu__abcdef12.json")  # must not raise
+    _runner._index_report(tmp_path / "NU__nu__abcdef12.json", "run-7")  # must not raise
+
+    [error] = state_db.errors_for_run("run-7")
+    assert error["agent"] == "report_index" and "pinecone down" in error["message"]
 
 
 def test_index_one_ids_use_the_stem_and_metadata_the_real_run_id(tmp_path, monkeypatch):

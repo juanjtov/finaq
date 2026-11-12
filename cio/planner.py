@@ -75,6 +75,8 @@ _WORD_RE_LOWER = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 CONFIDENCE_VALUES = ("low", "medium", "high")
 ACTION_VALUES = ("drill", "reuse", "dismiss")
 SOURCE_VALUES = ("llm", "gate", "budget_cap", "fallback")
+# `CIODecision` fields only `cio.cio._execute_plan` may set.
+_ORCHESTRATOR_FIELDS = ("drill_run_id", "report_url", "degraded")
 
 
 # --- Pydantic schemas ------------------------------------------------------
@@ -552,6 +554,12 @@ def _parse_decision(raw: str) -> tuple[CIODecision | None, str | None]:
             obj = json.loads(snippet)
         except json.JSONDecodeError as e:
             return None, f"json parse failed: {e}"
+    # Drill outcomes are the orchestrator's to fill in. Dropped before
+    # validation so a model echoing them from a past action can neither
+    # set them nor get an otherwise valid decision rejected.
+    if isinstance(obj, dict):
+        for key in _ORCHESTRATOR_FIELDS:
+            obj.pop(key, None)
     try:
         return CIODecision.model_validate(obj), None
     except ValidationError as e:
@@ -721,8 +729,6 @@ def decide(
     # the yo-yo guard trusts `source`, so be strict here.
     decision.ticker = ticker.upper()
     decision.source = "llm"
-    # Drill outcomes are the orchestrator's to fill in, not the model's.
-    decision.drill_run_id, decision.report_url, decision.degraded = None, None, []
     if thesis_slug and not decision.thesis:
         decision.thesis = thesis_slug
 

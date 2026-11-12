@@ -294,7 +294,7 @@ async def _drill_one(ticker: str, thesis: dict) -> dict | None:
         logger.error(f"[cio.cio] persisting the {ticker} drill failed: {e}")
         with contextlib.suppress(Exception):
             state_db.record_error(
-                agent="cio.finish_drill",
+                agent="report_save",
                 message=f"report for {ticker} not saved: {e}",
                 run_id=final.get("run_id"),
             )
@@ -302,9 +302,10 @@ async def _drill_one(ticker: str, thesis: dict) -> dict | None:
 
 
 def _failed_agents(run_id: str | None) -> list[str]:
-    """Agents that failed or logged a soft error during a drill — the same
-    derivation Mission Control uses for a "degraded" run. A drill can finish
-    with a report while an analyst behind it produced nothing."""
+    """Steps that failed or logged a soft error during a drill — the same
+    derivation Mission Control uses for a "degraded" run. Mostly agents (a
+    drill can finish with a report while an analyst behind it produced
+    nothing), plus the post-drill steps `report_save` / `report_index`."""
     if not run_id:
         return []
     try:
@@ -461,7 +462,7 @@ def _compose_summary(plan: Plan, *, trigger: str, duration_s: float) -> str:
         if d.action == "drill" and not d.drill_run_id:
             outcome = " [DRILL FAILED — no report]"
         elif d.degraded:
-            outcome = f" [DEGRADED — {', '.join(d.degraded)} failed]"
+            outcome = f" [DEGRADED — failed steps: {', '.join(d.degraded)}]"
         lines.append(
             f"  • {d.action.upper()}: {d.ticker}{thesis_part} "
             f"({d.confidence}){outcome} — {d.rationale[:200]}"

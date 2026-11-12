@@ -226,3 +226,26 @@ def test_unavailable_models_stays_quiet_when_the_listing_fails(monkeypatch):
 
     monkeypatch.setattr(openrouter, "_listed_model_ids", _down)
     assert openrouter.unavailable_models() == {}
+
+    # An empty listing is an outage too, not every role retired at once.
+    monkeypatch.setattr(openrouter, "_listed_model_ids", lambda path: set())
+    assert openrouter.unavailable_models() == {}
+
+
+def test_unavailable_models_still_checks_chat_roles_without_the_embeddings_listing(
+    monkeypatch,
+):
+    """The two listings fail independently: losing the embeddings one must not
+    hide a retired chat model — only the embeddings role goes unchecked."""
+    openrouter = _stub_listings(
+        monkeypatch,
+        {"MODEL_GONE": "vendor/retired", "MODEL_EMBEDDINGS": "embed-small"},
+    )
+
+    def _only_chat(path):
+        if path == "models":
+            return {"vendor/chat-a"}
+        raise httpx.ConnectError("embeddings listing offline")
+
+    monkeypatch.setattr(openrouter, "_listed_model_ids", _only_chat)
+    assert openrouter.unavailable_models() == {"MODEL_GONE": "vendor/retired"}

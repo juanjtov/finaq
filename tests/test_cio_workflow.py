@@ -1176,7 +1176,7 @@ async def test_drill_outcome_lands_on_decision_summary_and_action(
     assert d.drill_run_id == run_id
     assert d.report_url == "https://notion.example/report"
     assert d.degraded == ["fundamentals", "risk"]
-    assert "[DEGRADED — fundamentals, risk failed]" in summary
+    assert "[DEGRADED — failed steps: fundamentals, risk]" in summary
 
     [action] = state_db.recent_cio_actions(ticker="AAA", thesis="curated_a")
     assert action["drill_run_id"] == run_id
@@ -1251,9 +1251,10 @@ async def test_drill_one_keeps_the_run_when_persisting_fails(isolated_db, monkey
     final = await cio_mod._drill_one("AAA", {"slug": "curated_a"})
 
     assert final["run_id"] == "r-2"
-    errors = state_db.recent_errors()
-    assert errors[0]["agent"] == "cio.finish_drill"
-    assert "disk full" in errors[0]["message"]
+    [error] = state_db.errors_for_run("r-2")
+    assert error["agent"] == "report_save" and "disk full" in error["message"]
+    # … and it is what the cycle summary will name as the failed step.
+    assert cio_mod._failed_agents("r-2") == ["report_save"]
 
 
 def test_failed_agents_reads_run_scoped_errors(isolated_db):

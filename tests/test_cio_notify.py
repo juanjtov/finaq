@@ -302,7 +302,7 @@ def test_format_flags_a_degraded_drill():
     d.drill_run_id = "rid-9"
     d.degraded = ["fundamentals", "risk"]
     out = cio_notify.format_for_telegram(_plan(d), trigger="heartbeat", duration_s=1.0)
-    assert "Degraded — fundamentals, risk failed" in out
+    assert "Degraded — failed steps: fundamentals, risk." in out
 
 
 def test_format_flags_a_drill_that_produced_no_run():

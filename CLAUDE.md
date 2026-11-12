@@ -538,7 +538,7 @@ When more than one line of work runs against this project through Claude Code at
 
 ### 16.9 Pull requests — always open one, don't ask
 
-When a change is finished and its checks pass (`pytest -q -m "not integration and not eval"`, plus `ruff check` on the files touched), **commit it on a feature branch, push, and open a PR without asking first** (user decision 2026-11-11). This supersedes any "no auto-commit / auto-push without approval" wording elsewhere for this one step. Still required: never commit to or push `main`, never merge a PR or enable auto-merge unless the user asks, and no AI-attribution trailers on commits or PR bodies.
+When a change is finished and its checks pass (`pytest -q -m "not integration and not eval"`, and no new `ruff check` findings in the files touched), **commit it on a feature branch, push, and open a PR without asking first** (user decision 2026-11-11). This supersedes any "no auto-commit / auto-push without approval" wording elsewhere for this one step. Still required: never commit to or push `main`, never merge a PR or enable auto-merge unless the user asks, and no AI-attribution trailers on commits or PR bodies.
 
 ---
 
