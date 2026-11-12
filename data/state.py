@@ -56,6 +56,7 @@ import contextvars
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import statistics
 import uuid
@@ -2094,6 +2095,118 @@ def node_medians(limit: int = 60, *, db_path: Path | None = None) -> dict[str, f
     if run_durations:
         out["run"] = round(statistics.median(run_durations), 1)
     return out
+
+
+# Reason label for the fallback soft-failure bucket: an LLM-backed node
+# finished inside a completed run with no llm_calls row and nothing logged.
+NO_LLM_CALL = "finished without an LLM call"
+
+
+def _error_signature(first_line: str, ticker: str | None) -> str:
+    """Grouping key for a soft error: its first line with the run's own ticker
+    and whole numbers masked, so the per-ticker and per-position variants of
+    one message ("X has zero chunks…", "line 15 column 5") share a bucket."""
+    sig = first_line
+    if ticker:
+        sig = re.sub(rf"\b{re.escape(ticker)}\b", "<TICKER>", sig)
+    return re.sub(r"\b\d+\b", "#", sig).strip()
+
+
+def soft_failures(limit: int = 60, top: int = 5, *, db_path: Path | None = None) -> dict:
+    """Per-node soft failures over the last `limit` completed graph runs — the
+    Health tab's "systemic soft failures" card: the per-run degraded badge as
+    a per-node trend. A run counts once per (node, signature) bucket for the
+    errors it logged for that node (`errors.agent`), and once under
+    `NO_LLM_CALL` when an LLM-backed node — one with a call somewhere in the
+    window, so pure-Python nodes never qualify — has a finished `node_runs`
+    row but no `llm_calls` row and logged nothing in that run. Rows still
+    `running` are ignored; reads only, and only columns older than v9.
+    Returns {"window": completed runs seen, "rows": top `top` buckets by
+    count} — each row: node, signature, reason (the latest run's raw first
+    line), count, share of the window, tickers (distinct), last_run_id,
+    last_started_at, last_ticker."""
+    empty: dict = {"window": 0, "rows": []}
+    if not Path(db_path or DB_PATH).exists():
+        return empty
+    with _connect(db_path) as conn:
+        runs = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT run_id, ticker, started_at FROM graph_runs
+                 WHERE status = 'completed' ORDER BY started_at DESC LIMIT ?
+                """,
+                (int(limit),),
+            )
+        ]
+        if not runs:
+            return empty
+        ids = [r["run_id"] for r in runs]
+        placeholders = ",".join("?" for _ in ids)
+        ran = {
+            (r["run_id"], r["node"])
+            for r in conn.execute(
+                f"SELECT DISTINCT run_id, node FROM node_runs"
+                f" WHERE run_id IN ({placeholders}) AND status != 'running'",
+                ids,
+            )
+        }
+        called = {
+            (r["run_id"], r["node"])
+            for r in conn.execute(
+                f"SELECT DISTINCT run_id, node FROM llm_calls WHERE run_id IN ({placeholders})",
+                ids,
+            )
+        }
+        errors_by_run: dict[str, list[dict]] = {}
+        for r in conn.execute(
+            f"SELECT run_id, agent, message FROM errors WHERE run_id IN ({placeholders})"
+            f" ORDER BY ts, id",
+            ids,
+        ):
+            errors_by_run.setdefault(r["run_id"], []).append(dict(r))
+
+    llm_nodes = {node for _, node in called}
+    buckets: dict[tuple[str, str], dict] = {}
+    counted: set[tuple[str, str, str]] = set()  # (run_id, node, signature)
+
+    def _hit(run: dict, node: str, signature: str, reason: str) -> None:
+        key = (node, signature)
+        if key not in buckets:  # runs arrive newest first: the first hit is the latest
+            buckets[key] = {
+                "node": node,
+                "signature": signature,
+                "reason": reason,
+                "count": 0,
+                "tickers": set(),
+                "last_run_id": run["run_id"],
+                "last_started_at": run["started_at"],
+                "last_ticker": run["ticker"],
+            }
+        if (run["run_id"], *key) in counted:
+            return
+        counted.add((run["run_id"], *key))
+        buckets[key]["count"] += 1
+        buckets[key]["tickers"].add(run["ticker"])
+
+    for run in runs:
+        logged: set[str] = set()
+        for err in errors_by_run.get(run["run_id"], []):
+            node = str(err["agent"] or "?")
+            lines = [ln.strip() for ln in str(err["message"] or "").splitlines() if ln.strip()]
+            first = lines[0] if lines else ""
+            logged.add(node)
+            _hit(run, node, _error_signature(first, run["ticker"]), first)
+        for node in sorted(llm_nodes - logged):
+            if (run["run_id"], node) in ran and (run["run_id"], node) not in called:
+                _hit(run, node, NO_LLM_CALL, NO_LLM_CALL)
+
+    rows = sorted(buckets.values(), key=lambda b: (-b["count"], b["node"], b["signature"]))
+    window = len(runs)
+    for b in rows:
+        b["tickers"] = len(b["tickers"])
+        b["share"] = round(b["count"] / window, 3)
+    return {"window": window, "rows": rows[: max(0, int(top))]}
 
 
 # --- Schema v9: the snapshot (one shape for live and replay) -----------------
