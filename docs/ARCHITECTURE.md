@@ -1436,6 +1436,24 @@ Curated theses were 3–4 months unedited with no signal anywhere.
   module, not in session state, so every browser tab shares one build per
   change and the fragment body can be driven directly in tests
   (`run_every` is inert under `AppTest`).
+- **Revision (Mission Control v2 Phase 3, 2026-11-11) — the Health tab's
+  "Systemic soft failures" card:** `data.state.soft_failures(limit=60, top=5)`
+  reads the last 60 *completed* `graph_runs` and, per node, counts the runs
+  where that node logged an `errors` row or — for a node that made an LLM
+  call somewhere in the window — finished (`node_runs` not `running`) with
+  no `llm_calls` row and nothing logged. Buckets are (node, signature),
+  where the signature is the error's first line with the run's own ticker
+  and whole numbers masked, so "CAT has zero chunks" and "GVA has zero
+  chunks" are one pattern; each row carries the count, the share of the
+  window, the distinct tickers hit, the latest run's raw line and its
+  `run_id` ("Open →" jumps there through `_jump_to_run`). Why: the per-run
+  **degraded** badge (§11.6) shows each soft failure once, in one row of the
+  runs table, which is how Filings fell back to "ticker not ingested" in 51
+  of 60 runs without anyone noticing; the card turns that badge into a
+  per-node trend, stated in words (systemic ≥ 50 % of the window, recurring
+  ≥ 10 %, otherwise occasional) next to the glyph, never by colour alone.
+  Read-only SQL over columns that predate v9, so it also works on a
+  `state.db` the v9 migration has not touched yet.
 
 ---
 
