@@ -21,6 +21,13 @@ def isolated_db(tmp_path, monkeypatch):
     return db
 
 
+@pytest.fixture(autouse=True)
+def _all_models_listed(monkeypatch):
+    """The dispatcher's preflight asks OpenRouter which models exist; unit
+    tests never do. Preflight tests override this with their own answer."""
+    monkeypatch.setattr(cio_dispatcher, "unavailable_models", lambda: {})
+
+
 @pytest.fixture
 def stub_cycles(monkeypatch):
     """Stub the three cycle entry points so dispatcher tests don't run
@@ -219,3 +226,39 @@ def test_run_attaches_the_notify_span_to_the_latest_cycle(isolated_db, stub_cycl
     [notify] = state_db.spans_for("cio_run", rid)
     assert (notify["name"], notify["status"]) == ("notify", "completed")
     assert notify["meta"] == {"telegram_sent": True, "notion": False}
+
+
+# --- Model preflight (2026-11-11) -------------------------------------------
+
+
+def test_preflight_alerts_and_the_cycle_still_runs(
+    isolated_db, stub_cycles, stub_notify, monkeypatch
+):
+    """A configured model OpenRouter no longer lists → one Telegram alert +
+    an errors row, and the cycle proceeds (its drills get flagged degraded)."""
+    from cio import notify as cio_notify
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        cio_dispatcher, "unavailable_models", lambda: {"MODEL_RISK": "vendor/gone"}
+    )
+    monkeypatch.setattr(cio_notify, "send_telegram_message", lambda text, **kw: sent.append(text))
+
+    assert cio_dispatcher.main(["--mode", "heartbeat"]) == 0
+
+    assert stub_cycles["calls"] == ["heartbeat"]
+    assert len(sent) == 1 and "MODEL_RISK" in sent[0] and "vendor/gone" in sent[0]
+    [err] = state_db.recent_errors()
+    assert err["agent"] == "cio.preflight" and "MODEL_RISK=vendor/gone" in err["message"]
+
+
+def test_preflight_is_silent_when_every_model_is_listed(
+    isolated_db, stub_cycles, stub_notify, monkeypatch
+):
+    from cio import notify as cio_notify
+
+    monkeypatch.setattr(
+        cio_notify, "send_telegram_message", lambda *a, **k: pytest.fail("no alert expected")
+    )
+    assert cio_dispatcher.main(["--mode", "heartbeat"]) == 0
+    assert state_db.recent_errors() == []

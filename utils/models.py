@@ -35,6 +35,16 @@ MODEL_AGENT_QA: str = _required("MODEL_AGENT_QA")
 MODEL_EMBEDDINGS: str = _required("MODEL_EMBEDDINGS")
 
 
+def configured() -> dict[str, str]:
+    """Every `MODEL_*` role and the model id it resolves to — the input to
+    the availability preflight (`utils.openrouter.unavailable_models`)."""
+    return {
+        name: value
+        for name, value in globals().items()
+        if name.startswith("MODEL_") and isinstance(value, str)
+    }
+
+
 # --- Pricing for telemetry / cost tracking --------------------------------
 #
 # Maps OpenRouter model id → (prompt $/1M tokens, completion $/1M tokens).
@@ -62,6 +72,7 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "openai/gpt-4o-mini":          (0.15,  0.60),
     # DeepSeek
     "deepseek/deepseek-r1":        (0.70,  2.50),  # cheaper but quirky; see ARCHITECTURE §12
+    "deepseek/deepseek-r1-0528":   (0.50,  2.15),  # 2026-11-11 rates; replaced the retired id above
     # Google
     "google/gemini-2.5-flash":     (0.075, 0.30),
     # Embeddings billed differently — nominal placeholder so dashboards

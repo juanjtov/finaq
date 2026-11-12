@@ -102,6 +102,13 @@ class CIODecision(BaseModel):
     # stamp their own value. Persisted to `cio_actions.source` so the
     # yo-yo guard can count LLM dismissals only.
     source: Literal["llm", "gate", "budget_cap", "fallback"] = "llm"
+    # What an executed drill produced — set by the orchestrator, never by
+    # the LLM. `drill_run_id` is None when the drill crashed. `degraded`
+    # names the agents that failed or logged a soft error during the run:
+    # the report exists but an analyst behind it produced nothing.
+    drill_run_id: str | None = None
+    report_url: str | None = None
+    degraded: list[str] = Field(default_factory=list)
 
 
 class Plan(BaseModel):
@@ -714,6 +721,8 @@ def decide(
     # the yo-yo guard trusts `source`, so be strict here.
     decision.ticker = ticker.upper()
     decision.source = "llm"
+    # Drill outcomes are the orchestrator's to fill in, not the model's.
+    decision.drill_run_id, decision.report_url, decision.degraded = None, None, []
     if thesis_slug and not decision.thesis:
         decision.thesis = thesis_slug
 

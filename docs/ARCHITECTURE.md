@@ -1587,6 +1587,18 @@ and prefixes with `[budget cap]`.
 - **Backfill:** `scripts.index_existing_reports` walks
   `data_cache/demos/*.json`, splits each report on H2 headers, and
   upserts. Idempotent — safe to re-run.
+- **Revised because (2026-11-11):** the backfill was the *only* writer.
+  Nothing indexed a report when a drill finished, and the CIO's own
+  drills (`cio.cio._drill_one`) skipped the save + Notion steps the
+  dashboard runner performs — 122 CIO drills between September and
+  November left no saved report, and the planner's memory (past-report
+  excerpts, the watchlist hit-list) stopped at the last dashboard run.
+  Every real drill now goes through one step, `ui._runner.finish_drill`:
+  eval sidecar → Notion → saved state → `index_one`. Chunk ids keep the
+  filename stem (`fetch_reports` lists a ticker's chunks by the
+  `{TICKER}__` id prefix); metadata `run_id` is the real
+  `graph_runs.run_id`, because the planner echoes it back as
+  `reuse_run_id` and that has to deep-link to a run that exists.
 
 ### 12.6 Telemetry: `cio_runs` + `cio_actions` tables
 
@@ -1636,6 +1648,24 @@ and prefixes with `[budget cap]`.
 - **Notion mirror:** Soft-fail — writes to the existing Notion Alerts
   DB if `NOTION_DB_ALERTS` is set, no-ops otherwise. The cio_runs row
   in state.db is canonical.
+- **Revised because (2026-11-11):** the summary reported activity only.
+  A crashed drill and a drill whose analysts had failed both read as
+  "Drilled", and the drill link carried no run id. `_execute_plan` now
+  stamps each drill's outcome on its `CIODecision` — `drill_run_id`,
+  `report_url` (the Notion page), `degraded` (agents with a run-scoped
+  `errors` row or a failed node: the same derivation Mission Control
+  uses). Telegram and the stored summary flag failed and degraded
+  drills and link the report.
+- **Model preflight (2026-11-11):** before every cycle
+  `cio.dispatcher._preflight` checks each `MODEL_*` role against
+  OpenRouter's public model listings
+  (`utils.openrouter.unavailable_models`) and sends a Telegram alert +
+  an `errors` row when one is gone. **Why:** a model its provider
+  retires fails every call that uses it, yet the run still closes as
+  completed — two worker roles ran dead from 2026-10-23 to 2026-11-11
+  and nothing said so. Alert-and-continue rather than abort (blocking
+  drills is deferred, see POSTPONED §2); a failed listing fetch reads
+  as "unknown" and raises no alert.
 
 ### 12.9 Curated vs ad-hoc theses + lifecycle primitives
 

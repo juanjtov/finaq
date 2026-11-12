@@ -177,3 +177,52 @@ def test_humanize_amount_precision_argument():
 
     assert humanize_amount(215_938_000_000, precision=0) == "$216B"
     assert humanize_amount(215_938_000_000, precision=3) == "$215.938B"
+
+
+# --- Model availability preflight (2026-11-11) ------------------------------
+
+
+def _stub_listings(monkeypatch, configured: dict[str, str]):
+    from utils import models, openrouter
+
+    listings = {
+        "models": {"vendor/chat-a", "vendor/chat-b:free"},
+        "embeddings/models": {"vendor/embed-small"},
+    }
+    monkeypatch.setattr(openrouter, "_listed_model_ids", lambda path: listings[path])
+    monkeypatch.setattr(models, "configured", lambda: configured)
+    return openrouter
+
+
+def test_models_configured_lists_every_role_and_nothing_else():
+    from utils import models
+
+    configured = models.configured()
+    assert configured["MODEL_CIO"] == models.MODEL_CIO
+    assert "MODEL_PRICING" not in configured  # the price table is not a role
+    assert all(isinstance(v, str) for v in configured.values())
+
+
+def test_unavailable_models_flags_only_what_is_gone(monkeypatch):
+    openrouter = _stub_listings(
+        monkeypatch,
+        {
+            "MODEL_A": "vendor/chat-a",
+            "MODEL_FREE": "vendor/chat-b:free",  # listed under its own id
+            "MODEL_VARIANT": "vendor/chat-a:nitro",  # routing variant of a listed id
+            "MODEL_EMBEDDINGS": "embed-small",  # provider prefix omitted
+            "MODEL_GONE": "vendor/retired",
+        },
+    )
+    assert openrouter.unavailable_models() == {"MODEL_GONE": "vendor/retired"}
+
+
+def test_unavailable_models_stays_quiet_when_the_listing_fails(monkeypatch):
+    """No listing → no verdict. A network blip must not page the user."""
+    openrouter = _stub_listings(monkeypatch, {"MODEL_GONE": "vendor/retired"})
+
+    def _down(path):
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(openrouter, "_listed_model_ids", _down)
+    assert openrouter.unavailable_models() == {}

@@ -129,9 +129,8 @@ def _worker(
     and that coroutine runs inside this thread's `asyncio.run`. So all
     `_safe_node` writes still see the right run_id.
 
-    After the drill-in completes, optionally fire the per-drill-in RAG
-    eval sidecar (utils.live_eval.evaluate_filings_retrieval). Gated by
-    `EVAL_LIVE_DRILL_INS=true` env var so the cost is opt-in.
+    After the drill-in completes, `finish_drill` persists the result
+    (eval sidecar, Notion, saved state, reports index).
     """
     try:
         from agents import build_graph, invoke_with_telemetry
@@ -152,22 +151,47 @@ def _worker(
 
         final = asyncio.run(_run())
         record["run_id"] = final.get("run_id")
-
-        # Sidecar 1: per-drill-in RAG eval. Opt-in via EVAL_LIVE_DRILL_INS.
-        _maybe_run_live_eval(final, thesis)
-
-        # Sidecar 2: write report + watchlist to Notion. No-op when
-        # NOTION_API_KEY isn't set. Best-effort — never blocks the drill-in.
-        # Mutates `final` in place to add `notion_report_url` so downstream
-        # consumers (Telegram /drill reply, Mission Control) can link out.
-        _maybe_write_to_notion(final, thesis)
-
-        # Persist the cached demo AFTER sidecars so the saved JSON contains
-        # any URLs / sidecar additions. The dashboard load path picks it up.
-        _save_run_to_demo_dir(ticker.upper(), thesis_slug, final)
+        finish_drill(final, thesis, thesis_slug)
     except Exception as e:
         logger.error(f"[runner] drill-in failed for {ticker} × {thesis_slug}: {e}")
         record["error"] = str(e)
+
+
+def finish_drill(final: dict[str, Any], thesis: dict, thesis_slug: str) -> Path:
+    """Everything a drill-in owes once the graph has returned. Returns the
+    saved state's path.
+
+    Every caller that runs a real drill goes through here — the dashboard and
+    Telegram via `_worker`, the CIO via `cio.cio._drill_one`. Until 2026-11-11
+    the CIO skipped it: its reports were never saved, never reached Notion, and
+    never entered the reports index, so the planner's memory of past drill-ins
+    stopped at the last dashboard run (ARCHITECTURE §12).
+
+    Order matters: Notion stamps `notion_report_url` onto `final`, the save
+    writes that to disk, and the index is built from the saved file.
+    """
+    # Per-drill-in RAG eval. Opt-in via EVAL_LIVE_DRILL_INS.
+    _maybe_run_live_eval(final, thesis)
+    # Report + watchlist to Notion. No-op when NOTION_API_KEY isn't set.
+    _maybe_write_to_notion(final, thesis)
+    path = _save_run_to_demo_dir(
+        str(final.get("ticker") or "?").upper(), thesis_slug, final
+    )
+    _index_report(path)
+    return path
+
+
+def _index_report(path: Path) -> None:
+    """Add the saved report to the reports index — the CIO planner's memory of
+    past drill-ins and their watchlists. Soft-fail: an embedding or Pinecone
+    outage must not turn a finished drill into a failed one; the backfill
+    (`python -m scripts.index_existing_reports`) picks up what was missed."""
+    try:
+        from scripts.index_existing_reports import index_one
+
+        index_one(path)
+    except Exception as e:
+        logger.warning(f"[runner] report indexing failed for {path.name}: {e}")
 
 
 def _maybe_write_to_notion(final: dict[str, Any], thesis: dict) -> None:
