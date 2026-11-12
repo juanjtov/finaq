@@ -676,10 +676,27 @@ def _jump_to_run(run_id: str) -> None:
     st.rerun()
 
 
+def _run_label(r: dict) -> str:
+    """Picker label: `ticker × thesis · status · started · id8`."""
+    ts = (r.get("started_at") or "")[:16].replace("T", " ")
+    return (
+        f"{r.get('ticker', '?')} × {r.get('thesis', '?')} · "
+        f"{r.get('status', '?')} · {ts} · {(r.get('run_id') or '')[:8]}"
+    )
+
+
 def render_runs_tab() -> None:
     st.markdown(_RI_CSS, unsafe_allow_html=True)
     # Not cached: the picker must reflect a run that just landed.
     runs = state_db.recent_runs(limit=100)
+    # A run opened from beyond that window (see the unmatched-preselect branch
+    # below) stays at the top of the picker for the session, so a rerun — any
+    # widget interaction — doesn't drop it and snap back to the newest run.
+    pinned = st.session_state.get("mc_pinned_run")
+    if pinned and all(r.get("run_id") != pinned for r in runs):
+        extra = state_db.get_graph_run(pinned)
+        if extra:
+            runs.insert(0, extra)
     if not runs:
         st.warning(
             "No graph runs in `data_cache/state.db` yet. Run a drill-in from "
@@ -689,13 +706,7 @@ def render_runs_tab() -> None:
 
     # Run picker — labels show `ticker × thesis · status · started`. Newest
     # first so the most recent run is the default.
-    labels: list[str] = []
-    for r in runs:
-        ts = (r.get("started_at") or "")[:16].replace("T", " ")
-        labels.append(
-            f"{r.get('ticker', '?')} × {r.get('thesis', '?')} · "
-            f"{r.get('status', '?')} · {ts} · {(r.get('run_id') or '')[:8]}"
-        )
+    labels = [_run_label(r) for r in runs]
 
     # A stored selection may reference a run that scrolled out of the
     # 100-run window — drop it so the selectbox doesn't raise.
@@ -718,6 +729,17 @@ def render_runs_tab() -> None:
                 st.session_state["run_select"] = lbl
                 matched = True
                 break
+        if not matched:
+            # Health's soft-failures card reaches the 60 newest *completed*
+            # runs and a deep link any id, both of which can lie beyond the
+            # newest 100 of any status: fetch the run on its own and pin it.
+            extra = state_db.get_graph_run(str(preselect))
+            if extra:
+                runs.insert(0, extra)
+                labels.insert(0, _run_label(extra))
+                st.session_state["run_select"] = labels[0]
+                st.session_state["mc_pinned_run"] = extra["run_id"]
+                matched = True
         if not matched:
             st.warning(
                 f"Run `{str(preselect)[:8]}…` isn't among the newest "

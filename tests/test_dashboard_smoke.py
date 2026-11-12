@@ -784,6 +784,44 @@ def test_runs_tab_preselects_run_from_session_state(tmp_path, monkeypatch):
     )
 
 
+def test_runs_tab_fetches_a_preselected_run_beyond_the_picker_window(tmp_path, monkeypatch):
+    """The soft-failures card's "Open →" names one of the 60 newest *completed*
+    runs, which can lie beyond the picker's newest-100-of-any-status list (a
+    retry storm of failed runs). The Runs tab must fetch that run on its own,
+    open on it without the "isn't among the newest" warning, and keep it in
+    the picker across reruns."""
+    import time as _time
+
+    from data import state as state_db
+
+    db = tmp_path / "ri4.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    older = state_db.start_graph_run("NU", "nu", db_path=db)
+    state_db.finish_graph_run(older, "completed", db_path=db)
+    _time.sleep(0.02)  # distinct started_at so the window excludes `older`
+    for _ in range(100):
+        rid = state_db.start_graph_run("NKE", "nke", db_path=db)
+        state_db.finish_graph_run(rid, "failed", error="boom", db_path=db)
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.session_state["inspect_run_id"] = older
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    sel = next((sb for sb in at.selectbox if sb.label == "Run"), None)
+    assert sel is not None
+    assert older[:8] in (sel.value or ""), f"expected {older[:8]}, got {sel.value!r}"
+    assert len(sel.options) == 101, "the fetched run joins the 100-run picker"
+    assert not any("isn't among the newest" in (w.value or "") for w in at.warning)
+    # A rerun (any widget interaction) keeps the fetched run selected.
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    sel = next((sb for sb in at.selectbox if sb.label == "Run"), None)
+    assert sel is not None
+    assert older[:8] in (sel.value or ""), f"rerun lost the pinned run: {sel.value!r}"
+
+
 def test_runs_tab_shows_cio_trigger_line(tmp_path, monkeypatch):
     """A run drilled by the CIO must show the 'triggered by CIO' backlink
     in the header; the helper is unit-tested directly."""
