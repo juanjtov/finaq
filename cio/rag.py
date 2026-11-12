@@ -1,6 +1,7 @@
 """Retrieval over the `synthesis_reports` corpus (Pinecone reports index).
 
-The corpus is populated by `scripts.index_existing_reports` (backfill of
+The corpus is populated as each drill-in finishes (`ui._runner.finish_drill`)
+and by `scripts.index_existing_reports` (backfill of
 `data_cache/demos/*.json`). Each document is one section of a Synthesis
 report (`## What this means`, `## Bull case`, ...) so the planner can
 retrieve at the granularity of "the bull case from the prior NVDA / ai_cake

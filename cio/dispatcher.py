@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ from cio import cio as cio_orchestrator
 from cio import notify as cio_notify
 from data import state as state_db
 from utils import logger
+from utils.openrouter import unavailable_models
 
 CATCHUP_THRESHOLD_HOURS = 8.0
 """If `last_successful_cio_run_at` is older than this, `--mode auto`
@@ -83,6 +85,27 @@ def _resolve_auto_mode() -> str:
     return "heartbeat"
 
 
+def _preflight() -> None:
+    """Alert when a configured model is gone, before the cycle spends on it.
+
+    A retired model fails every call that uses it, yet the drill still
+    closes as completed — so a dead analyst is otherwise silent. We alert
+    and carry on rather than abort: decisions that don't touch the dead
+    role are still worth making, and each drill that does is flagged
+    degraded in the cycle summary. Repeats every cycle until fixed.
+    """
+    missing = unavailable_models()
+    if not missing:
+        return
+    detail = ", ".join(f"{var}={model}" for var, model in sorted(missing.items()))
+    logger.error(f"[cio.dispatcher] models no longer on OpenRouter: {detail}")
+    with contextlib.suppress(Exception):
+        state_db.record_error(
+            agent="cio.preflight", message=f"models no longer on OpenRouter: {detail}"
+        )
+    cio_notify.send_telegram_message(cio_notify.format_model_alert(missing))
+
+
 async def _run(mode: str, *, ticker: str | None, thesis: str | None) -> int:
     """Execute one cycle. Returns the process exit code.
 
@@ -90,6 +113,8 @@ async def _run(mode: str, *, ticker: str | None, thesis: str | None) -> int:
     """
     if mode == "auto":
         mode = _resolve_auto_mode()
+
+    _preflight()
 
     # Schema v9 — close rows a killed process left `running` (graph runs,
     # nodes, LLM calls, spans, cycles) before this cycle adds its own.

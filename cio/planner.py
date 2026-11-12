@@ -75,6 +75,8 @@ _WORD_RE_LOWER = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 CONFIDENCE_VALUES = ("low", "medium", "high")
 ACTION_VALUES = ("drill", "reuse", "dismiss")
 SOURCE_VALUES = ("llm", "gate", "budget_cap", "fallback")
+# `CIODecision` fields only `cio.cio._execute_plan` may set.
+_ORCHESTRATOR_FIELDS = ("drill_run_id", "report_url", "degraded")
 
 
 # --- Pydantic schemas ------------------------------------------------------
@@ -102,6 +104,13 @@ class CIODecision(BaseModel):
     # stamp their own value. Persisted to `cio_actions.source` so the
     # yo-yo guard can count LLM dismissals only.
     source: Literal["llm", "gate", "budget_cap", "fallback"] = "llm"
+    # What an executed drill produced — set by the orchestrator, never by
+    # the LLM. `drill_run_id` is None when the drill crashed. `degraded`
+    # names the agents that failed or logged a soft error during the run:
+    # the report exists but an analyst behind it produced nothing.
+    drill_run_id: str | None = None
+    report_url: str | None = None
+    degraded: list[str] = Field(default_factory=list)
 
 
 class Plan(BaseModel):
@@ -545,6 +554,12 @@ def _parse_decision(raw: str) -> tuple[CIODecision | None, str | None]:
             obj = json.loads(snippet)
         except json.JSONDecodeError as e:
             return None, f"json parse failed: {e}"
+    # Drill outcomes are the orchestrator's to fill in. Dropped before
+    # validation so a model echoing them from a past action can neither
+    # set them nor get an otherwise valid decision rejected.
+    if isinstance(obj, dict):
+        for key in _ORCHESTRATOR_FIELDS:
+            obj.pop(key, None)
     try:
         return CIODecision.model_validate(obj), None
     except ValidationError as e:

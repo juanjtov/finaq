@@ -467,6 +467,7 @@ async def run(state: FinaqState) -> dict:
         "report": out.report,
         "synthesis_confidence": out.confidence,
         "synthesis_verdict": out.verdict,
+        "synthesis_errors": out.errors,
         "gaps": out.gaps,
         "watchlist": out.watchlist,
         "messages": [

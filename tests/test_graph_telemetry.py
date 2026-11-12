@@ -336,6 +336,31 @@ async def test_soft_failure_in_agent_payload_is_recorded_in_errors_table(
     )
 
 
+@pytest.mark.asyncio
+async def test_synthesis_fallback_is_recorded_in_errors_table(monkeypatch, ai_cake):
+    """Synthesis returns flat keys, not a payload dict, so its soft failure
+    (LLM call failed → placeholder report) used to leave no trace: the node
+    closed `completed` and the run read as clean. It now travels as
+    `synthesis_errors` and lands in the errors table against the run."""
+    from agents import synthesis as synthesis_mod
+
+    async def synthesis_fell_back(state):
+        return {
+            "report": "# placeholder",
+            "synthesis_confidence": "low",
+            "synthesis_errors": ["llm: model gone"],
+            "messages": [{"node": "synthesis", "event": "completed"}],
+        }
+
+    monkeypatch.setattr(synthesis_mod, "run", synthesis_fell_back)
+
+    final = await invoke_with_telemetry(build_graph(), {"ticker": "ZZZZ", "thesis": ai_cake})
+
+    assert final["synthesis_errors"] == ["llm: model gone"]
+    errs = [e for e in state_db.errors_for_run(final["run_id"]) if e["agent"] == "synthesis"]
+    assert [e["message"] for e in errs] == ["llm: model gone"]
+
+
 # --- Schema v9 — two-phase node rows + source ---------------------------------
 
 

@@ -73,13 +73,15 @@ def _safe_node(name: str, run_fn: NodeFn) -> NodeFn:
             # case: Filings returns {filings: {errors: ["no chunks retrieved"]}}
             # when the filings index is empty for the ticker — completes without
             # raising, so was previously invisible in Mission Control.
+            # Synthesis returns flat keys, so its soft failures arrive as
+            # `synthesis_errors` rather than inside a payload dict.
             try:
-                for value in (result or {}).values():
-                    if not isinstance(value, dict):
-                        continue
-                    for err in value.get("errors") or []:
-                        if err:
-                            state_db.record_error(name, str(err), run_id=run_id)
+                payloads = [v for v in (result or {}).values() if isinstance(v, dict)]
+                soft = [err for p in payloads for err in p.get("errors") or []]
+                soft += (result or {}).get("synthesis_errors") or []
+                for err in soft:
+                    if err:
+                        state_db.record_error(name, str(err), run_id=run_id)
             except Exception as scan_exc:
                 logger.warning(
                     f"[telemetry] payload-error scan failed for {name}: {scan_exc}"

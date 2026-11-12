@@ -117,6 +117,25 @@ def test_parse_decision_strict_json():
     assert d.action == "reuse" and d.confidence == "high"
 
 
+def test_parse_decision_drops_orchestrator_fields():
+    """Drill outcomes are set by the orchestrator only. A model echoing them
+    (past actions in its prompt carry these keys) must neither set them nor
+    get a valid decision rejected for a malformed value."""
+    raw = json.dumps(
+        {
+            "action": "drill",
+            "ticker": "NVDA",
+            "rationale": "new 10-Q",
+            "drill_run_id": "made-up",
+            "report_url": "https://example.com/made-up",
+            "degraded": None,
+        }
+    )
+    d, err = planner._parse_decision(raw)
+    assert err is None and d is not None
+    assert (d.drill_run_id, d.report_url, d.degraded) == (None, None, [])
+
+
 def test_parse_decision_extracts_from_fenced_response():
     """LLMs sometimes wrap in ```json fences. Parser falls back to regex."""
     raw = (

@@ -113,13 +113,25 @@ def format_for_telegram(plan: Plan, *, trigger: str, duration_s: float) -> str:
     if drills:
         lines.append("📈 <b>Drilled</b>")
         for d in drills:
-            url = _drill_dashboard_url(d.ticker, d.thesis, None)
+            url = _drill_dashboard_url(d.ticker, d.thesis, d.drill_run_id)
             thesis_part = f" / <code>{_h(d.thesis)}</code>" if d.thesis else ""
             rationale = _h((d.rationale or "")[:MAX_RATIONALE_CHARS])
+            # The Notion page is the one link that opens away from the
+            # machine the dashboard runs on.
+            report_part = (
+                f" · <a href=\"{_h(d.report_url)}\">report</a>" if d.report_url else ""
+            )
             lines.append(
                 f"• <a href=\"{url}\"><b>{_h(d.ticker)}</b></a>{thesis_part} "
-                f"<i>({_h(d.confidence)})</i> — {rationale}"
+                f"<i>({_h(d.confidence)})</i>{report_part} — {rationale}"
             )
+            if not d.drill_run_id:
+                lines.append("  ❌ <i>Drill failed — no report was produced.</i>")
+            elif d.degraded:
+                lines.append(
+                    f"  ⚠️ <i>Degraded — failed steps: {_h(', '.join(d.degraded))}. "
+                    f"Check the run before relying on it.</i>"
+                )
         lines.append("")
 
     if reuses:
@@ -154,6 +166,21 @@ def format_for_telegram(plan: Plan, *, trigger: str, duration_s: float) -> str:
     if len(out) > MAX_TELEGRAM_MSG:
         out = out[: MAX_TELEGRAM_MSG - 80].rstrip() + "\n\n<i>(message trimmed)</i>"
     return out
+
+
+def format_model_alert(missing: dict[str, str]) -> str:
+    """HTML alert for the dispatcher's preflight: `{env var: model id}` of
+    configured roles OpenRouter no longer serves."""
+    rows = "\n".join(
+        f"• <code>{_h(var)}</code> → <code>{_h(model)}</code>"
+        for var, model in sorted(missing.items())
+    )
+    return (
+        "🚨 <b>CIO preflight — model unavailable</b>\n"
+        f"OpenRouter no longer lists:\n{rows}\n"
+        "Every call for these roles will fail and drills that use them will "
+        "be degraded. Set a replacement in <code>.env</code>."
+    )
 
 
 # --- Telegram send (direct REST API) -------------------------------------

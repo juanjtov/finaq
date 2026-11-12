@@ -71,8 +71,8 @@ def _isolated_state_db(tmp_path_factory, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_real_vector_store_or_edgar_in_unit_tests(request, monkeypatch):
-    """Unit tests must not touch Pinecone, the embeddings API, or the live
-    EDGAR index. Opening an index or embedding text fails loudly so a test
+    """Unit tests must not touch Pinecone, the embeddings API, OpenRouter's
+    model listing, or the live EDGAR index. Opening an index or embedding text fails loudly so a test
     that needs them stubs `data.vectors._index` / `embed_texts` itself.
 
     The ingest-status probes are stubbed to "ingested, nothing stale" so the
@@ -88,6 +88,7 @@ def _no_real_vector_store_or_edgar_in_unit_tests(request, monkeypatch):
         return
     from data import freshness as freshness_mod
     from data import vectors as vectors_mod
+    from utils import openrouter as openrouter_mod
 
     def _no_pinecone(*args, **kwargs):
         raise AssertionError("unit tests must not open a Pinecone index — stub data.vectors._index")
@@ -95,8 +96,17 @@ def _no_real_vector_store_or_edgar_in_unit_tests(request, monkeypatch):
     def _no_embeddings(*args, **kwargs):
         raise AssertionError("unit tests must not embed text — stub data.vectors.embed_texts")
 
+    def _no_model_listing(*args, **kwargs):
+        raise AssertionError(
+            "unit tests must not fetch OpenRouter's model listing — "
+            "stub utils.openrouter._listed_model_ids"
+        )
+
     monkeypatch.setattr(vectors_mod, "_index", _no_pinecone)
     monkeypatch.setattr(vectors_mod, "embed_texts", _no_embeddings)
+    # The CIO dispatcher's model preflight: with the listing unreachable it
+    # reports nothing missing, so no test can send a real Telegram alert.
+    monkeypatch.setattr(openrouter_mod, "_listed_model_ids", _no_model_listing)
     if not request.node.get_closest_marker("real_probes"):
         monkeypatch.setattr(vectors_mod, "has_ticker", lambda ticker: True)
         monkeypatch.setattr(vectors_mod, "last_filings_by_type", lambda ticker: {})

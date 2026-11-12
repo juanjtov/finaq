@@ -19,10 +19,15 @@ Filename convention:
   `{TICKER}__{thesis_slug}__{hash}.json`  (newer drill-ins)
   `{TICKER}__{thesis_slug}.json`         (older / single-run demos)
 
-Each chunk's `id` is `f"{run_id}-{section_slug}"` where `run_id` is the
+Each chunk's `id` is `f"{stem}-{section_slug}"` where `stem` is the
 filename stem (always unique within `data_cache/demos/`). Metadata holds
-ticker, thesis, section, date, confidence, risk_level — the fields the
-planner needs for its `where`-clause prefilter.
+run_id (the real `graph_runs.run_id`), ticker, thesis, section, date,
+confidence, risk_level — the fields the planner needs for its
+`where`-clause prefilter.
+
+New drill-ins are indexed as they finish (`ui._runner.finish_drill` calls
+`index_one`); this CLI is the backfill for anything that predates that or
+was missed during an outage.
 
 Usage:
   python -m scripts.index_existing_reports        # backfill everything
@@ -168,8 +173,13 @@ def index_one(path: Path, *, dry_run: bool = False) -> int:
         logger.info(f"[index_existing_reports] {path.name}: empty report, skipping")
         return 0
 
-    run_id = path.stem
-    ticker, thesis = _parse_report_filename(path.stem)
+    # Chunk ids keep the filename stem — `fetch_reports` lists a ticker's
+    # chunks by the `{TICKER}__` id prefix. The METADATA run_id is the real
+    # `graph_runs.run_id` when the saved state has one: the planner hands it
+    # back as `reuse_run_id`, which must deep-link to a run that exists.
+    stem = path.stem
+    run_id = str(data.get("run_id") or stem)
+    ticker, thesis = _parse_report_filename(stem)
     file_mtime = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
 
     sections = _split_report_into_sections(report)
@@ -183,7 +193,7 @@ def index_one(path: Path, *, dry_run: bool = False) -> int:
         if not body.strip():
             continue
         section_slug = _slugify_section(title)
-        ids.append(f"{run_id}-{section_slug}")
+        ids.append(f"{stem}-{section_slug}")
         docs.append(body)
         metas.append(
             _build_metadata(

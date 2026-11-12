@@ -282,3 +282,38 @@ def test_format_lists_overdue_theses_when_present():
 def test_format_omits_overdue_line_when_none():
     out = cio_notify.format_for_telegram(_plan(_dismiss("NVDA")), trigger="heartbeat", duration_s=1.0)
     assert "overdue" not in out.lower()
+
+
+# --- Drill outcome in the Telegram summary (2026-11-11) ---------------------
+
+
+def test_format_drill_links_the_run_and_the_report():
+    d = _drill("NVDA")
+    d.drill_run_id = "rid-9"
+    d.report_url = "https://notion.example/nvda"
+    out = cio_notify.format_for_telegram(_plan(d), trigger="heartbeat", duration_s=1.0)
+    assert "run_id=rid-9" in out
+    assert '<a href="https://notion.example/nvda">report</a>' in out
+    assert "Degraded" not in out and "Drill failed" not in out
+
+
+def test_format_flags_a_degraded_drill():
+    d = _drill("NVDA")
+    d.drill_run_id = "rid-9"
+    d.degraded = ["fundamentals", "risk"]
+    out = cio_notify.format_for_telegram(_plan(d), trigger="heartbeat", duration_s=1.0)
+    assert "Degraded — failed steps: fundamentals, risk." in out
+
+
+def test_format_flags_a_drill_that_produced_no_run():
+    out = cio_notify.format_for_telegram(
+        _plan(_drill("NVDA")), trigger="heartbeat", duration_s=1.0
+    )
+    assert "Drill failed — no report was produced" in out
+
+
+def test_model_alert_names_each_role_and_model():
+    out = cio_notify.format_model_alert({"MODEL_RISK": "vendor/gone", "MODEL_NEWS": "v/<x>"})
+    assert "<code>MODEL_RISK</code> → <code>vendor/gone</code>" in out
+    assert "v/&lt;x&gt;" in out  # escaped
+    assert out.index("MODEL_NEWS") < out.index("MODEL_RISK")  # sorted

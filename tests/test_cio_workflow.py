@@ -160,7 +160,7 @@ async def test_heartbeat_decides_drills_records(
 
     async def _fake_drill(ticker, thesis):
         drilled.append(ticker)
-        return f"fake-run-{ticker}"
+        return {"run_id": f"fake-run-{ticker}"}
 
     monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
 
@@ -212,7 +212,7 @@ async def test_heartbeat_drill_budget_caps_at_three(
 
     async def _fake_drill(ticker, thesis):
         drilled.append(ticker)
-        return f"fake-run-{ticker}"
+        return {"run_id": f"fake-run-{ticker}"}
 
     monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
 
@@ -283,7 +283,7 @@ async def test_catchup_writes_catchup_trigger(
     monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
 
     async def _fake_drill(ticker, thesis):
-        return f"fake-{ticker}"
+        return {"run_id": f"fake-{ticker}"}
 
     monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
 
@@ -310,7 +310,7 @@ async def test_on_demand_single_pair(isolated_db, fake_thesis_dir, stub_news, mo
     monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
 
     async def _fake_drill(ticker, thesis):
-        return "fake-run"
+        return {"run_id": "fake-run"}
 
     monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
 
@@ -362,7 +362,7 @@ async def test_on_demand_exempt_from_default_drill_budget(
 
     async def _fake_drill(ticker, thesis):
         drilled.append(ticker)
-        return f"fake-{ticker}"
+        return {"run_id": f"fake-{ticker}"}
 
     monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
 
@@ -419,7 +419,7 @@ async def test_cycle_summary_lists_each_decision(
     monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
 
     async def _fake_drill(ticker, thesis):
-        return f"r-{ticker}"
+        return {"run_id": f"r-{ticker}"}
 
     monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
 
@@ -515,7 +515,7 @@ async def test_budget_cap_demotes_to_reuse_when_prior_drill_exists(
     monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
 
     async def _fake_drill(ticker, thesis):
-        return f"new-{ticker}"
+        return {"run_id": f"new-{ticker}"}
 
     monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
 
@@ -569,7 +569,7 @@ async def test_cycle_aggregates_per_action_cost_onto_cio_runs(
     monkeypatch.setattr(cio_planner, "decide", _stub)
 
     async def _fake_drill(ticker, thesis):
-        return f"r-{ticker}"
+        return {"run_id": f"r-{ticker}"}
 
     monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
 
@@ -799,7 +799,7 @@ async def test_drill_on_stale_non_anchor_ingests_right_before_drill(
 
     async def _drill(ticker, thesis):
         events.append(("drill", ticker))
-        return f"run-{ticker}"
+        return {"run_id": f"run-{ticker}"}
 
     monkeypatch.setattr(cio_mod, "_auto_ingest", _ingest)
     monkeypatch.setattr(cio_mod, "_drill_one", _drill)
@@ -898,7 +898,7 @@ async def test_cycle_writes_spans_in_step_order_with_drill_lineage(
     monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
 
     async def _fake_drill(ticker, thesis):
-        return f"fake-run-{ticker}"
+        return {"run_id": f"fake-run-{ticker}"}
 
     monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
     monkeypatch.setattr(
@@ -968,7 +968,7 @@ async def test_dispatcher_cycle_ends_with_a_notify_span(
     monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
 
     async def _fake_drill(ticker, thesis):
-        return f"fake-run-{ticker}"
+        return {"run_id": f"fake-run-{ticker}"}
 
     monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
     monkeypatch.setattr(cio_mod, "_curated_candidates", lambda: [("AAA", "curated_a")])
@@ -1143,3 +1143,123 @@ async def test_span_telemetry_failure_never_breaks_the_cycle(
     [cycle] = state_db.recent_cio_runs()
     assert cycle["status"] == "completed"
     assert state_db.spans_for("cio_run", cycle["run_id"]) == []
+
+
+# --- Drill outcome: saved report, report link, degraded agents -------------
+
+
+@pytest.mark.asyncio
+async def test_drill_outcome_lands_on_decision_summary_and_action(
+    isolated_db, fake_thesis_dir, stub_news, monkeypatch,
+):
+    """The run id, the report link and the agents that failed inside the
+    drill reach the decision (→ Telegram), the cycle summary and the
+    cio_actions row. A drill whose analysts failed must not read as clean."""
+    canned = {("AAA", "curated_a"): CIODecision(
+        action="drill", ticker="AAA", thesis="curated_a",
+        rationale="x", confidence="high",
+    )}
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
+    run_id = state_db.start_graph_run("AAA", "curated_a")
+    state_db.record_error("risk", "llm: model gone", run_id=run_id)
+    state_db.record_error("fundamentals", "llm: model gone", run_id=run_id)
+    state_db.record_error("news", "unrelated run", run_id="some-other-run")
+
+    async def _fake_drill(ticker, thesis):
+        return {"run_id": run_id, "notion_report_url": "https://notion.example/report"}
+
+    monkeypatch.setattr(cio_mod, "_drill_one", _fake_drill)
+
+    plan, summary = await cio_mod.run_on_demand("AAA", "curated_a")
+
+    d = plan.decisions[0]
+    assert d.drill_run_id == run_id
+    assert d.report_url == "https://notion.example/report"
+    assert d.degraded == ["fundamentals", "risk"]
+    assert "[DEGRADED — failed steps: fundamentals, risk]" in summary
+
+    [action] = state_db.recent_cio_actions(ticker="AAA", thesis="curated_a")
+    assert action["drill_run_id"] == run_id
+    assert json.loads(action["decision_json"])["degraded"] == ["fundamentals", "risk"]
+
+
+@pytest.mark.asyncio
+async def test_failed_drill_is_called_out_in_the_summary(
+    isolated_db, fake_thesis_dir, stub_news, monkeypatch,
+):
+    canned = {("AAA", "curated_a"): CIODecision(
+        action="drill", ticker="AAA", thesis="curated_a",
+        rationale="x", confidence="high",
+    )}
+    monkeypatch.setattr(cio_planner, "decide", _stub_decide_factory(canned))
+
+    async def _broken_drill(ticker, thesis):
+        return None
+
+    monkeypatch.setattr(cio_mod, "_drill_one", _broken_drill)
+
+    plan, summary = await cio_mod.run_on_demand("AAA", "curated_a")
+    assert plan.decisions[0].drill_run_id is None
+    assert "[DRILL FAILED — no report]" in summary
+
+
+def _stub_graph(monkeypatch, final: dict[str, Any]) -> None:
+    import agents
+
+    async def _invoke(graph, state, **kw):
+        return dict(final)
+
+    monkeypatch.setattr(agents, "build_graph", lambda: object())
+    monkeypatch.setattr(agents, "invoke_with_telemetry", _invoke)
+
+
+@pytest.mark.asyncio
+async def test_drill_one_persists_the_report(monkeypatch):
+    """Regression (2026-11-11): the CIO ran the graph and dropped the result —
+    no saved state, no Notion page, nothing in the reports index. It must go
+    through the same finish step as dashboard and Telegram drills."""
+    from ui import _runner
+
+    _stub_graph(monkeypatch, {"run_id": "r-1", "ticker": "AAA", "report": "# AAA"})
+    finished: list[tuple] = []
+
+    def _finish(final, thesis, slug):
+        finished.append((final["run_id"], thesis["slug"], slug))
+        final["notion_report_url"] = "https://notion.example/r-1"
+
+    monkeypatch.setattr(_runner, "finish_drill", _finish)
+
+    final = await cio_mod._drill_one("AAA", {"slug": "curated_a", "name": "A"})
+
+    assert finished == [("r-1", "curated_a", "curated_a")]
+    assert final["notion_report_url"] == "https://notion.example/r-1"
+
+
+@pytest.mark.asyncio
+async def test_drill_one_keeps_the_run_when_persisting_fails(isolated_db, monkeypatch):
+    """A save / Notion / index failure is recorded, but the drill still counts:
+    the run exists in state.db and the action must point at it."""
+    from ui import _runner
+
+    _stub_graph(monkeypatch, {"run_id": "r-2", "ticker": "AAA"})
+
+    def _boom(final, thesis, slug):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_runner, "finish_drill", _boom)
+
+    final = await cio_mod._drill_one("AAA", {"slug": "curated_a"})
+
+    assert final["run_id"] == "r-2"
+    [error] = state_db.errors_for_run("r-2")
+    assert error["agent"] == "report_save" and "disk full" in error["message"]
+    # … and it is what the cycle summary will name as the failed step.
+    assert cio_mod._failed_agents("r-2") == ["report_save"]
+
+
+def test_failed_agents_reads_run_scoped_errors(isolated_db):
+    assert cio_mod._failed_agents(None) == []
+    run_id = state_db.start_graph_run("AAA", "curated_a")
+    assert cio_mod._failed_agents(run_id) == []
+    state_db.record_error("filings", "ticker_not_ingested", run_id=run_id)
+    assert cio_mod._failed_agents(run_id) == ["filings"]

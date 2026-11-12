@@ -23,8 +23,11 @@ Each entry point:
      memoised per ticker); records a `cio_actions` row. A stale ticker the
      planner picks for a drill is ingested right before that drill.
   4. Applies the drill-budget cap (post-LLM).
-  5. Executes drills via the existing graph; records reuse / dismiss
-     directly without further computation.
+  5. Executes drills via the existing graph and persists each report
+     through `ui._runner.finish_drill` (disk, Notion, reports index);
+     stamps the outcome (run id, report link, failed agents) on the
+     decision; records reuse / dismiss directly without further
+     computation.
   6. Composes an exec summary, fires Telegram + Notion sends (Step 11.10
      wires `cio.notify`; until then we just log + persist the summary).
   7. Closes the `cio_runs` row with rolled-up counts + summary.
@@ -51,6 +54,7 @@ Tests stub:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from datetime import UTC, datetime
@@ -255,12 +259,14 @@ async def _auto_ingest(ticker: str, report: FreshnessReport) -> None:
             pass
 
 
-async def _drill_one(ticker: str, thesis: dict) -> str | None:
-    """Execute the existing LangGraph drill-in for a (ticker, thesis) pair.
+async def _drill_one(ticker: str, thesis: dict) -> dict | None:
+    """Execute the existing LangGraph drill-in for a (ticker, thesis) pair
+    and persist its report.
 
-    Returns the new graph_runs.run_id on success, None on failure. Failures
-    are logged but never raised — the CIO cycle continues with the next
-    pair so a single ticker outage doesn't break the heartbeat.
+    Returns the final graph state (`run_id`, plus `notion_report_url` when
+    Notion took the report) on success, None on failure. Failures are
+    logged but never raised — the CIO cycle continues with the next pair
+    so a single ticker outage doesn't break the heartbeat.
 
     Freshness / auto-ingest is NOT done here any more: `_run_cycle` probes
     every candidate before the planner decides, and `_execute_plan` runs
@@ -275,10 +281,44 @@ async def _drill_one(ticker: str, thesis: dict) -> str | None:
         final = await invoke_with_telemetry(
             graph, {"ticker": ticker.upper(), "thesis": thesis}, source="cio"
         )
-        return final.get("run_id")
     except Exception as e:
         logger.error(f"[cio.cio] _drill_one({ticker}, {thesis.get('slug')}) failed: {e}")
         return None
+    # A drill is not done until its report is saved. Guarded separately so a
+    # persistence failure still leaves the run recorded against this action.
+    try:
+        from ui._runner import finish_drill
+
+        finish_drill(final, thesis, thesis.get("slug") or "general")
+    except Exception as e:
+        logger.error(f"[cio.cio] persisting the {ticker} drill failed: {e}")
+        with contextlib.suppress(Exception):
+            state_db.record_error(
+                agent="report_save",
+                message=f"report for {ticker} not saved: {e}",
+                run_id=final.get("run_id"),
+            )
+    return final
+
+
+def _failed_agents(run_id: str | None) -> list[str]:
+    """Steps that failed or logged a soft error during a drill — the same
+    derivation Mission Control uses for a "degraded" run. Mostly agents (a
+    drill can finish with a report while an analyst behind it produced
+    nothing), plus the post-drill steps `report_save` / `report_index`."""
+    if not run_id:
+        return []
+    try:
+        names = {e.get("agent") for e in state_db.errors_for_run(run_id)}
+        names |= {
+            n.get("node")
+            for n in state_db.node_runs_for_run(run_id)
+            if n.get("status") == "failed"
+        }
+    except Exception as e:
+        logger.warning(f"[cio.cio] degraded lookup failed for {run_id}: {e}")
+        return []
+    return sorted(n for n in names if n)
 
 
 # --- Cycle orchestration -------------------------------------------------
@@ -370,13 +410,19 @@ async def _execute_plan(
                     ingested.add(d.ticker)
                     await _auto_ingest(d.ticker, report)
                     drill_span.meta["ingested"] = True
-                drill_run_id = await _drill_one(d.ticker, thesis)
-                drill_span.meta["drill_run_id"] = drill_run_id
-                if drill_run_id is None:
+                final = await _drill_one(d.ticker, thesis)
+                if final is None:
                     drill_span.error = "drill failed — see the errors table"
+                else:
+                    d.drill_run_id = final.get("run_id")
+                    d.report_url = final.get("notion_report_url")
+                    d.degraded = _failed_agents(d.drill_run_id)
+                drill_span.meta["drill_run_id"] = d.drill_run_id
+                if d.degraded:
+                    drill_span.meta["degraded"] = d.degraded
             _record_decision(
                 cio_run_id=cio_run_id, trigger=trigger, decision=d,
-                drill_run_id=drill_run_id, telemetry=telemetry,
+                drill_run_id=d.drill_run_id, telemetry=telemetry,
             )
         else:
             _record_decision(
@@ -412,9 +458,14 @@ def _compose_summary(plan: Plan, *, trigger: str, duration_s: float) -> str:
         lines.append("Decisions:")
     for d in plan.decisions:
         thesis_part = f" / {d.thesis}" if d.thesis else ""
+        outcome = ""
+        if d.action == "drill" and not d.drill_run_id:
+            outcome = " [DRILL FAILED — no report]"
+        elif d.degraded:
+            outcome = f" [DEGRADED — failed steps: {', '.join(d.degraded)}]"
         lines.append(
             f"  • {d.action.upper()}: {d.ticker}{thesis_part} "
-            f"({d.confidence}) — {d.rationale[:200]}"
+            f"({d.confidence}){outcome} — {d.rationale[:200]}"
         )
     return "\n".join(lines)
 

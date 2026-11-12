@@ -26,7 +26,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import httpx
 from openai import OpenAI
+
+from utils import logger, tenacity_retry
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MAX_RETRIES = 3
@@ -216,6 +219,54 @@ def _install_telemetry_interceptor(client: Any) -> Any:
 
     client.chat.completions.create = _wrapped_create
     return client
+
+
+@tenacity_retry
+def _listed_model_ids(path: str) -> set[str]:
+    """Ids OpenRouter currently serves at `/{path}` (`models` or
+    `embeddings/models`). Both listings are public — no key is sent."""
+    resp = httpx.get(f"{OPENROUTER_BASE_URL}/{path}", timeout=15.0)
+    resp.raise_for_status()
+    return {str(m.get("id")) for m in resp.json().get("data") or []}
+
+
+def unavailable_models() -> dict[str, str]:
+    """Configured roles whose model OpenRouter no longer lists, as
+    `{env var: model id}`. Empty when everything resolves.
+
+    A retired model fails every call that uses it while the graph still
+    closes the run as completed, so nothing else reports it. Empty as well
+    when the chat listing can't be fetched or comes back empty: an outage
+    must not raise a false alarm.
+
+    Matching is deliberately lenient, to never flag a working model: a
+    `:variant` suffix falls back to its base id (routing variants are not
+    listed separately), and an embeddings id may omit its provider prefix.
+    The embeddings listing is fetched on its own — if it fails, only the
+    embeddings role goes unchecked, the chat roles still are.
+    """
+    from utils import models
+
+    try:
+        chat = _listed_model_ids("models")
+    except Exception as e:
+        logger.warning(f"[openrouter] model listing unavailable, skipping check: {e}")
+        return {}
+    if not chat:
+        return {}
+    roles = models.configured()
+    try:
+        embeddings = _listed_model_ids("embeddings/models")
+    except Exception as e:
+        logger.warning(f"[openrouter] embeddings listing unavailable: {e}")
+        embeddings = set()
+        roles.pop("MODEL_EMBEDDINGS", None)
+    known = chat | embeddings | {i.split("/", 1)[-1] for i in embeddings}
+    return {
+        name: model
+        for name, model in roles.items()
+        if model not in known and model.split(":", 1)[0] not in known
+    }
 
 
 def get_client() -> Any:
