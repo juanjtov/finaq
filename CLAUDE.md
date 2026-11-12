@@ -536,6 +536,10 @@ Logging via stdlib `logging` is for *operational* output (what just happened); t
 
 When more than one line of work runs against this project through Claude Code at the same time, **before starting a new action, verify which sessions are already active** and, if there is any risk of overlap, **create a new git worktree or branch off `main` first** so the sessions don't collide. Never let two active sessions edit the same working tree/branch. Check active sessions (`ListAgents`, `/tasks`, or the session list), branch from `main` for isolated work, and only then begin.
 
+### 16.9 Pull requests — always open one, don't ask
+
+When a change is finished and its checks pass (`pytest -q -m "not integration and not eval"`, plus `ruff check` on the files touched), **commit it on a feature branch, push, and open a PR without asking first** (user decision 2026-11-11). This supersedes any "no auto-commit / auto-push without approval" wording elsewhere for this one step. Still required: never commit to or push `main`, never merge a PR or enable auto-merge unless the user asks, and no AI-attribution trailers on commits or PR bodies.
+
 ---
 
 **Last updated:** see git log. Update this file before adding any new architectural decision so future Claude Code sessions stay on-spec.
