@@ -28,7 +28,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import os
 import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -40,6 +42,10 @@ from cio import notify as cio_notify
 from data import state as state_db
 from utils import logger
 from utils.openrouter import unavailable_models
+
+EXIT_GRACE_S = 30.0
+"""How long a clean interpreter shutdown may take before `_exit` stops
+waiting for worker threads. `asyncio.run` has already given them 300 s."""
 
 CATCHUP_THRESHOLD_HOURS = 8.0
 """If `last_successful_cio_run_at` is older than this, `--mode auto`
@@ -189,5 +195,35 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
+def _exit(code: int, *, grace_s: float = EXIT_GRACE_S) -> None:
+    """Exit normally, but never wait on a stuck worker thread for more than
+    `grace_s`.
+
+    `asyncio.to_thread` workers are not daemon threads: interpreter shutdown
+    joins them. One blocked in a network read keeps a finished process alive
+    for good, and launchd never starts the next cycle while the previous one
+    still exists. On 2026-11-12 a stalled EDGAR download did exactly that,
+    32 hours after its cycle had completed and notified. By the time we get
+    here the cycle is closed in state.db and the summary is sent; nothing a
+    leftover thread could still do is owed to anyone.
+
+    The watchdog is a daemon timer, so on a clean shutdown it dies with the
+    interpreter and never fires.
+    """
+
+    def _hard_exit() -> None:
+        sys.stderr.write(
+            f"[cio.dispatcher] worker thread still running {grace_s:.0f}s after the "
+            f"cycle ended; exiting without it\n"
+        )
+        sys.stderr.flush()
+        os._exit(code)
+
+    watchdog = threading.Timer(grace_s, _hard_exit)
+    watchdog.daemon = True
+    watchdog.start()
+    sys.exit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _exit(main())

@@ -97,6 +97,22 @@ def test_edgar_parse_filed_date_returns_none_when_pattern_absent(tmp_path):
     assert parse_filed_date(path) is None
 
 
+def test_edgar_downloader_http_calls_carry_a_timeout():
+    """sec-edgar-downloader calls `requests.get` with no timeout; a stalled
+    connection then blocks its thread forever. `data.edgar` bounds it through
+    a private seam of the library. This pins the seam: if an upgrade moves it,
+    this fails instead of downloads quietly going unbounded again."""
+    import inspect
+
+    from sec_edgar_downloader import _sec_gateway
+
+    from data import edgar
+
+    assert _sec_gateway.requests.get.keywords == {"timeout": edgar._SEC_DOWNLOAD_TIMEOUT}
+    # … and the library still reaches the network only through that attribute.
+    assert "requests.get(" in inspect.getsource(_sec_gateway)
+
+
 # --- data/yfin.py ------------------------------------------------------------
 
 

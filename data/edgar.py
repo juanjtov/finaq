@@ -19,7 +19,9 @@ import json
 import os
 import re
 import time
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 from sec_edgar_downloader import Downloader
@@ -27,6 +29,24 @@ from sec_edgar_downloader import Downloader
 from utils import logger, tenacity_retry
 
 EDGAR_DIR = Path("data_cache/edgar")
+
+# sec-edgar-downloader calls `requests.get` with no timeout, so a stalled
+# connection blocks its worker thread forever. On 2026-11-12 one such read
+# kept a finished CIO process alive and froze the schedule for 32 hours.
+# Bound its HTTP calls: (connect, seconds without a byte) — a filing can be
+# tens of MB, so the read side limits silence, not total time. A timeout
+# raises an OSError subclass, which `_fetch_kind`'s retry already covers.
+_SEC_DOWNLOAD_TIMEOUT = (10.0, 60.0)
+try:
+    # A private seam of the library: if an upgrade moves it we fall back to
+    # unbounded downloads rather than fail to import (a unit test pins it).
+    from sec_edgar_downloader import _sec_gateway
+
+    _sec_gateway.requests = SimpleNamespace(
+        get=partial(_sec_gateway.requests.get, timeout=_SEC_DOWNLOAD_TIMEOUT)
+    )
+except Exception as e:
+    logger.warning(f"[edgar] could not bound the downloader's HTTP calls: {e}")
 # Domestic filers (10-K + 10-Q) and foreign private issuers (20-F + 6-K) are
 # both covered. 6-K filings are press releases / interim disclosures attached
 # as exhibits — they don't follow Item-X structure so each lands as one

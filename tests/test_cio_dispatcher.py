@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -256,3 +259,48 @@ def test_preflight_is_silent_when_every_model_is_listed(
     )
     assert cio_dispatcher.main(["--mode", "heartbeat"]) == 0
     assert state_db.recent_errors() == []
+
+
+# --- Process exit (2026-11-13) ----------------------------------------------
+
+
+def test_exit_arms_a_daemon_watchdog_then_exits_normally(monkeypatch):
+    """Clean path: an ordinary SystemExit, with a daemon timer armed so a
+    stuck worker thread cannot hold the process past the grace period."""
+    armed: dict = {}
+
+    class _Timer:
+        def __init__(self, interval, fn):
+            armed.update(interval=interval, fn=fn)
+
+        def start(self):
+            armed.update(started=True, daemon=self.daemon)
+
+    monkeypatch.setattr(cio_dispatcher.threading, "Timer", _Timer)
+
+    with pytest.raises(SystemExit) as exc:
+        cio_dispatcher._exit(2, grace_s=7.0)
+
+    assert exc.value.code == 2
+    assert armed["interval"] == 7.0 and armed["started"] and armed["daemon"] is True
+
+
+def test_exit_leaves_despite_a_stuck_worker_thread():
+    """Regression (2026-11-12): a worker blocked in a network read kept the
+    finished dispatcher alive for 32 hours, and launchd skipped every cycle
+    behind it. Real process, real non-daemon thread that never returns."""
+    script = (
+        "import threading\n"
+        "threading.Thread(target=threading.Event().wait).start()\n"
+        "from cio import dispatcher\n"
+        "dispatcher._exit(3, grace_s=0.5)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    assert proc.returncode == 3, proc.stderr[-500:]
+    assert "exiting without it" in proc.stderr
