@@ -108,9 +108,32 @@ def test_edgar_downloader_http_calls_carry_a_timeout():
 
     from data import edgar
 
-    assert _sec_gateway.requests.get.keywords == {"timeout": edgar._SEC_DOWNLOAD_TIMEOUT}
+    assert _sec_gateway.requests.get is edgar._bounded_get
     # … and the library still reaches the network only through that attribute.
     assert "requests.get(" in inspect.getsource(_sec_gateway)
+
+
+def test_edgar_bounded_get_adds_the_timeout_and_logs_failures(monkeypatch, caplog):
+    """The default timeout is attached, an explicit one wins, and a failure is
+    logged before it propagates: the library swallows per-filing download
+    errors, so without this line a stalled body download leaves no trace."""
+    from data import edgar
+
+    seen: list[dict] = []
+    monkeypatch.setattr(edgar, "_unbounded_get", lambda *a, **kw: seen.append(kw) or "resp")
+
+    assert edgar._bounded_get("https://sec.example/x", headers={}) == "resp"
+    edgar._bounded_get("https://sec.example/x", timeout=5)
+    assert seen[0]["timeout"] == edgar._SEC_DOWNLOAD_TIMEOUT
+    assert seen[1]["timeout"] == 5
+
+    def _stalled(*a, **kw):
+        raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(edgar, "_unbounded_get", _stalled)
+    with caplog.at_level("WARNING", logger="finaq"), pytest.raises(TimeoutError):
+        edgar._bounded_get("https://sec.example/filing.txt")
+    assert "SEC request failed (https://sec.example/filing.txt)" in caplog.text
 
 
 # --- data/yfin.py ------------------------------------------------------------

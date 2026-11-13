@@ -209,15 +209,25 @@ def _exit(code: int, *, grace_s: float = EXIT_GRACE_S) -> None:
 
     The watchdog is a daemon timer, so on a clean shutdown it dies with the
     interpreter and never fires.
+
+    Reached only once `asyncio.run` has returned, which with a stuck worker
+    depends on its bounded executor join (300 s, Python 3.12+). On 3.11 that
+    join is unbounded and this guard would never get its turn.
     """
 
     def _hard_exit() -> None:
-        sys.stderr.write(
-            f"[cio.dispatcher] worker thread still running {grace_s:.0f}s after the "
-            f"cycle ended; exiting without it\n"
-        )
-        sys.stderr.flush()
-        os._exit(code)
+        # Nothing here may stop the exit: a closed or full stderr raising
+        # inside the timer thread would bring the hang straight back.
+        try:
+            with contextlib.suppress(Exception):
+                sys.stdout.flush()
+            sys.stderr.write(
+                f"[cio.dispatcher] worker thread still running {grace_s:.0f}s after "
+                f"the cycle ended; exiting without it\n"
+            )
+            sys.stderr.flush()
+        finally:
+            os._exit(code)
 
     watchdog = threading.Timer(grace_s, _hard_exit)
     watchdog.daemon = True

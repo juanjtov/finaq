@@ -285,22 +285,38 @@ def test_exit_arms_a_daemon_watchdog_then_exits_normally(monkeypatch):
     assert armed["interval"] == 7.0 and armed["started"] and armed["daemon"] is True
 
 
-def test_exit_leaves_despite_a_stuck_worker_thread():
-    """Regression (2026-11-12): a worker blocked in a network read kept the
-    finished dispatcher alive for 32 hours, and launchd skipped every cycle
-    behind it. Real process, real non-daemon thread that never returns."""
+def _exit_with_a_stuck_thread(before_exit: str = "") -> subprocess.CompletedProcess:
+    """Real process, real non-daemon thread that never returns. The import
+    comes first so a broken import fails fast instead of hanging the child
+    on its own thread."""
     script = (
-        "import threading\n"
-        "threading.Thread(target=threading.Event().wait).start()\n"
+        "import sys, threading\n"
         "from cio import dispatcher\n"
+        "threading.Thread(target=threading.Event().wait).start()\n"
+        f"{before_exit}\n"
         "dispatcher._exit(3, grace_s=0.5)\n"
     )
-    proc = subprocess.run(
+    return subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
         timeout=60,
         cwd=Path(__file__).resolve().parents[1],
     )
+
+
+def test_exit_leaves_despite_a_stuck_worker_thread():
+    """Regression (2026-11-12): a worker blocked in a network read kept the
+    finished dispatcher alive for 32 hours, and launchd skipped every cycle
+    behind it."""
+    proc = _exit_with_a_stuck_thread("print('buffered line')")
     assert proc.returncode == 3, proc.stderr[-500:]
     assert "exiting without it" in proc.stderr
+    assert "buffered line" in proc.stdout  # stdout is flushed before the hard exit
+
+
+def test_exit_leaves_even_when_stderr_is_unusable():
+    """The watchdog's own log line must not be able to stop the exit: a closed
+    or full stderr raising in the timer thread would bring the hang back."""
+    proc = _exit_with_a_stuck_thread("sys.stderr = None")
+    assert proc.returncode == 3

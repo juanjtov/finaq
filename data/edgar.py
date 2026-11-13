@@ -19,7 +19,6 @@ import json
 import os
 import re
 import time
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,17 +33,34 @@ EDGAR_DIR = Path("data_cache/edgar")
 # connection blocks its worker thread forever. On 2026-11-12 one such read
 # kept a finished CIO process alive and froze the schedule for 32 hours.
 # Bound its HTTP calls: (connect, seconds without a byte) — a filing can be
-# tens of MB, so the read side limits silence, not total time. A timeout
-# raises an OSError subclass, which `_fetch_kind`'s retry already covers.
+# tens of MB, so the read side limits silence, not total time.
 _SEC_DOWNLOAD_TIMEOUT = (10.0, 60.0)
+_unbounded_get = None  # the library's own `requests.get`, set below
+
+
+def _bounded_get(*args, **kwargs):
+    """`requests.get` with a timeout, for sec-edgar-downloader.
+
+    A failure on the filing index or metadata propagates to `_fetch_kind`,
+    whose retry covers it (timeouts are OSError subclasses). A failure on a
+    filing BODY does not: the library catches it per filing, prints to
+    stdout and moves on. So it is logged here, or a stalled download would
+    end as a quietly thinner corpus."""
+    kwargs.setdefault("timeout", _SEC_DOWNLOAD_TIMEOUT)
+    try:
+        return _unbounded_get(*args, **kwargs)
+    except Exception as e:
+        logger.warning(f"[edgar] SEC request failed ({args[0] if args else '?'}): {e}")
+        raise
+
+
 try:
     # A private seam of the library: if an upgrade moves it we fall back to
     # unbounded downloads rather than fail to import (a unit test pins it).
     from sec_edgar_downloader import _sec_gateway
 
-    _sec_gateway.requests = SimpleNamespace(
-        get=partial(_sec_gateway.requests.get, timeout=_SEC_DOWNLOAD_TIMEOUT)
-    )
+    _unbounded_get = _sec_gateway.requests.get
+    _sec_gateway.requests = SimpleNamespace(get=_bounded_get)
 except Exception as e:
     logger.warning(f"[edgar] could not bound the downloader's HTTP calls: {e}")
 # Domestic filers (10-K + 10-Q) and foreign private issuers (20-F + 6-K) are

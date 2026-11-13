@@ -1647,9 +1647,12 @@ and prefixes with `[budget cap]`.
   Three slots were skipped in silence. Two guards: `cio.dispatcher._exit`
   arms a daemon watchdog that hard-exits `EXIT_GRACE_S` after a clean
   shutdown should have finished, and `data.edgar` gives the downloader
-  library's HTTP calls a (connect, read-silence) timeout. A liveness
-  alert for "no cycle ran" is still missing — see POSTPONED §1
-  (Healthchecks ping, Step 12).
+  library's HTTP calls a (connect, read-silence) timeout and logs a
+  failed request itself (the library swallows per-filing download
+  errors). The exit guard is reached once `asyncio.run` returns, which
+  with a stuck worker relies on its bounded executor join (Python
+  3.12+). A liveness alert for "no cycle ran" is still missing — see
+  the revised Healthchecks row in POSTPONED §1.
 
 ### 12.8 Notification path: HTML Telegram + Notion mirror
 
