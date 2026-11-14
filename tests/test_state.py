@@ -1996,3 +1996,187 @@ def test_next_heartbeat_picks_the_next_configured_hour():
     assert st.next_heartbeat(at(4)).startswith("2026-10-16T05:00")
     assert st.next_heartbeat(at(6)).startswith("2026-10-16T13:00")
     assert st.next_heartbeat(at(14)).startswith("2026-10-17T05:00")
+
+
+# --- Phase 3: per-node soft failures (Health card) ---------------------------
+
+
+def _soft_run(
+    db: Path,
+    ticker: str,
+    *,
+    nodes: tuple[str, ...] = ("load_thesis", "fundamentals", "filings", "news"),
+    calls: tuple[str, ...] = ("fundamentals", "filings", "news"),
+    errors: tuple[tuple[str, str], ...] = (),
+    status: str = "completed",
+) -> str:
+    """One graph run: every node in `nodes` finished, one completed call per
+    node in `calls`, one errors row per (agent, message), then the run closed
+    with `status` (left open when 'running')."""
+    run_id = st.start_graph_run(ticker, "t", db_path=db)
+    for node in nodes:
+        nid = st.start_node_run(run_id, node, db_path=db)
+        st.finish_node_run(nid, "completed", duration_s=1.0, db_path=db)
+    for node in calls:
+        cid = st.start_llm_call(
+            run_id=run_id, node=node, model="m",
+            messages=[{"role": "user", "content": "q"}], db_path=db,
+        )
+        st.finish_llm_call(cid, status="completed", latency_s=0.1, response_text="a", db_path=db)
+    for agent, message in errors:
+        st.record_error(agent, message, run_id=run_id, db_path=db)
+    if status != "running":
+        st.finish_graph_run(run_id, status, duration_s=5.0, db_path=db)
+    time.sleep(0.002)  # distinct started_at ordering
+    return run_id
+
+
+_NOT_INGESTED = (
+    "ticker_not_ingested: {t} has zero chunks in the filings index. "
+    "Run `python -m scripts.ingest_universe {t}` (or `--thesis <slug>`)."
+)
+
+
+def test_soft_failures_empty(tmp_path: Path):
+    db = tmp_path / "t.db"
+    assert st.soft_failures(db_path=db) == {"window": 0, "rows": []}  # no file
+    st.init_db(db)
+    assert st.soft_failures(db_path=db) == {"window": 0, "rows": []}  # no runs
+    _soft_run(db, "A", errors=(("news", "finnhub: timeout"),), status="running")
+    _soft_run(db, "B", errors=(("news", "finnhub: timeout"),), status="failed")
+    # Only completed runs are in the window: nothing to count yet.
+    assert st.soft_failures(db_path=db) == {"window": 0, "rows": []}
+
+
+def test_soft_failures_groups_a_node_across_runs_by_masked_first_line(tmp_path: Path):
+    """The known case: Filings logs a per-ticker message and skips its call.
+    One bucket (ticker masked), one count per run even when logged twice,
+    the latest run's raw line as the example, no second 'no call' row."""
+    db = tmp_path / "t.db"
+    workers = ("fundamentals", "news")
+    _soft_run(db, "CAT", calls=workers, errors=(("filings", _NOT_INGESTED.format(t="CAT")),))
+    twice = ("filings", _NOT_INGESTED.format(t="GVA"))
+    _soft_run(db, "GVA", calls=workers, errors=(twice, twice))
+    _soft_run(db, "NVDA")  # clean: filings made its call
+    latest = _soft_run(
+        db, "CAT", calls=workers, errors=(("filings", _NOT_INGESTED.format(t="CAT")),)
+    )
+
+    out = st.soft_failures(db_path=db)
+    assert out["window"] == 4
+    [row] = out["rows"]
+    assert row["node"] == "filings"
+    assert (row["count"], row["share"], row["tickers"]) == (3, 0.75, 2)
+    assert row["signature"] == _NOT_INGESTED.format(t="<TICKER>")
+    assert row["reason"] == _NOT_INGESTED.format(t="CAT")
+    assert (row["last_run_id"], row["last_ticker"]) == (latest, "CAT")
+    assert row["last_started_at"] == st.get_graph_run(latest, db_path=db)["started_at"]
+
+
+def test_soft_failures_ignores_running_rows(tmp_path: Path):
+    """A run still in flight is outside the window; inside a completed run a
+    node row left 'running' is not a finished node, and an in-flight call row
+    still counts as a call."""
+    db = tmp_path / "t.db"
+    _soft_run(db, "A")  # clean; makes fundamentals / filings / news LLM nodes
+    _soft_run(db, "B", calls=(), errors=(("filings", "retrieval/mdna: boom"),), status="running")
+    rid = st.start_graph_run("C", "t", db_path=db)
+    st.start_node_run(rid, "news", db_path=db)  # never finished: no call, no error
+    nid = st.start_node_run(rid, "filings", db_path=db)
+    st.finish_node_run(nid, "completed", duration_s=1.0, db_path=db)
+    st.start_llm_call(run_id=rid, node="filings", model="m", db_path=db)  # still running
+    st.finish_graph_run(rid, "completed", duration_s=1.0, db_path=db)
+
+    out = st.soft_failures(db_path=db)
+    assert out["window"] == 2
+    assert out["rows"] == []
+
+
+def test_soft_failures_respects_the_window(tmp_path: Path):
+    db = tmp_path / "t.db"
+    ids = [
+        _soft_run(
+            db, t, calls=("fundamentals", "news"), errors=(("filings", "retrieval/mdna: boom"),)
+        )
+        for t in ("A", "B", "C")
+    ]
+    out = st.soft_failures(limit=2, db_path=db)
+    assert out["window"] == 2
+    [row] = out["rows"]
+    assert (row["count"], row["share"], row["last_run_id"]) == (2, 1.0, ids[-1])
+    assert st.soft_failures(db_path=db)["rows"][0]["count"] == 3
+
+
+def test_soft_failures_degraded_node_that_still_called_counts_once(tmp_path: Path):
+    """News logs a partial-source error but still makes its call: counted
+    under its error, never as 'finished without an LLM call'."""
+    db = tmp_path / "t.db"
+    _soft_run(db, "A", errors=(("news", "finnhub: slice 3 of 4 failed (status 429)"),))
+    _soft_run(db, "B", errors=(("news", "finnhub: slice 1 of 4 failed (status 503)"),))
+    out = st.soft_failures(db_path=db)
+    [row] = out["rows"]
+    assert (row["node"], row["count"], row["share"]) == ("news", 2, 1.0)
+    assert row["signature"] == "finnhub: slice # of # failed (status #)"
+    assert row["reason"] == "finnhub: slice 1 of 4 failed (status 503)"
+
+
+def test_soft_failures_flags_silent_skips_only_for_llm_nodes(tmp_path: Path):
+    """A node that called elsewhere in the window but finished a run without
+    a call and without logging is a silent skip; load_thesis (never calls)
+    is not."""
+    db = tmp_path / "t.db"
+    _soft_run(db, "A")
+    skipped = _soft_run(db, "B", calls=("fundamentals", "news"))
+    out = st.soft_failures(db_path=db)
+    [row] = out["rows"]
+    assert (row["node"], row["signature"], row["reason"]) == (
+        "filings",
+        st.NO_LLM_CALL,
+        st.NO_LLM_CALL,
+    )
+    assert (row["count"], row["share"], row["tickers"], row["last_run_id"]) == (1, 0.5, 1, skipped)
+
+
+def test_soft_failures_top_cap_and_first_line_only(tmp_path: Path):
+    db = tmp_path / "t.db"
+    trace = "llm: Error code: 404 - gone\nTraceback (most recent call last):\n  File x"
+    _soft_run(db, "A", errors=(("fundamentals", trace), ("risk", "llm: Connection error.")))
+    _soft_run(db, "B", errors=(("fundamentals", "llm: Error code: 404 - gone\n  other trace"),))
+    out = st.soft_failures(top=1, db_path=db)
+    [row] = out["rows"]
+    assert (row["node"], row["count"]) == ("fundamentals", 2)
+    assert row["reason"] == "llm: Error code: 404 - gone"
+    assert row["signature"] == "llm: Error code: # - gone"
+    rows = st.soft_failures(db_path=db)["rows"]
+    assert [(r["node"], r["count"]) for r in rows] == [("fundamentals", 2), ("risk", 1)]
+
+
+def test_soft_failures_reads_a_pre_v9_file_without_migrating(tmp_path: Path):
+    """The real state.db was still v8 when the card shipped: the helper uses
+    no v9-only column and, being a read, leaves the file at schema 8."""
+    db = tmp_path / "v8.db"
+    with sqlite3.connect(db) as conn:
+        conn.executescript(_V8_DDL)
+        conn.executescript(
+            """
+            CREATE TABLE errors (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                                 agent TEXT, message TEXT NOT NULL, run_id TEXT);
+            INSERT INTO node_runs (run_id, node, started_at, status)
+                VALUES ('r1', 'filings', '2026-10-01T00:00:00+00:00', 'completed');
+            INSERT INTO errors (ts, agent, message, run_id)
+                VALUES ('2026-10-01T00:00:30+00:00', 'filings',
+                        'ticker_not_ingested: NVDA has zero chunks in the filings index.', 'r1');
+            """
+        )
+    out = st.soft_failures(db_path=db)
+    assert out["window"] == 1
+    [row] = out["rows"]
+    assert (row["node"], row["count"], row["last_run_id"], row["last_ticker"]) == (
+        "filings",
+        1,
+        "r1",
+        "NVDA",
+    )
+    assert row["signature"] == "ticker_not_ingested: <TICKER> has zero chunks in the filings index."
+    assert _one(db, "SELECT value FROM meta WHERE key = 'schema_version'")["value"] == "8"
+    assert not V9_TABLES & _table_names(db)

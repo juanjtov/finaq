@@ -211,6 +211,10 @@ Plus: PDF export with the brand palette (sage `#2D4F3A` / parchment `#F4ECDC`), 
 | **Methodology**     | Per-thesis valuation parameters with rationale, Owner-Earnings DCF formula, full `FINANCE_ASSUMPTIONS.md` rendered.                     |
 | **Mission Control** | Live tab: the drill-in graph and CIO cycle as they run, every agent's prompts + output + telemetry; Runs tab: inspect or replay any run; Health tab: freshness, cost, errors, evals. |
 
+![Mission Control — Live tab during a drill-in](docs/diagrams/mission_control_live.png)
+
+Mission Control's Live tab mid drill-in: the control-room graph lights up each node as it runs, the ribbon shows the vitals and the ETA from past medians, and the drawer below carries every prompt and output the agents saw.
+
 ---
 
 ## Stack

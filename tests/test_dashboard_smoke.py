@@ -784,6 +784,44 @@ def test_runs_tab_preselects_run_from_session_state(tmp_path, monkeypatch):
     )
 
 
+def test_runs_tab_fetches_a_preselected_run_beyond_the_picker_window(tmp_path, monkeypatch):
+    """The soft-failures card's "Open →" names one of the 60 newest *completed*
+    runs, which can lie beyond the picker's newest-100-of-any-status list (a
+    retry storm of failed runs). The Runs tab must fetch that run on its own,
+    open on it without the "isn't among the newest" warning, and keep it in
+    the picker across reruns."""
+    import time as _time
+
+    from data import state as state_db
+
+    db = tmp_path / "ri4.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    older = state_db.start_graph_run("NU", "nu", db_path=db)
+    state_db.finish_graph_run(older, "completed", db_path=db)
+    _time.sleep(0.02)  # distinct started_at so the window excludes `older`
+    for _ in range(100):
+        rid = state_db.start_graph_run("NKE", "nke", db_path=db)
+        state_db.finish_graph_run(rid, "failed", error="boom", db_path=db)
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.session_state["inspect_run_id"] = older
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    sel = next((sb for sb in at.selectbox if sb.label == "Run"), None)
+    assert sel is not None
+    assert older[:8] in (sel.value or ""), f"expected {older[:8]}, got {sel.value!r}"
+    assert len(sel.options) == 101, "the fetched run joins the 100-run picker"
+    assert not any("isn't among the newest" in (w.value or "") for w in at.warning)
+    # A rerun (any widget interaction) keeps the fetched run selected.
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    sel = next((sb for sb in at.selectbox if sb.label == "Run"), None)
+    assert sel is not None
+    assert older[:8] in (sel.value or ""), f"rerun lost the pinned run: {sel.value!r}"
+
+
 def test_runs_tab_shows_cio_trigger_line(tmp_path, monkeypatch):
     """A run drilled by the CIO must show the 'triggered by CIO' backlink
     in the header; the helper is unit-tested directly."""
@@ -1130,3 +1168,77 @@ def test_health_open_button_jumps_to_runs_tab_with_that_run(tmp_path, monkeypatc
     sel = next(sb for sb in at.selectbox if sb.label == "Run")
     assert newer[:8] in (sel.value or "")
 
+
+
+# --- Mission Control v2, Phase 3: Health "Systemic soft failures" card ------
+
+
+def test_health_soft_failures_card_shows_the_pattern_and_opens_its_latest_run(
+    tmp_path, monkeypatch
+):
+    """Filings skipped its call with a per-ticker error in two of three
+    completed runs: the Health tab shows ONE row for the pattern with the
+    count in words and the ticker masked in its signature, and the row's
+    "Open →" lands on the latest affected run in the Runs tab."""
+    import time as _time
+
+    from data import state as state_db
+
+    db = tmp_path / "soft.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    msg = "ticker_not_ingested: {t} has zero chunks in the filings index."
+    affected = []
+    for ticker in ("CAT", "GVA"):
+        rid = state_db.start_graph_run(ticker, "construction", db_path=db)
+        nid = state_db.start_node_run(rid, "filings", db_path=db)
+        state_db.finish_node_run(nid, "completed", duration_s=0.3, db_path=db)
+        state_db.record_error("filings", msg.format(t=ticker), run_id=rid, db_path=db)
+        state_db.finish_graph_run(rid, "completed", duration_s=20.0, db_path=db)
+        affected.append(rid)
+        _time.sleep(0.02)  # distinct started_at so "latest" is deterministic
+    clean = state_db.start_graph_run("NVDA", "nu", db_path=db)
+    nid = state_db.start_node_run(clean, "filings", db_path=db)
+    state_db.finish_node_run(nid, "completed", duration_s=0.3, db_path=db)
+    cid = state_db.start_llm_call(run_id=clean, node="filings", model="m", db_path=db)
+    state_db.finish_llm_call(cid, status="completed", latency_s=0.1, db_path=db)
+    state_db.finish_graph_run(clean, "completed", duration_s=20.0, db_path=db)
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.session_state["mc_tabs"] = "Health"
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    blob = " ".join(m.value for m in at.markdown)
+    assert "Systemic soft failures" in blob
+    assert "worst: **filings** in 2 of 3 (67%, systemic)" in blob
+    assert "2 / 3" in blob and "2 tickers" in blob
+    assert "ticker_not_ingested: &lt;TICKER&gt; has zero chunks" in blob  # signature
+    assert "ticker_not_ingested: GVA has zero chunks" in blob  # latest run's raw line
+
+    latest = affected[-1]
+    open_btn = next(b for b in at.button if b.key == f"soft_open_0_{latest}")
+    open_btn.click().run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    assert at.session_state["mc_tabs"] == "Runs"
+    sel = next(sb for sb in at.selectbox if sb.label == "Run")
+    assert latest[:8] in (sel.value or "")
+
+
+def test_health_soft_failures_card_states_a_clean_window_in_words(tmp_path, monkeypatch):
+    from data import state as state_db
+
+    db = tmp_path / "clean.db"
+    monkeypatch.setattr(state_db, "DB_PATH", db)
+    rid = state_db.start_graph_run("NVDA", "nu", db_path=db)
+    state_db.finish_graph_run(rid, "completed", duration_s=20.0, db_path=db)
+
+    at = AppTest.from_file(
+        str(PAGES_DIR / "mission_control.py"), default_timeout=DASHBOARD_TIMEOUT_S
+    )
+    at.session_state["mc_tabs"] = "Health"
+    at.run()
+    assert not at.exception, f"page raised: {[e.message for e in at.exception]}"
+    blob = " ".join(m.value for m in at.markdown)
+    assert "✅ **No soft failures** in the last 1 completed runs" in blob
+    assert not [b for b in at.button if (b.key or "").startswith("soft_open_")]

@@ -78,6 +78,13 @@ NODE_ORDER = (
     "risk", "monte_carlo", "synthesis",
 )
 
+# Health tab "Systemic soft failures" card: window of completed runs it reads,
+# and the share of that window at which a pattern is called systemic /
+# recurring (below that: occasional).
+SOFT_FAILURE_WINDOW = 60
+SOFT_SYSTEMIC_SHARE = 0.5
+SOFT_RECURRING_SHARE = 0.1
+
 
 # --- Live tab ---------------------------------------------------------------
 
@@ -669,10 +676,27 @@ def _jump_to_run(run_id: str) -> None:
     st.rerun()
 
 
+def _run_label(r: dict) -> str:
+    """Picker label: `ticker × thesis · status · started · id8`."""
+    ts = (r.get("started_at") or "")[:16].replace("T", " ")
+    return (
+        f"{r.get('ticker', '?')} × {r.get('thesis', '?')} · "
+        f"{r.get('status', '?')} · {ts} · {(r.get('run_id') or '')[:8]}"
+    )
+
+
 def render_runs_tab() -> None:
     st.markdown(_RI_CSS, unsafe_allow_html=True)
     # Not cached: the picker must reflect a run that just landed.
     runs = state_db.recent_runs(limit=100)
+    # A run opened from beyond that window (see the unmatched-preselect branch
+    # below) stays at the top of the picker for the session, so a rerun — any
+    # widget interaction — doesn't drop it and snap back to the newest run.
+    pinned = st.session_state.get("mc_pinned_run")
+    if pinned and all(r.get("run_id") != pinned for r in runs):
+        extra = state_db.get_graph_run(pinned)
+        if extra:
+            runs.insert(0, extra)
     if not runs:
         st.warning(
             "No graph runs in `data_cache/state.db` yet. Run a drill-in from "
@@ -682,13 +706,7 @@ def render_runs_tab() -> None:
 
     # Run picker — labels show `ticker × thesis · status · started`. Newest
     # first so the most recent run is the default.
-    labels: list[str] = []
-    for r in runs:
-        ts = (r.get("started_at") or "")[:16].replace("T", " ")
-        labels.append(
-            f"{r.get('ticker', '?')} × {r.get('thesis', '?')} · "
-            f"{r.get('status', '?')} · {ts} · {(r.get('run_id') or '')[:8]}"
-        )
+    labels = [_run_label(r) for r in runs]
 
     # A stored selection may reference a run that scrolled out of the
     # 100-run window — drop it so the selectbox doesn't raise.
@@ -711,6 +729,17 @@ def render_runs_tab() -> None:
                 st.session_state["run_select"] = lbl
                 matched = True
                 break
+        if not matched:
+            # Health's soft-failures card reaches the 60 newest *completed*
+            # runs and a deep link any id, both of which can lie beyond the
+            # newest 100 of any status: fetch the run on its own and pin it.
+            extra = state_db.get_graph_run(str(preselect))
+            if extra:
+                runs.insert(0, extra)
+                labels.insert(0, _run_label(extra))
+                st.session_state["run_select"] = labels[0]
+                st.session_state["mc_pinned_run"] = extra["run_id"]
+                matched = True
         if not matched:
             st.warning(
                 f"Run `{str(preselect)[:8]}…` isn't among the newest "
@@ -1182,6 +1211,9 @@ _MC_CSS = """
 .mcrow .spill.deg { background: #F5EBD2; color: #9A6B1F; border: 1px solid #DCC791; }
 .mcrow .spill.fail { background: #A33D2E; color: #FFFFFF; }
 .mcrow .spill.run { background: #FFFFFF; color: #2D4F3A; border: 1px dashed #2D4F3A; }
+.mcrow .spill.low { background: #FFFFFF; color: #6B6152; border: 1px solid #E0D5C2; }
+/* Systemic soft failures — same row chrome, one row per (node, error signature). */
+.mcrow.mcsoft { grid-template-columns: 112px 104px 70px 52px 84px 150px minmax(120px, 1fr); }
 </style>
 """
 
@@ -1307,6 +1339,77 @@ def _render_runs_table(runs_all: list[dict]) -> None:
             _jump_to_run(rid)
 
 
+def _soft_severity(share: float) -> str:
+    if share >= SOFT_SYSTEMIC_SHARE:
+        return "systemic"
+    return "recurring" if share >= SOFT_RECURRING_SHARE else "occasional"
+
+
+def render_soft_failures_panel() -> None:
+    """Health — Mission Control v2 Phase 3. The per-run ⚠️ degraded badge as a
+    per-node trend: over the last SOFT_FAILURE_WINDOW completed runs, how
+    often each node logged an error or finished without an LLM call, grouped
+    by the error's first line (`state_db.soft_failures`). "Open →" lands on
+    the latest affected run in the Runs tab."""
+    st.markdown("### Systemic soft failures")
+    data = state_db.soft_failures(limit=SOFT_FAILURE_WINDOW)
+    window, rows = int(data["window"]), list(data["rows"])
+    st.caption(
+        f"Per node, over the last {SOFT_FAILURE_WINDOW} completed drill-ins: runs where "
+        "the node logged an error, or finished without an LLM call. The same signal as a "
+        "run's ⚠️ degraded badge, as a trend. Rows group by the error's first line with "
+        "the run's ticker and numbers masked; the reason shown is the latest run's line."
+    )
+    if window == 0:
+        st.caption("No completed runs yet.")
+        return
+    if not rows:
+        st.markdown(f"✅ **No soft failures** in the last {window} completed runs.")
+        return
+    worst = rows[0]
+    st.markdown(
+        f"⚠️ **{len(rows)} soft-failure pattern{'s' if len(rows) != 1 else ''}** in the "
+        f"last {window} completed runs · worst: **{html.escape(str(worst['node']))}** in "
+        f"{worst['count']} of {window} ({worst['share']:.0%}, {_soft_severity(worst['share'])})."
+    )
+
+    head = st.columns(_RUN_COLS, vertical_alignment="center")
+    head[0].markdown(
+        '<div class="mcrow mcsoft mchead"><span>Severity</span><span>Node</span>'
+        "<span>Runs</span><span>Share</span><span>Tickers</span><span>Latest</span>"
+        "<span>Reason</span></div>",
+        unsafe_allow_html=True,
+    )
+    head[1].markdown("&nbsp;", unsafe_allow_html=True)
+    for i, row in enumerate(rows):
+        sev = _soft_severity(float(row["share"]))
+        glyph, pill = ("⚠️", "deg") if sev != "occasional" else ("·", "low")
+        rowcls = "deg" if sev == "systemic" else ""
+        latest = (
+            f"{str(row.get('last_started_at') or '')[5:16].replace('T', ' ')} · "
+            f"{html.escape(str(row.get('last_ticker') or '?'))}"
+        )
+        n_t = int(row.get("tickers") or 0)
+        reason = html.escape(str(row.get("reason") or row.get("signature") or ""))
+        signature = html.escape(str(row.get("signature") or ""))
+        rid = str(row.get("last_run_id") or "")
+        row_html = (
+            f'<div class="mcrow mcsoft {rowcls}">'
+            f'<span><span class="spill {pill}">{glyph} {sev}</span></span>'
+            f'<span class="tk">{html.escape(str(row["node"]))}</span>'
+            f'<span class="mono">{int(row["count"])} / {window}</span>'
+            f'<span class="mono">{float(row["share"]):.0%}</span>'
+            f'<span class="muted">{n_t} ticker{"s" if n_t != 1 else ""}</span>'
+            f'<span class="mono">{latest}</span>'
+            f'<span class="muted" title="{signature}">{reason}</span>'
+            "</div>"
+        )
+        cols = st.columns(_RUN_COLS, vertical_alignment="center")
+        cols[0].markdown(row_html, unsafe_allow_html=True)
+        if cols[1].button("Open →", key=f"soft_open_{i}_{rid}", use_container_width=True):
+            _jump_to_run(rid)
+
+
 def render_state_db_panel() -> None:
     """Step 5z observability — reads from data/state.py SQLite telemetry."""
     st.markdown("### Drill-in runs")
@@ -1328,8 +1431,6 @@ def render_state_db_panel() -> None:
             "`data_cache/state.db`."
         )
         return
-
-    st.markdown(_MC_CSS, unsafe_allow_html=True)
 
     summary = state_db.health_summary()
     spend = state_db.cost_today()
@@ -1651,11 +1752,14 @@ def render_notion_panel() -> None:
 
 
 def render_health_tab() -> None:
+    st.markdown(_MC_CSS, unsafe_allow_html=True)  # runs table + soft-failures rows
     render_freshness_panel()
     section_divider()
     render_filings_freshness_panel()
     section_divider()
     render_state_db_panel()
+    section_divider()
+    render_soft_failures_panel()
     section_divider()
     render_notion_panel()
     section_divider()
