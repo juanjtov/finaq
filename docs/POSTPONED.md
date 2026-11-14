@@ -41,7 +41,7 @@ Three categories:
 | Runs tab CIO panel (was: Run Inspector) | 11 | Recent CIO cycles + per-cycle decisions (drill/reuse/dismiss) with rationale. Lives in Mission Control's Runs tab since Mission Control v2 Phase 2. |
 | Mission Control CIO rows | 11 | Last 20 CIO actions + last 10 cio_runs aggregate (Health tab). |
 | Mission Control Live tab | MC v2 Phase 2 | Shipped 2026-10-21: the control-room graph, CIO ribbon, fleet, waterfall and prompt drawer over `live_snapshot()`; replay in the Runs tab. |
-| `~ Healthchecks.io ping ~` | ~~11~~ | Replaced — the launchd `RunAtLoad=true` + dispatcher freshness gate produces a catchup cycle on the next wake; no external liveness watcher needed for a single-user Mac path. Re-add for droplet (Step 12) where boot-path catchup doesn't apply. |
+| `~ Healthchecks.io ping ~` | ~~11~~ | Replaced — the launchd `RunAtLoad=true` + dispatcher freshness gate produces a catchup cycle on the next wake; no external liveness watcher needed for a single-user Mac path. Re-add for droplet (Step 12) where boot-path catchup doesn't apply. **Revised 2026-11-13:** that reasoning assumed the dispatcher process always ends. On 2026-11-12 it did not (ARCHITECTURE §12.7): three slots were skipped and nothing said so, because the catch-up itself never got to start. The exit guard removes that cause, but "no cycle ran" still has no alert on the Mac path. Trigger to build it before Step 12: one more missed slot that the lid being closed does not explain. |
 | `journalctl` on the droplet | 12 | SSH-time deep dive into systemd unit logs. |
 
 ---

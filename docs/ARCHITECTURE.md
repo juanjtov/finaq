@@ -1656,6 +1656,21 @@ and prefixes with `[budget cap]`.
   so a single missed slot produces exactly one catchup. The threshold
   is a constant in `cio.dispatcher`; bump it if heartbeat cadence
   changes.
+- **Revised because (2026-11-13):** the whole scheme assumes the
+  dispatcher process ends — launchd never starts a job whose previous
+  instance still exists. On 2026-11-12 a cycle completed and notified,
+  then stayed alive for 32 hours: an auto-ingest that had timed out
+  left its worker thread blocked in an EDGAR download with no network
+  timeout, and interpreter shutdown joins `asyncio.to_thread` workers.
+  Three slots were skipped in silence. Two guards: `cio.dispatcher._exit`
+  arms a daemon watchdog that hard-exits `EXIT_GRACE_S` after a clean
+  shutdown should have finished, and `data.edgar` gives the downloader
+  library's HTTP calls a (connect, read-silence) timeout and logs a
+  failed request itself (the library swallows per-filing download
+  errors). The exit guard is reached once `asyncio.run` returns, which
+  with a stuck worker relies on its bounded executor join (Python
+  3.12+). A liveness alert for "no cycle ran" is still missing — see
+  the revised Healthchecks row in POSTPONED §1.
 
 ### 12.8 Notification path: HTML Telegram + Notion mirror
 

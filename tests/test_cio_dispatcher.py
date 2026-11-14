@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -256,3 +259,64 @@ def test_preflight_is_silent_when_every_model_is_listed(
     )
     assert cio_dispatcher.main(["--mode", "heartbeat"]) == 0
     assert state_db.recent_errors() == []
+
+
+# --- Process exit (2026-11-13) ----------------------------------------------
+
+
+def test_exit_arms_a_daemon_watchdog_then_exits_normally(monkeypatch):
+    """Clean path: an ordinary SystemExit, with a daemon timer armed so a
+    stuck worker thread cannot hold the process past the grace period."""
+    armed: dict = {}
+
+    class _Timer:
+        def __init__(self, interval, fn):
+            armed.update(interval=interval, fn=fn)
+
+        def start(self):
+            armed.update(started=True, daemon=self.daemon)
+
+    monkeypatch.setattr(cio_dispatcher.threading, "Timer", _Timer)
+
+    with pytest.raises(SystemExit) as exc:
+        cio_dispatcher._exit(2, grace_s=7.0)
+
+    assert exc.value.code == 2
+    assert armed["interval"] == 7.0 and armed["started"] and armed["daemon"] is True
+
+
+def _exit_with_a_stuck_thread(before_exit: str = "") -> subprocess.CompletedProcess:
+    """Real process, real non-daemon thread that never returns. The import
+    comes first so a broken import fails fast instead of hanging the child
+    on its own thread."""
+    script = (
+        "import sys, threading\n"
+        "from cio import dispatcher\n"
+        "threading.Thread(target=threading.Event().wait).start()\n"
+        f"{before_exit}\n"
+        "dispatcher._exit(3, grace_s=0.5)\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+
+
+def test_exit_leaves_despite_a_stuck_worker_thread():
+    """Regression (2026-11-12): a worker blocked in a network read kept the
+    finished dispatcher alive for 32 hours, and launchd skipped every cycle
+    behind it."""
+    proc = _exit_with_a_stuck_thread("print('buffered line')")
+    assert proc.returncode == 3, proc.stderr[-500:]
+    assert "exiting without it" in proc.stderr
+    assert "buffered line" in proc.stdout  # stdout is flushed before the hard exit
+
+
+def test_exit_leaves_even_when_stderr_is_unusable():
+    """The watchdog's own log line must not be able to stop the exit: a closed
+    or full stderr raising in the timer thread would bring the hang back."""
+    proc = _exit_with_a_stuck_thread("sys.stderr = None")
+    assert proc.returncode == 3
